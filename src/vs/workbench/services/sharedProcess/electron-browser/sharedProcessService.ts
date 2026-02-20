@@ -28,7 +28,7 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 	private readonly withSharedProcessConnection: Promise<ISharedProcessConnection>;
 
 	private readonly restoredBarrier = new Barrier();
-	private readonly isElectrobunRuntime = process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun';
+	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true';
 
 	constructor(
 		readonly windowId: number,
@@ -41,10 +41,10 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 
 	private async connect(): Promise<ISharedProcessConnection> {
 		this.logService.trace('Renderer->SharedProcess#connect');
-		if (this.isElectrobunRuntime) {
-			this.logService.warn('Renderer->SharedProcess#connect: MessagePort transport unavailable on Electrobun runtime, using no-op shared process connection.');
+		if (this.disableMessagePortTransport) {
+			this.logService.warn('Renderer->SharedProcess#connect: MessagePort transport disabled via VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT, using no-op shared process connection.');
 			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('SHARED_PROCESS_DISABLED_ELECTROBUN')}`);
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('SHARED_PROCESS_MESSAGEPORT_DISABLED_BY_ENV')}`);
 			} catch {
 				// ignore diagnostic failures
 			}
@@ -103,7 +103,7 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 	}
 
 	async createRawConnection(): Promise<MessagePort> {
-		if (this.isElectrobunRuntime) {
+		if (this.disableMessagePortTransport) {
 			const fallbackChannel = new MessageChannel();
 			return fallbackChannel.port1;
 		}

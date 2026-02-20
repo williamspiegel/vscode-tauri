@@ -11,6 +11,10 @@ const runtimeDebug = process.env["VSCODE_ELECTROBUN_DEBUG"] === "1";
 const vscodeWindowConfigurations = new Map();
 const vscodeWindowConfigurationsByChannel = new Map();
 const rendererHostWebviewIds = new Map();
+const rendererEventBridge = {
+	send: undefined,
+	registerTransferPort: undefined,
+};
 const runtimeDiagLogPath =
 	process.env["VSCODE_ELECTROBUN_DIAG_LOG"] ||
 	path.join(
@@ -44,6 +48,29 @@ function serializeIpcArgForRenderer(value) {
 				new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
 			),
 		};
+	}
+	return value;
+}
+
+function reviveSerializedIpcArg(value) {
+	if (value instanceof ArrayBuffer) {
+		return Buffer.from(value);
+	}
+	if (ArrayBuffer.isView(value)) {
+		return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+	}
+	if (value && typeof value === "object") {
+		if (value.type === "Buffer" && Array.isArray(value.data)) {
+			return Buffer.from(value.data);
+		}
+		const keys = Object.keys(value);
+		if (keys.length > 0 && keys.every((key) => /^\d+$/.test(key))) {
+			const sortedNumericKeys = keys.sort((a, b) => Number(a) - Number(b));
+			const bytes = Uint8Array.from(
+				sortedNumericKeys.map((key) => Number(value[key]) || 0),
+			);
+			return Buffer.from(bytes);
+		}
 	}
 	return value;
 }
@@ -351,8 +378,85 @@ try {
 
 	const __electrobunObj = window.__electrobun ?? (window.__electrobun = {});
 	const __previousReceive = __electrobunObj.receiveInternalMessageFromBun;
-	const __vscodeOutgoingBatch = [];
-	let __vscodeOutgoingBatchTimer = 0;
+	const __vscodeOutgoingQueue = [];
+	const __vscodeInFlightBatches = [];
+	const __vscodeVirtualPorts = new Map();
+	let __vscodeBridgeBusy = false;
+
+	function __vscodeRetainBatch(batch) {
+		__vscodeInFlightBatches.push(batch);
+		setTimeout(() => {
+			const index = __vscodeInFlightBatches.indexOf(batch);
+			if (index >= 0) {
+				__vscodeInFlightBatches.splice(index, 1);
+			}
+		}, 250);
+	}
+
+	function __vscodeEnsureVirtualPort(portId) {
+		if (!portId) {
+			return undefined;
+		}
+		const existing = __vscodeVirtualPorts.get(portId);
+		if (existing?.clientPort) {
+			return existing.clientPort;
+		}
+		const channel = new MessageChannel();
+		const clientPort = channel.port1;
+		const bridgePort = channel.port2;
+		bridgePort.onmessage = (event) => {
+			const payload = event?.data;
+			let serializedData = payload;
+			if (payload instanceof ArrayBuffer) {
+				serializedData = { type: 'Buffer', data: Array.from(new Uint8Array(payload)) };
+			} else if (ArrayBuffer.isView(payload)) {
+				serializedData = {
+					type: 'Buffer',
+					data: Array.from(new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength))
+				};
+			}
+			__vscodePost({
+				type: 'message',
+				id: 'vscodeVirtualPortPost',
+				payload: {
+					portId,
+					data: serializedData,
+					windowId: window.__electrobunWindowId,
+					hostWebviewId: window.__electrobunWebviewId
+				}
+			});
+		};
+		bridgePort.start();
+		const entry = { clientPort, bridgePort };
+		__vscodeVirtualPorts.set(portId, entry);
+		return clientPort;
+	}
+
+	function __vscodeForwardVirtualPortMessage(portId, data) {
+		const entry = __vscodeVirtualPorts.get(portId);
+		if (!entry?.bridgePort) {
+			return;
+		}
+		try {
+			entry.bridgePort.postMessage(data);
+		} catch (error) {
+			console.error('[electrobun preload bootstrap] virtual port forward failed', error);
+		}
+	}
+
+	function __vscodeCloseVirtualPort(portId) {
+		const entry = __vscodeVirtualPorts.get(portId);
+		if (!entry) {
+			return;
+		}
+		try {
+			entry.bridgePort?.close?.();
+		} catch {}
+		try {
+			entry.clientPort?.close?.();
+		} catch {}
+		__vscodeVirtualPorts.delete(portId);
+	}
 
 	function __vscodeReviveArg(value) {
 		if (value && typeof value === 'object') {
@@ -383,14 +487,15 @@ try {
 		}
 	}
 
-	function __vscodePostRaw(batchEntries) {
+	function __vscodePostBatch(batch) {
 		try {
 			const bridge = window.__electrobunInternalBridge;
 			if (!bridge || typeof bridge.postMessage !== 'function') {
-				__vscodeReportRendererIssue('INTERNAL_BRIDGE_MISSING', batchEntries?.[0]?.type || 'unknown');
+				__vscodeReportRendererIssue('INTERNAL_BRIDGE_MISSING', 'vscode-ipc');
 				return false;
 			}
-			bridge.postMessage(JSON.stringify(batchEntries.map(entry => JSON.stringify(entry))));
+			__vscodeRetainBatch(batch);
+			bridge.postMessage(batch);
 			return true;
 		} catch (error) {
 			console.error('[electrobun preload bootstrap] postMessage failed', error);
@@ -399,24 +504,41 @@ try {
 		}
 	}
 
-	function __vscodeFlushOutgoingBatch() {
-		__vscodeOutgoingBatchTimer = 0;
-		if (__vscodeOutgoingBatch.length === 0) {
+	function __vscodeProcessOutgoingQueue() {
+		if (__vscodeBridgeBusy) {
+			setTimeout(__vscodeProcessOutgoingQueue, 1);
 			return;
 		}
-		const batch = __vscodeOutgoingBatch.splice(0, __vscodeOutgoingBatch.length);
-		__vscodePostRaw(batch);
+		if (__vscodeOutgoingQueue.length === 0) {
+			return;
+		}
+		__vscodeBridgeBusy = true;
+		const batchEntries = __vscodeOutgoingQueue.splice(0, Math.min(__vscodeOutgoingQueue.length, 16));
+		const batch = JSON.stringify(batchEntries);
+		const posted = __vscodePostBatch(batch);
+		if (!posted) {
+			__vscodeOutgoingQueue.unshift(...batchEntries);
+			__vscodeBridgeBusy = false;
+			return;
+		}
+		// Keep a delay between bridge calls to avoid JSCallback threading corruption
+		// seen under heavy VS Code startup traffic.
+		setTimeout(() => {
+			__vscodeBridgeBusy = false;
+			__vscodeProcessOutgoingQueue();
+		}, 6);
 	}
 
 	function __vscodePost(entry) {
-		if (entry?.type === 'message') {
-			__vscodeOutgoingBatch.push(entry);
-			if (!__vscodeOutgoingBatchTimer) {
-				__vscodeOutgoingBatchTimer = setTimeout(__vscodeFlushOutgoingBatch, 0);
-			}
-			return true;
+		try {
+			__vscodeOutgoingQueue.push(JSON.stringify(entry));
+		} catch (error) {
+			console.error('[electrobun preload bootstrap] failed to serialize IPC payload', error);
+			__vscodeReportRendererIssue('INTERNAL_BRIDGE_SERIALIZE_FAILED', error?.stack || String(error));
+			return false;
 		}
-		return __vscodePostRaw([entry]);
+		__vscodeProcessOutgoingQueue();
+		return true;
 	}
 
 	__electrobunObj.receiveInternalMessageFromBun = (message) => {
@@ -445,11 +567,25 @@ try {
 						return;
 					}
 				}
-				if (message.type === 'event' && typeof message.channel === 'string') {
-					const revivedArgs = Array.isArray(message.args) ? message.args.map(__vscodeReviveArg) : [];
-					__vscodeEmit(message.channel, revivedArgs);
-					return;
-				}
+					if (message.type === 'event' && typeof message.channel === 'string') {
+						const revivedArgs = Array.isArray(message.args) ? message.args.map(__vscodeReviveArg) : [];
+						if (message.channel === 'vscode:__virtualPortMessage') {
+							const portId = typeof revivedArgs[0] === 'string' ? revivedArgs[0] : String(revivedArgs[0] ?? '');
+							if (portId) {
+								__vscodeForwardVirtualPortMessage(portId, revivedArgs[1]);
+							}
+							return;
+						}
+						if (message.channel === 'vscode:__virtualPortClose') {
+							const portId = typeof revivedArgs[0] === 'string' ? revivedArgs[0] : String(revivedArgs[0] ?? '');
+							if (portId) {
+								__vscodeCloseVirtualPort(portId);
+							}
+							return;
+						}
+						__vscodeEmit(message.channel, revivedArgs);
+						return;
+					}
 			}
 		} catch (error) {
 			console.error('[electrobun preload bootstrap] receive handler failed', error);
@@ -554,6 +690,7 @@ try {
 	__process.arch = __process.arch || ${JSON.stringify(process.arch)};
 	__process.argv = Array.isArray(__process.argv) ? [...__process.argv, ...__vscodeArgs] : ['bun', 'renderer', ...__vscodeArgs];
 	__process.env = __process.env ?? {};
+	__process.env['VSCODE_DESKTOP_RUNTIME'] = 'electrobun';
 	__process.versions = __process.versions ?? {};
 	__process.execPath = __process.execPath || ${JSON.stringify(process.execPath)};
 	__process.getProcessMemoryInfo = __process.getProcessMemoryInfo || (() => Promise.resolve({}));
@@ -676,21 +813,32 @@ try {
 	if (!window.vscode) {
 		window.vscode = {
 			ipcRenderer,
-			ipcMessagePort: {
-				acquire(responseChannel, nonce) {
-					if (!responseChannel || !nonce) {
-						return;
-					}
-					const responseListener = (event, responseNonce) => {
-						if (responseNonce !== nonce) {
+				ipcMessagePort: {
+					acquire(responseChannel, nonce) {
+						if (!responseChannel || !nonce) {
 							return;
 						}
-						ipcRenderer.off(responseChannel, responseListener);
-						window.postMessage(nonce, '*', event?.ports ?? []);
-					};
-					ipcRenderer.on(responseChannel, responseListener);
-				}
-			},
+						const responseListener = (event, responseNonce, responseMetadata) => {
+							if (responseNonce !== nonce) {
+								return;
+							}
+							ipcRenderer.off(responseChannel, responseListener);
+							let ports = Array.isArray(event?.ports) ? event.ports : [];
+							if (ports.length === 0 && responseMetadata && typeof responseMetadata === 'object') {
+								const tokens = Array.isArray(responseMetadata.__vscodePortTokens)
+									? responseMetadata.__vscodePortTokens
+									: [];
+								if (tokens.length > 0) {
+									ports = tokens
+										.map((token) => __vscodeEnsureVirtualPort(String(token)))
+										.filter(Boolean);
+								}
+							}
+							window.postMessage(nonce, '*', ports);
+						};
+						ipcRenderer.on(responseChannel, responseListener);
+					}
+				},
 			webFrame,
 			webUtils,
 			process: {
@@ -1066,16 +1214,53 @@ export const dialog = {
 		}
 		return { response: options.defaultId ?? 0, checkboxChecked: false };
 	},
-	async showOpenDialog() {
+	async showOpenDialog(optionsOrWindow, maybeOptions) {
+		const options = maybeOptions ?? optionsOrWindow ?? {};
 		const openFileDialog = electrobunRuntime?.Utils?.openFileDialog;
-		if (typeof openFileDialog === "function") {
-			const paths = await openFileDialog({
-				canChooseDirectory: false,
-				canChooseFiles: true,
-				allowsMultipleSelection: true,
-			});
-			return { canceled: paths.length === 0, filePaths: paths.filter(Boolean) };
-		}
+			if (typeof openFileDialog === "function") {
+				const properties = Array.isArray(options?.properties) ? options.properties : [];
+				const hasOpenDirectory = properties.includes("openDirectory");
+				const hasOpenFile = properties.includes("openFile");
+				const canChooseDirectory = hasOpenDirectory || (!hasOpenDirectory && !hasOpenFile);
+				const canChooseFiles = hasOpenFile || (!hasOpenDirectory && !hasOpenFile);
+				const canChooseFilesForRuntime =
+					canChooseFiles || (canChooseDirectory && !hasOpenFile);
+				const allowsMultipleSelection = properties.includes("multiSelections");
+			const filters = Array.isArray(options?.filters) ? options.filters : [];
+			const extensionFilters = filters
+				.flatMap((filter) =>
+					Array.isArray(filter?.extensions) ? filter.extensions : [],
+				)
+				.map((extension) => String(extension).trim())
+				.filter(Boolean);
+			const allowedFileTypes =
+				extensionFilters.length > 0 && !extensionFilters.includes("*")
+					? extensionFilters.join(",")
+					: "*";
+				const paths = await openFileDialog({
+					startingFolder:
+						typeof options?.defaultPath === "string"
+							? options.defaultPath
+							: "~/",
+					allowedFileTypes,
+					canChooseDirectory,
+					canChooseFiles: canChooseFilesForRuntime,
+					allowsMultipleSelection,
+				});
+				let filePaths = (Array.isArray(paths) ? paths : [])
+					.map((filePath) => String(filePath))
+					.filter(Boolean);
+				if (hasOpenDirectory && !hasOpenFile) {
+					filePaths = filePaths.filter((filePath) => {
+						try {
+							return fs.statSync(filePath).isDirectory();
+						} catch {
+							return false;
+						}
+					});
+				}
+				return { canceled: filePaths.length === 0, filePaths };
+			}
 		return { canceled: true, filePaths: [] };
 	},
 	async showSaveDialog() {
@@ -1188,6 +1373,7 @@ class WebContentsImpl extends EventEmitter {
 		super();
 		this.ownerWindow = ownerWindow;
 		this.id = nextWebContentsId++;
+		this._devToolsOpened = false;
 		this.session = defaultSession;
 		this.mainFrame = {
 			processId: process.pid,
@@ -1236,11 +1422,11 @@ class WebContentsImpl extends EventEmitter {
 	}
 
 	isDevToolsOpened() {
-		return false;
+		return this._devToolsOpened;
 	}
 
 	isDevToolsFocused() {
-		return false;
+		return this._devToolsOpened;
 	}
 
 	isFocused() {
@@ -1312,11 +1498,41 @@ class WebContentsImpl extends EventEmitter {
 	}
 
 	send(channel, ...args) {
+		const ownerWindowId =
+			typeof this.ownerWindow?.id === "number" ? this.ownerWindow.id : undefined;
+		if (typeof ownerWindowId === "number" && typeof rendererEventBridge.send === "function") {
+			rendererEventBridge.send(ownerWindowId, channel, args);
+			return;
+		}
 		this.emit("ipc-message", { sender: this, ports: [] }, channel, ...args);
 	}
 
-	postMessage(channel, ...args) {
-		this.emit("ipc-message", { sender: this, ports: [] }, channel, ...args);
+	postMessage(channel, message, transfer) {
+		const ownerWindowId =
+			typeof this.ownerWindow?.id === "number" ? this.ownerWindow.id : undefined;
+		if (typeof ownerWindowId === "number" && typeof rendererEventBridge.send === "function") {
+			const eventArgs = [message];
+			if (
+				Array.isArray(transfer) &&
+				transfer.length > 0 &&
+				typeof rendererEventBridge.registerTransferPort === "function"
+			) {
+				const portTokens = transfer
+					.map((port) => rendererEventBridge.registerTransferPort(ownerWindowId, port))
+					.filter((token) => typeof token === "string");
+				if (portTokens.length > 0) {
+					eventArgs.push({ __vscodePortTokens: portTokens });
+				}
+			}
+			rendererEventBridge.send(ownerWindowId, channel, eventArgs);
+			return;
+		}
+		this.emit(
+			"ipc-message",
+			{ sender: this, ports: Array.isArray(transfer) ? transfer : [] },
+			channel,
+			message,
+		);
 	}
 
 	setWindowOpenHandler() {
@@ -1338,9 +1554,31 @@ class WebContentsImpl extends EventEmitter {
 		this.emit("focus");
 	}
 
+	reload() {
+		const currentUrl = this.getURL();
+		if (typeof currentUrl === "string" && currentUrl.length > 0) {
+			this.loadURL(currentUrl);
+		}
+	}
+
 	openDevTools() {
 		this.ownerWindow?._nativeWindow?.webview?.openDevTools?.();
+		this._devToolsOpened = true;
 		this.emit("devtools-opened");
+	}
+
+	closeDevTools() {
+		this.ownerWindow?._nativeWindow?.webview?.closeDevTools?.();
+		this._devToolsOpened = false;
+		this.emit("devtools-closed");
+	}
+
+	toggleDevTools() {
+		if (this._devToolsOpened) {
+			this.closeDevTools();
+			return;
+		}
+		this.openDevTools();
 	}
 }
 
@@ -1964,7 +2202,58 @@ async function registerElectrobunInternalBridgeHandlers() {
 			};
 			enqueueRendererEvent(windowId, payload);
 		};
-		const sendInvokeResponseToRenderer = (windowId, requestId, success, payload) => {
+		const rendererVirtualPorts = new Map();
+		let nextRendererVirtualPortId = 1;
+		const disposeRendererVirtualPort = (portId) => {
+			const entry = rendererVirtualPorts.get(portId);
+			if (!entry) {
+				return;
+			}
+			rendererVirtualPorts.delete(portId);
+			try {
+				entry.port?.removeListener?.("message", entry.onMessage);
+			} catch {}
+			try {
+				entry.port?.removeListener?.("close", entry.onClose);
+			} catch {}
+			try {
+				entry.port?.close?.();
+			} catch {}
+		};
+		const registerRendererVirtualPort = (windowId, port) => {
+			if (typeof windowId !== "number" || !port) {
+				return undefined;
+			}
+			const portId = `vp-${windowId}-${nextRendererVirtualPortId++}`;
+			const onMessage = (eventOrData) => {
+				const payload =
+					eventOrData && typeof eventOrData === "object" && "data" in eventOrData
+						? eventOrData.data
+						: eventOrData;
+				sendIpcEventToRenderer(windowId, "vscode:__virtualPortMessage", [
+					portId,
+					payload,
+				]);
+			};
+			const onClose = () => {
+				sendIpcEventToRenderer(windowId, "vscode:__virtualPortClose", [portId]);
+				disposeRendererVirtualPort(portId);
+			};
+			rendererVirtualPorts.set(portId, { windowId, port, onMessage, onClose });
+			try {
+				port.start?.();
+			} catch {}
+			try {
+				port.on?.("message", onMessage);
+			} catch {}
+			try {
+				port.on?.("close", onClose);
+			} catch {}
+			return portId;
+		};
+			rendererEventBridge.send = sendIpcEventToRenderer;
+			rendererEventBridge.registerTransferPort = registerRendererVirtualPort;
+			const sendInvokeResponseToRenderer = (windowId, requestId, success, payload) => {
 			if (typeof windowId !== "number" || typeof requestId !== "string") {
 				return;
 			}
@@ -1998,16 +2287,46 @@ async function registerElectrobunInternalBridgeHandlers() {
 				);
 			}
 		};
-		const createRendererEventSender = (windowId, hostWebviewId) => ({
-			id: typeof windowId === "number" ? windowId : -1,
-			send(channel, ...eventArgs) {
-				sendIpcEventToRenderer(windowId, channel, eventArgs);
-			},
-			postMessage(channel, message) {
-				sendIpcEventToRenderer(windowId, channel, [message]);
-			},
-		});
-		internalRpcHandlers.request.vscodeIpcInvoke = (params = {}) => {
+			const createRendererEventSender = (windowId, hostWebviewId) => ({
+				id: typeof windowId === "number" ? windowId : -1,
+				send(channel, ...eventArgs) {
+					sendIpcEventToRenderer(windowId, channel, eventArgs);
+				},
+			postMessage(channel, message, transfer) {
+				const eventArgs = [message];
+				if (Array.isArray(transfer) && transfer.length > 0) {
+					const portTokens = transfer
+						.map((port) => registerRendererVirtualPort(windowId, port))
+						.filter((token) => typeof token === "string");
+					if (portTokens.length > 0) {
+						eventArgs.push({ __vscodePortTokens: portTokens });
+					}
+					}
+					sendIpcEventToRenderer(windowId, channel, eventArgs);
+				},
+				isDestroyed() {
+					return false;
+				},
+				getURL() {
+					return "";
+				},
+				getOSProcessId() {
+					return process.pid;
+				},
+				reload() {},
+				openDevTools() {},
+				toggleDevTools() {},
+			});
+			const resolveRendererEventSender = (windowId, hostWebviewId) => {
+				if (typeof windowId === "number") {
+					const webContents = browserWindows.get(windowId)?.webContents;
+					if (webContents) {
+						return webContents;
+					}
+				}
+				return createRendererEventSender(windowId, hostWebviewId);
+			};
+			internalRpcHandlers.request.vscodeIpcInvoke = (params = {}) => {
 			const { requestId, channel, args = [], windowId, hostWebviewId } = params;
 			const isWindowConfigChannel =
 				typeof channel === "string" &&
@@ -2021,7 +2340,7 @@ async function registerElectrobunInternalBridgeHandlers() {
 			) {
 				rendererHostWebviewIds.set(windowId, hostWebviewId);
 			}
-			const sender = createRendererEventSender(windowId, hostWebviewId);
+				const sender = resolveRendererEventSender(windowId, hostWebviewId);
 
 			// Startup critical: preload requests shell env very early.
 			if (channel === "vscode:fetchShellEnv") {
@@ -2116,32 +2435,10 @@ async function registerElectrobunInternalBridgeHandlers() {
 			) {
 				rendererHostWebviewIds.set(windowId, hostWebviewId);
 			}
-			const sender = createRendererEventSender(windowId, hostWebviewId);
-			const reviveIpcArg = (value) => {
-				if (value instanceof ArrayBuffer) {
-					return Buffer.from(value);
-				}
-				if (ArrayBuffer.isView(value)) {
-					return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-				}
-				if (value && typeof value === "object") {
-					if (value.type === "Buffer" && Array.isArray(value.data)) {
-						return Buffer.from(value.data);
-					}
-					const keys = Object.keys(value);
-					if (keys.length > 0 && keys.every((key) => /^\d+$/.test(key))) {
-						const sortedNumericKeys = keys.sort(
-							(a, b) => Number(a) - Number(b),
-						);
-						const bytes = Uint8Array.from(
-							sortedNumericKeys.map((key) => Number(value[key]) || 0),
-						);
-						return Buffer.from(bytes);
-					}
-				}
-				return value;
-			};
-			const normalizedArgs = Array.isArray(args) ? args.map(reviveIpcArg) : [];
+				const sender = resolveRendererEventSender(windowId, hostWebviewId);
+			const normalizedArgs = Array.isArray(args)
+				? args.map(reviveSerializedIpcArg)
+				: [];
 
 			// IPC `vscode:message` expects a binary payload in args[0]. Skip malformed emissions.
 			if (channel === "vscode:message" && normalizedArgs[0] === undefined) {
@@ -2149,6 +2446,28 @@ async function registerElectrobunInternalBridgeHandlers() {
 			}
 
 			ipcMainEmitter.emit(channel, { sender }, ...normalizedArgs);
+		};
+		internalRpcHandlers.message.vscodeVirtualPortPost = (params = {}) => {
+			const { portId, data, windowId } = params;
+			if (typeof portId !== "string") {
+				return;
+			}
+			const entry = rendererVirtualPorts.get(portId);
+			if (!entry) {
+				return;
+			}
+			if (typeof windowId === "number" && entry.windowId !== windowId) {
+				return;
+			}
+			try {
+				entry.port?.postMessage?.(reviveSerializedIpcArg(data));
+			} catch (error) {
+				console.warn(
+					"[electrobun-runtime-shim] Failed to post to renderer virtual port",
+					portId,
+					error,
+				);
+			}
 		};
 	} catch (error) {
 		console.warn(
@@ -2180,6 +2499,11 @@ export const webUtils = {
 export const utilityProcess = {
 	fork(modulePath, args = [], options = {}) {
 		const forkOptions = { ...options };
+		forkOptions.env = {
+			...(process.env ?? {}),
+			...(forkOptions.env ?? {}),
+			VSCODE_ELECTROBUN_PARENT_PORT: "1",
+		};
 		const stdioOption = forkOptions.stdio;
 		if (!stdioOption || stdioOption === "pipe") {
 			forkOptions.stdio = ["pipe", "pipe", "pipe", "ipc"];
@@ -2188,17 +2512,100 @@ export const utilityProcess = {
 		}
 
 		const child = forkChildProcess(modulePath, args, forkOptions);
-		if (
-			typeof child.postMessage !== "function" &&
-			typeof child.send === "function"
-		) {
-			child.postMessage = (message) => {
-				if (message === undefined) {
-					return false;
-				}
-				return child.send(message);
+		const bridgedTransferPorts = new Map();
+		let nextTransferPortId = 1;
+		const disposeBridgedTransferPort = (portId) => {
+			const entry = bridgedTransferPorts.get(portId);
+			if (!entry) {
+				return;
+			}
+			bridgedTransferPorts.delete(portId);
+			try {
+				entry.port?.removeListener?.("message", entry.onMessage);
+			} catch {}
+			try {
+				entry.port?.removeListener?.("close", entry.onClose);
+			} catch {}
+			try {
+				entry.port?.close?.();
+			} catch {}
+		};
+		const registerBridgedTransferPort = (port) => {
+			if (!port) {
+				return undefined;
+			}
+			const portId = `cp-port-${nextTransferPortId++}`;
+			const onMessage = (eventOrData) => {
+				const data =
+					eventOrData && typeof eventOrData === "object" && "data" in eventOrData
+						? eventOrData.data
+						: eventOrData;
+				child.send?.({
+					__vscodeParentPortPortMessage: true,
+					id: portId,
+					data: serializeIpcArgForRenderer(data),
+				});
 			};
-		}
+			const onClose = () => {
+				child.send?.({ __vscodeParentPortPortClose: true, id: portId });
+				disposeBridgedTransferPort(portId);
+			};
+			bridgedTransferPorts.set(portId, { port, onMessage, onClose });
+			try {
+				port.start?.();
+			} catch {}
+			try {
+				port.on?.("message", onMessage);
+			} catch {}
+			try {
+				port.on?.("close", onClose);
+			} catch {}
+			return portId;
+		};
+		const handleChildBridgeMessage = (message) => {
+			if (!message || typeof message !== "object") {
+				return;
+			}
+			if (
+				message.__vscodeParentPortPortPost === true &&
+				typeof message.id === "string"
+			) {
+				const entry = bridgedTransferPorts.get(message.id);
+				if (entry?.port?.postMessage) {
+					entry.port.postMessage(reviveSerializedIpcArg(message.data));
+				}
+				return;
+			}
+			if (
+				message.__vscodeParentPortPortClose === true &&
+				typeof message.id === "string"
+			) {
+				disposeBridgedTransferPort(message.id);
+			}
+		};
+		child.on("message", handleChildBridgeMessage);
+		child.once("exit", () => {
+			child.removeListener("message", handleChildBridgeMessage);
+			for (const portId of Array.from(bridgedTransferPorts.keys())) {
+				disposeBridgedTransferPort(portId);
+			}
+		});
+		child.postMessage = (message, transfer) => {
+			if (message === undefined || typeof child.send !== "function") {
+				return false;
+			}
+			if (Array.isArray(transfer) && transfer.length > 0) {
+				const transferIds = transfer
+					.map((port) => registerBridgedTransferPort(port))
+					.filter((id) => typeof id === "string");
+				return child.send({
+					__vscodeParentPortMessage: true,
+					data: serializeIpcArgForRenderer(message),
+					transferIds,
+				});
+			}
+			return child.send(message);
+		};
 		return child;
 	},
 };

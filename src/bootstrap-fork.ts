@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as performance from './vs/base/common/performance.js';
+import { EventEmitter } from 'node:events';
 import { removeGlobalNodeJsModuleLookupPaths, devInjectNodeModuleLookupPath } from './bootstrap-node.js';
 import { bootstrapESM } from './bootstrap-esm.js';
 
@@ -195,10 +196,152 @@ function configureCrashReporter(): void {
 	}
 }
 
+function serializeParentPortPayload(value: unknown): unknown {
+	if (Buffer.isBuffer(value)) {
+		return { type: 'Buffer', data: Array.from(value) };
+	}
+	if (value instanceof ArrayBuffer) {
+		return { type: 'Buffer', data: Array.from(new Uint8Array(value)) };
+	}
+	if (ArrayBuffer.isView(value)) {
+		return {
+			type: 'Buffer',
+			data: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+		};
+	}
+	return value;
+}
+
+function reviveParentPortPayload(value: unknown): unknown {
+	if (value && typeof value === 'object') {
+		const candidate = value as { type?: unknown; data?: unknown };
+		if (candidate.type === 'Buffer' && Array.isArray(candidate.data)) {
+			return Buffer.from(candidate.data);
+		}
+	}
+	return value;
+}
+
+function installElectrobunParentPortPolyfill(): void {
+	const utilityProcess = process as NodeJS.Process & { parentPort?: unknown };
+	if (utilityProcess.parentPort || !process.send || process.env['VSCODE_ELECTROBUN_PARENT_PORT'] !== '1') {
+		return;
+	}
+
+	interface IBridgedMessageEvent {
+		data: unknown;
+		ports: BridgedPort[];
+	}
+
+	interface IParentPortEnvelope {
+		__vscodeParentPortMessage?: boolean;
+		__vscodeParentPortPortMessage?: boolean;
+		__vscodeParentPortPortClose?: boolean;
+		id?: string;
+		data?: unknown;
+		transferIds?: string[];
+	}
+
+	class BridgedPort extends EventEmitter {
+		constructor(private readonly id: string) {
+			super();
+		}
+
+		postMessage(message: unknown): void {
+			try {
+				process.send?.({
+					__vscodeParentPortPortPost: true,
+					id: this.id,
+					data: serializeParentPortPayload(message)
+				});
+			} catch {
+				// ignore IPC send failures during shutdown
+			}
+		}
+
+		start(): void {
+			// no-op for compatibility
+		}
+
+		close(): void {
+			try {
+				process.send?.({
+					__vscodeParentPortPortClose: true,
+					id: this.id
+				});
+			} catch {
+				// ignore IPC send failures during shutdown
+			}
+			this.emit('close');
+		}
+	}
+
+	const bridgedPorts = new Map<string, BridgedPort>();
+	const getOrCreatePort = (id: string): BridgedPort => {
+		const existing = bridgedPorts.get(id);
+		if (existing) {
+			return existing;
+		}
+		const created = new BridgedPort(id);
+		bridgedPorts.set(id, created);
+		return created;
+	};
+
+	const parentPort = new EventEmitter() as EventEmitter & { postMessage: (message: unknown) => void };
+	parentPort.postMessage = (message: unknown): void => {
+		try {
+			process.send?.(message);
+		} catch {
+			// ignore IPC send failures during shutdown
+		}
+	};
+
+	process.on('message', (rawMessage: unknown) => {
+		const envelope = rawMessage as IParentPortEnvelope;
+		if (envelope?.__vscodeParentPortMessage) {
+			const transferIds = Array.isArray(envelope.transferIds) ? envelope.transferIds : [];
+			const ports = transferIds.map(id => getOrCreatePort(String(id)));
+			const event: IBridgedMessageEvent = {
+				data: reviveParentPortPayload(envelope.data),
+				ports
+			};
+			parentPort.emit('message', event);
+			return;
+		}
+		if (envelope?.__vscodeParentPortPortMessage && typeof envelope.id === 'string') {
+			const port = getOrCreatePort(envelope.id);
+			port.emit('message', {
+				data: reviveParentPortPayload(envelope.data),
+				ports: []
+			});
+			return;
+		}
+		if (envelope?.__vscodeParentPortPortClose && typeof envelope.id === 'string') {
+			const port = bridgedPorts.get(envelope.id);
+			if (port) {
+				bridgedPorts.delete(envelope.id);
+				port.emit('close');
+			}
+			return;
+		}
+
+		const event: IBridgedMessageEvent = {
+			data: rawMessage,
+			ports: []
+		};
+		parentPort.emit('message', event);
+	});
+
+	(utilityProcess as NodeJS.Process & { parentPort: typeof parentPort }).parentPort = parentPort;
+}
+
 //#endregion
 
 // Crash reporter
 configureCrashReporter();
+
+// Install MessagePort compatibility for forked utility processes under Electrobun shim.
+installElectrobunParentPortPolyfill();
 
 // Remove global paths from the node module lookup (node.js only)
 removeGlobalNodeJsModuleLookupPaths();

@@ -85,7 +85,7 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 	}
 
 	private readonly restoredBarrier = new Barrier();
-	private readonly isElectrobunRuntime = process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun';
+	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true';
 
 	private readonly noopChannel: IChannel = {
 		listen: () => Event.None,
@@ -107,10 +107,10 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 
 	async createWorker(process: IUtilityProcessWorkerProcess): Promise<IUtilityProcessWorker> {
 		this.logService.trace('Renderer->UtilityProcess#createWorker');
-		if (this.isElectrobunRuntime) {
-			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport unavailable on Electrobun runtime (module: ${process.moduleId}), using no-op channel.`);
+		if (this.disableMessagePortTransport) {
+			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled via VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT (module: ${process.moduleId}), using no-op channel.`);
 			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_DISABLED_ELECTROBUN:${process.moduleId}`)}`);
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_MESSAGEPORT_DISABLED_BY_ENV:${process.moduleId}`)}`);
 			} catch {
 				// ignore diagnostics failures
 			}

@@ -313,7 +313,13 @@ export class UtilityProcess extends Disposable {
 		}
 
 		// Messages
-		this._register(Event.fromNodeEventEmitter(process, 'message')(msg => this._onMessage.fire(msg)));
+		this._register(Event.fromNodeEventEmitter(process, 'message')(msg => {
+			const candidate = msg as { __vscodeParentPortPortPost?: boolean; __vscodeParentPortPortClose?: boolean } | undefined;
+			if (candidate?.__vscodeParentPortPortPost || candidate?.__vscodeParentPortPortClose) {
+				return;
+			}
+			this._onMessage.fire(msg);
+		}));
 
 		// Spawn
 		this._register(Event.fromNodeEventEmitter<void>(process, 'spawn')(() => {
