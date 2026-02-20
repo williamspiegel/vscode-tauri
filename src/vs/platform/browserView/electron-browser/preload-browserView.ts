@@ -17,7 +17,7 @@
  */
 (function () {
 
-	const { contextBridge } = require('electron');
+	const { contextBridge } = require('electrobun');
 
 	// #######################################################################
 	// ###                                                                 ###

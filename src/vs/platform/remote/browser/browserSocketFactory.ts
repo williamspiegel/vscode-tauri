@@ -188,7 +188,15 @@ class BrowserWebSocket extends Disposable implements IWebSocket {
 			return;
 		}
 		this.traceSocketEvent(SocketDiagnosticsEventType.Write, data);
-		this._socket.send(data);
+		let payload: BufferSource;
+		if (ArrayBuffer.isView(data)) {
+			const bytes = new Uint8Array(data.byteLength);
+			bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+			payload = bytes;
+		} else {
+			payload = data;
+		}
+		this._socket.send(payload);
 	}
 
 	close(): void {

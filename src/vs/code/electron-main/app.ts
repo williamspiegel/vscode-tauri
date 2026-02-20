@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, Details, GPUFeatureStatus, powerMonitor, protocol, session, Session, systemPreferences, WebFrameMain } from 'electron';
+import { app, Details, GPUFeatureStatus, powerMonitor, protocol, session, Session, systemPreferences, WebFrameMain } from 'electrobun';
 import { addUNCHostToAllowlist, disableUNCAccessRestrictions } from '../../base/node/unc.js';
 import { validatedIpcMain } from '../../base/parts/ipc/electron-main/ipcMain.js';
 import { hostname, release } from 'os';
@@ -85,6 +85,7 @@ import { DarwinUpdateService } from '../../platform/update/electron-main/updateS
 import { LinuxUpdateService } from '../../platform/update/electron-main/updateService.linux.js';
 import { SnapUpdateService } from '../../platform/update/electron-main/updateService.snap.js';
 import { Win32UpdateService } from '../../platform/update/electron-main/updateService.win32.js';
+import { NoopUpdateService } from '../../platform/update/electron-main/noopUpdateService.js';
 import { IOpenURLOptions, IURLService } from '../../platform/url/common/url.js';
 import { URLHandlerChannelClient, URLHandlerRouter } from '../../platform/url/common/urlIpc.js';
 import { NativeURLService } from '../../platform/url/common/urlService.js';
@@ -134,6 +135,9 @@ import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js'
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
 import { NativeWebContentExtractorService } from '../../platform/webContentExtractor/electron-main/webContentExtractorService.js';
 import ErrorTelemetry from '../../platform/telemetry/electron-main/errorTelemetry.js';
+import { IDesktopRuntimeMainService } from '../../platform/desktopRuntime/common/desktopRuntime.js';
+import { ElectrobunMainService } from '../../platform/desktopRuntime/electron-main/electrobunMainService.js';
+import type { OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, ProtocolResponse } from '../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 /**
  * The main VS Code application. There will only ever be one instance,
@@ -237,11 +241,11 @@ export class CodeApplication extends Disposable {
 			return false;
 		};
 
-		const isSvgRequestFromSafeContext = (details: Electron.OnBeforeRequestListenerDetails | Electron.OnHeadersReceivedListenerDetails): boolean => {
+		const isSvgRequestFromSafeContext = (details: OnBeforeRequestListenerDetails | OnHeadersReceivedListenerDetails): boolean => {
 			return details.resourceType === 'xhr' || isSafeFrame(details.frame);
 		};
 
-		const isAllowedVsCodeFileRequest = (details: Electron.OnBeforeRequestListenerDetails) => {
+		const isAllowedVsCodeFileRequest = (details: OnBeforeRequestListenerDetails) => {
 			const frame = details.frame;
 			if (!frame || !this.windowsMainService) {
 				return false;
@@ -258,7 +262,7 @@ export class CodeApplication extends Disposable {
 			return false;
 		};
 
-		const isAllowedWebviewRequest = (uri: URI, details: Electron.OnBeforeRequestListenerDetails): boolean => {
+		const isAllowedWebviewRequest = (uri: URI, details: OnBeforeRequestListenerDetails): boolean => {
 			if (uri.path !== '/index.html') {
 				return true; // Only restrict top level page of webviews: index.html
 			}
@@ -676,7 +680,7 @@ export class CodeApplication extends Disposable {
 	}
 
 	private setupManagedRemoteResourceUrlHandler(mainProcessElectronServer: ElectronIPCServer) {
-		const notFound = (): Electron.ProtocolResponse => ({ statusCode: 404, data: 'Not found' });
+		const notFound = (): ProtocolResponse => ({ statusCode: 404, data: 'Not found' });
 		const remoteResourceChannel = new Lazy(() => mainProcessElectronServer.getChannel(
 			NODE_REMOTE_RESOURCE_CHANNEL_NAME,
 			new NodeRemoteResourceRouter(),
@@ -1002,23 +1006,31 @@ export class CodeApplication extends Disposable {
 	private async initServices(machineId: string, sqmId: string, devDeviceId: string, sharedProcessReady: Promise<MessagePortClient>): Promise<IInstantiationService> {
 		const services = new ServiceCollection();
 
+		// Desktop Runtime
+		services.set(IDesktopRuntimeMainService, new ElectrobunMainService());
+
 		// Update
-		switch (process.platform) {
-			case 'win32':
-				services.set(IUpdateService, new SyncDescriptor(Win32UpdateService));
-				break;
+		const isElectrobunRuntime = !!process.versions['bun'] || process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun';
+		if (isElectrobunRuntime) {
+			services.set(IUpdateService, new SyncDescriptor(NoopUpdateService));
+		} else {
+			switch (process.platform) {
+				case 'win32':
+					services.set(IUpdateService, new SyncDescriptor(Win32UpdateService));
+					break;
 
-			case 'linux':
-				if (isLinuxSnap) {
-					services.set(IUpdateService, new SyncDescriptor(SnapUpdateService, [process.env['SNAP'], process.env['SNAP_REVISION']]));
-				} else {
-					services.set(IUpdateService, new SyncDescriptor(LinuxUpdateService));
-				}
-				break;
+				case 'linux':
+					if (isLinuxSnap) {
+						services.set(IUpdateService, new SyncDescriptor(SnapUpdateService, [process.env['SNAP'], process.env['SNAP_REVISION']]));
+					} else {
+						services.set(IUpdateService, new SyncDescriptor(LinuxUpdateService));
+					}
+					break;
 
-			case 'darwin':
-				services.set(IUpdateService, new SyncDescriptor(DarwinUpdateService));
-				break;
+				case 'darwin':
+					services.set(IUpdateService, new SyncDescriptor(DarwinUpdateService));
+					break;
+			}
 		}
 
 		// Windows

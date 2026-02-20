@@ -210,10 +210,10 @@ export class ExecutableDebugAdapter extends StreamDebugAdapter {
 
 			if (command === 'node') {
 				if (Array.isArray(args) && args.length > 0) {
-					const isElectron = !!process.env['ELECTRON_RUN_AS_NODE'] || !!process.versions['electron'];
+					const isDesktopRuntimeNode = !!process.env['ELECTRON_RUN_AS_NODE'] || !!process.env['ELECTROBUN_RUN_AS_NODE'] || !!process.versions['electron'] || !!process.versions['bun'];
 					const forkOptions: cp.ForkOptions = {
 						env: env,
-						execArgv: isElectron ? ['-e', 'delete process.env.ELECTRON_RUN_AS_NODE;require(process.argv[1])'] : [],
+						execArgv: isDesktopRuntimeNode ? ['-e', 'delete process.env.ELECTRON_RUN_AS_NODE;delete process.env.ELECTROBUN_RUN_AS_NODE;require(process.argv[1])'] : [],
 						silent: true
 					};
 					if (options.cwd) {

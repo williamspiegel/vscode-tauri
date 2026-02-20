@@ -196,7 +196,7 @@ function patchGlobalFetch(params: ProxyAgentParams, configProvider: ExtHostConfi
 			}
 			// Support for URL: https://github.com/electron/electron/issues/43712
 			const electronInput = input instanceof URL ? input.toString() : input;
-			const electron = require('electron');
+			const electron = require('electrobun');
 			const response = await electron.net.fetch(electronInput, init);
 			monitorResponseProperties(mainThreadTelemetry, response, urlString);
 			return response;

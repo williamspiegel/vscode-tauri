@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import electron from 'electron';
+import electron from 'electrobun';
 import { onUnexpectedError } from '../../../common/errors.js';
 import { Event } from '../../../common/event.js';
 import { VSCODE_AUTHORITY } from '../../../common/network.js';

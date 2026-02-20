@@ -163,8 +163,8 @@ export class McpManagementChannelClient extends AbstractMcpManagementService imp
 	}
 
 	getInstalled(mcpResource?: URI): Promise<ILocalMcpServer[]> {
-		return Promise.resolve(this.channel.call<ILocalMcpServer[]>('getInstalled', [mcpResource]))
-			.then(servers => servers.map(server => transformIncomingServer(server, null)));
+		return Promise.resolve(this.channel.call<ILocalMcpServer[] | undefined>('getInstalled', [mcpResource]))
+			.then(servers => Array.isArray(servers) ? servers.map(server => transformIncomingServer(server, null)) : []);
 	}
 
 	updateMetadata(local: ILocalMcpServer, gallery: IGalleryMcpServer, mcpResource?: URI): Promise<ILocalMcpServer> {

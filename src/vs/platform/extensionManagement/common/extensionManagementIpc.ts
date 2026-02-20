@@ -302,8 +302,8 @@ export class ExtensionManagementChannelClient extends CommontExtensionManagement
 	}
 
 	getInstalled(type: ExtensionType | null = null, extensionsProfileResource?: URI, productVersion?: IProductVersion): Promise<ILocalExtension[]> {
-		return Promise.resolve(this.channel.call<ILocalExtension[]>('getInstalled', [type, extensionsProfileResource, productVersion, language]))
-			.then(extensions => extensions.map(extension => transformIncomingExtension(extension, null)));
+		return Promise.resolve(this.channel.call<ILocalExtension[] | undefined>('getInstalled', [type, extensionsProfileResource, productVersion, language]))
+			.then(extensions => Array.isArray(extensions) ? extensions.map(extension => transformIncomingExtension(extension, null)) : []);
 	}
 
 	updateMetadata(local: ILocalExtension, metadata: Partial<Metadata>, extensionsProfileResource?: URI): Promise<ILocalExtension> {
@@ -325,7 +325,8 @@ export class ExtensionManagementChannelClient extends CommontExtensionManagement
 	}
 
 	getExtensionsControlManifest(): Promise<IExtensionsControlManifest> {
-		return Promise.resolve(this.channel.call<IExtensionsControlManifest>('getExtensionsControlManifest'));
+		return Promise.resolve(this.channel.call<IExtensionsControlManifest | undefined>('getExtensionsControlManifest'))
+			.then(manifest => manifest ?? { malicious: [], deprecated: {}, search: [] });
 	}
 
 	async download(extension: IGalleryExtension, operation: InstallOperation, donotVerifySignature: boolean): Promise<URI> {

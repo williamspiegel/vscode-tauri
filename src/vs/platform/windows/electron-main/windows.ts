@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import electron, { Display, Rectangle } from 'electron';
+import electron, { Display, Rectangle } from 'electrobun';
 import { Color } from '../../../base/common/color.js';
 import { Event } from '../../../base/common/event.js';
 import { join } from '../../../base/common/path.js';

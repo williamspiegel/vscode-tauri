@@ -11,9 +11,16 @@ export function ensureCodeWindow(targetWindow: Window, fallbackWindowId: number)
 	const codeWindow = targetWindow as Partial<CodeWindow>;
 
 	if (typeof codeWindow.vscodeWindowId !== 'number') {
-		Object.defineProperty(codeWindow, 'vscodeWindowId', {
-			get: () => fallbackWindowId
-		});
+		try {
+			const windowIdDescriptor = Object.getOwnPropertyDescriptor(codeWindow, 'vscodeWindowId');
+			if (!windowIdDescriptor || windowIdDescriptor.configurable) {
+				Object.defineProperty(codeWindow, 'vscodeWindowId', {
+					get: () => fallbackWindowId
+				});
+			}
+		} catch {
+			// Some runtimes expose this via an unconfigurable getter.
+		}
 	}
 }
 

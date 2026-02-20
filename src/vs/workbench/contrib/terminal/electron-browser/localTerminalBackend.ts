@@ -58,6 +58,7 @@ class LocalTerminalBackend extends BaseTerminalBackend implements ITerminalBacke
 	readonly remoteAuthority = undefined;
 
 	private readonly _ptys: Map<number, LocalPty> = new Map();
+	private readonly _isElectrobunRuntime = process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun';
 
 	private _directProxyClientEventually: DeferredPromise<MessagePortClient> | undefined;
 	private _directProxy: IPtyService | undefined;
@@ -109,6 +110,12 @@ class LocalTerminalBackend extends BaseTerminalBackend implements ITerminalBacke
 	 * Request a direct connection to the pty host, this will launch the pty host process if necessary.
 	 */
 	private async _connectToDirectProxy(): Promise<void> {
+		if (this._isElectrobunRuntime) {
+			// Electrobun currently lacks MessagePort transfer support across forked utility processes.
+			// Stay on the indirect renderer->main->ptyhost channel to avoid connection failures.
+			return;
+		}
+
 		// Check if connecting is in progress
 		if (this._directProxyClientEventually) {
 			await this._directProxyClientEventually.p;
@@ -163,6 +170,16 @@ class LocalTerminalBackend extends BaseTerminalBackend implements ITerminalBacke
 
 			// Eagerly fetch the backend's environment for memoization
 			this.getEnvironment();
+		}).catch(error => {
+			this._logService.error('Renderer->PtyHost#connect: failed to acquire MessagePort', error);
+			directProxyClientEventually.error(error);
+			this._directProxyClientEventually = undefined;
+			this._directProxy = undefined;
+			try {
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`PTY_CONNECT_TIMEOUT:${String(error)}`)}`);
+			} catch {
+				// ignore diagnostic failures
+			}
 		});
 	}
 

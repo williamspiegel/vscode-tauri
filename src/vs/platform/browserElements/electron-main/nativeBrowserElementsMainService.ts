@@ -6,7 +6,7 @@
 import { IElementData, IElementAncestor, INativeBrowserElementsService, IBrowserTargetLocator } from '../common/browserElements.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { IRectangle } from '../../window/common/window.js';
-import { BrowserWindow, webContents } from 'electron';
+import { BrowserWindow, webContents } from 'electrobun';
 import { IAuxiliaryWindow } from '../../auxiliaryWindow/electron-main/auxiliaryWindow.js';
 import { ICodeWindow } from '../../window/electron-main/window.js';
 import { IAuxiliaryWindowsMainService } from '../../auxiliaryWindow/electron-main/auxiliaryWindows.js';
@@ -15,6 +15,7 @@ import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { AddFirstParameterToFunctions } from '../../../base/common/types.js';
 import { IBrowserViewMainService } from '../../browserView/electron-main/browserViewMainService.js';
+import type { WebContents, Event, Debugger } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export const INativeBrowserElementsMainService = createDecorator<INativeBrowserElementsMainService>('browserElementsMainService');
 export interface INativeBrowserElementsMainService extends AddFirstParameterToFunctions<INativeBrowserElementsService, Promise<unknown> /* only methods, not events */, number | undefined /* window ID */> { }
@@ -74,7 +75,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 
 		// For BrowserView targets, listen to the console-message event directly
 		// on the BrowserView's webContents. No CDP needed.
-		let targetWebContents: Electron.WebContents | undefined;
+		let targetWebContents: WebContents | undefined;
 		if (locator.browserViewId) {
 			targetWebContents = this.browserViewMainService.tryGetBrowserView(locator.browserViewId)?.webContents;
 		}
@@ -94,7 +95,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		}
 
 		const levelMap: Record<number, string> = { 0: 'log', 1: 'warning', 2: 'error' };
-		const onConsoleMessage = (_event: Electron.Event, level: number, message: string, _line: number, _sourceId: string) => {
+		const onConsoleMessage = (_event: Event, level: number, message: string, _line: number, _sourceId: string) => {
 			const levelName = levelMap[level] ?? 'log';
 			const formatted = `[${levelName}] ${message}`;
 			const current = consoleLogStore.get(key) ?? [];
@@ -111,7 +112,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 			windowWebContents.off('ipc-message', onIpcMessage);
 		};
 
-		const onIpcMessage = (_event: Electron.Event, channel: string, closedCancelAndDetachId: number) => {
+		const onIpcMessage = (_event: Event, channel: string, closedCancelAndDetachId: number) => {
 			if (channel === `vscode:cancelConsoleSession${cancelAndDetachId}`) {
 				if (cancelAndDetachId !== closedCancelAndDetachId) {
 					return;
@@ -134,7 +135,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 	 * Find the webview target that matches the given locator.
 	 * Checks either webviewId or browserViewId depending on what's provided.
 	 */
-	private async findWebviewTarget(debuggers: Electron.Debugger, locator: IBrowserTargetLocator): Promise<string | undefined> {
+	private async findWebviewTarget(debuggers: Debugger, locator: IBrowserTargetLocator): Promise<string | undefined> {
 		const { targetInfos } = await debuggers.sendCommand('Target.getTargets');
 
 		if (locator.webviewId) {
@@ -186,7 +187,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		return undefined;
 	}
 
-	async waitForWebviewTargets(debuggers: Electron.Debugger, locator: IBrowserTargetLocator): Promise<string | undefined> {
+	async waitForWebviewTargets(debuggers: Debugger, locator: IBrowserTargetLocator): Promise<string | undefined> {
 		const start = Date.now();
 		const timeout = 10000;
 
@@ -254,7 +255,7 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		});
 	}
 
-	async finishOverlay(debuggers: Electron.Debugger, sessionId: string | undefined): Promise<void> {
+	async finishOverlay(debuggers: Debugger, sessionId: string | undefined): Promise<void> {
 		if (debuggers.isAttached() && sessionId) {
 			await debuggers.sendCommand('Overlay.setInspectMode', {
 				mode: 'none',
@@ -431,9 +432,9 @@ export class NativeBrowserElementsMainService extends Disposable implements INat
 		};
 	}
 
-	async getNodeData(sessionId: string, debuggers: Electron.Debugger, window: BrowserWindow, cancellationId?: number): Promise<NodeDataResponse> {
+	async getNodeData(sessionId: string, debuggers: Debugger, window: BrowserWindow, cancellationId?: number): Promise<NodeDataResponse> {
 		return new Promise((resolve, reject) => {
-			const onMessage = async (event: Electron.Event, method: string, params: { backendNodeId: number }) => {
+			const onMessage = async (event: Event, method: string, params: { backendNodeId: number }) => {
 				if (method === 'Overlay.inspectNodeRequested') {
 					debuggers.off('message', onMessage);
 					await debuggers.sendCommand('Runtime.evaluate', {

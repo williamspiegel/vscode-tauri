@@ -2,6 +2,7 @@
 setlocal
 
 set ELECTRON_RUN_AS_NODE=
+set ELECTROBUN_RUN_AS_NODE=
 
 pushd %~dp0\..
 
@@ -10,12 +11,12 @@ set "NAMESHORT="
 for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\":.*" product.json') do if not defined NAMESHORT set "NAMESHORT=%%~a"
 set NAMESHORT=%NAMESHORT: "=%
 set NAMESHORT=%NAMESHORT:"=%.exe
-set CODE=".build\electron\%NAMESHORT%"
+set CODE=".build\electrobun\%NAMESHORT%"
 
-:: Download Electron if needed
+:: Download Electrobun runtime if needed
 if "%VSCODE_SKIP_PRELAUNCH%"=="" (
-	call node build\lib\electron.ts
-	if %errorlevel% neq 0 node .\node_modules\gulp\bin\gulp.js electron
+	call node --experimental-strip-types build\lib\electrobun.ts
+	if %errorlevel% neq 0 node .\node_modules\gulp\bin\gulp.js electrobun
 )
 
 :: Run tests

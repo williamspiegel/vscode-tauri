@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { session } from 'electron';
+import { session } from 'electrobun';
 import { Disposable, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { COI, FileAccess, Schemas, CacheControlheaders, DocumentPolicyheaders } from '../../../base/common/network.js';
 import { basename, extname, normalize } from '../../../base/common/path.js';
@@ -16,8 +16,9 @@ import { INativeEnvironmentService } from '../../environment/common/environment.
 import { ILogService } from '../../log/common/log.js';
 import { IIPCObjectUrl, IProtocolMainService } from './protocol.js';
 import { IUserDataProfilesService } from '../../userDataProfile/common/userDataProfile.js';
+import type { FilePathWithHeaders, ProtocolRequest } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
-type ProtocolCallback = { (result: string | Electron.FilePathWithHeaders | { error: number }): void };
+type ProtocolCallback = { (result: string | FilePathWithHeaders | { error: number }): void };
 
 export class ProtocolMainService extends Disposable implements IProtocolMainService {
 
@@ -79,7 +80,7 @@ export class ProtocolMainService extends Disposable implements IProtocolMainServ
 
 	//#region file://
 
-	private handleFileRequest(request: Electron.ProtocolRequest, callback: ProtocolCallback) {
+	private handleFileRequest(request: ProtocolRequest, callback: ProtocolCallback) {
 		const uri = URI.parse(request.url);
 
 		this.logService.error(`Refused to load resource ${uri.fsPath} from ${Schemas.file}: protocol (original URL: ${request.url})`);
@@ -91,7 +92,7 @@ export class ProtocolMainService extends Disposable implements IProtocolMainServ
 
 	//#region vscode-file://
 
-	private handleResourceRequest(request: Electron.ProtocolRequest, callback: ProtocolCallback): void {
+	private handleResourceRequest(request: ProtocolRequest, callback: ProtocolCallback): void {
 		const path = this.requestToNormalizedFilePath(request);
 		const pathBasename = basename(path);
 
@@ -139,7 +140,7 @@ export class ProtocolMainService extends Disposable implements IProtocolMainServ
 		return callback({ error: -3 /* ABORTED */ });
 	}
 
-	private requestToNormalizedFilePath(request: Electron.ProtocolRequest): string {
+	private requestToNormalizedFilePath(request: ProtocolRequest): string {
 
 		// 1.) Use `URI.parse()` util from us to convert the raw
 		//     URL into our URI.

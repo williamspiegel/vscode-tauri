@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import electron from 'electron';
+import electron from 'electrobun';
 import { Queue } from '../../../base/common/async.js';
 import { hash } from '../../../base/common/hash.js';
 import { mnemonicButtonLabel } from '../../../base/common/labels.js';

@@ -11,14 +11,15 @@ import * as performance from './vs/base/common/performance.js';
 import { INLSConfiguration } from './vs/nls.js';
 
 // Install a hook to module resolution to map 'fs' to 'original-fs'
-if (process.env['ELECTRON_RUN_AS_NODE'] || process.versions['electron']) {
+if (process.env['ELECTRON_RUN_AS_NODE'] || process.env['ELECTROBUN_RUN_AS_NODE'] || process.versions['electron'] || process.versions['bun']) {
+	const fsModuleSpecifier = process.versions['bun'] ? 'node:fs' : 'node:original-fs';
 	const jsCode = `
 	export async function resolve(specifier, context, nextResolve) {
 		if (specifier === 'fs') {
 			return {
 				format: 'builtin',
 				shortCircuit: true,
-				url: 'node:original-fs'
+				url: ${JSON.stringify(fsModuleSpecifier)}
 			};
 		}
 

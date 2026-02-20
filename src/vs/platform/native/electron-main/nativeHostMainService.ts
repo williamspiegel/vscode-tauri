@@ -5,7 +5,7 @@
 
 import * as fs from 'fs';
 import { exec } from 'child_process';
-import { app, BrowserWindow, clipboard, contentTracing, Display, Menu, MessageBoxOptions, MessageBoxReturnValue, Notification, OpenDevToolsOptions, OpenDialogOptions, OpenDialogReturnValue, powerMonitor, powerSaveBlocker, SaveDialogOptions, SaveDialogReturnValue, screen, shell, webContents } from 'electron';
+import { app, BrowserWindow, clipboard, contentTracing, Display, Menu, MessageBoxOptions, MessageBoxReturnValue, Notification, OpenDevToolsOptions, OpenDialogOptions, OpenDialogReturnValue, powerMonitor, powerSaveBlocker, SaveDialogOptions, SaveDialogReturnValue, screen, shell, webContents } from 'electrobun';
 import { arch, cpus, freemem, loadavg, platform, release, totalmem, type } from 'os';
 import { promisify } from 'util';
 import { memoize } from '../../../base/common/decorators.js';
@@ -49,6 +49,7 @@ import { IProxyAuthService } from './auth.js';
 import { AuthInfo, Credentials, IRequestService } from '../../request/common/request.js';
 import { randomPath } from '../../../base/common/extpath.js';
 import { CancellationTokenSource } from '../../../base/common/cancellation.js';
+import type { Event as DesktopEvent, BrowserWindowConstructorOptions } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export interface INativeHostMainService extends AddFirstParameterToFunctions<ICommonNativeHostService, Promise<unknown> /* only methods, not events */, number | undefined /* window ID */> { }
 
@@ -149,7 +150,7 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 			this.onDidChangeColorScheme = this.themeMainService.onDidChangeColorScheme;
 
 			this.onDidChangeDisplay = Event.debounce(Event.any(
-				Event.filter(Event.fromNodeEventEmitter(screen, 'display-metrics-changed', (event: Electron.Event, display: Display, changedMetrics?: string[]) => changedMetrics), changedMetrics => {
+				Event.filter(Event.fromNodeEventEmitter(screen, 'display-metrics-changed', (event: DesktopEvent, display: Display, changedMetrics?: string[]) => changedMetrics), changedMetrics => {
 					// Electron will emit 'display-metrics-changed' events even when actually
 					// going fullscreen, because the dock hides. However, we do not want to
 					// react on this event as there is no change in display bounds.
@@ -1084,10 +1085,10 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 		this.openChildWindow(parentWindow.win, url);
 	}
 
-	private openChildWindow(parentWindow: BrowserWindow | null, url: string, overrideWindowOptions: Electron.BrowserWindowConstructorOptions = {}): BrowserWindow {
+	private openChildWindow(parentWindow: BrowserWindow | null, url: string, overrideWindowOptions: BrowserWindowConstructorOptions = {}): BrowserWindow {
 		const options = this.instantiationService.invokeFunction(defaultBrowserWindowOptions, defaultWindowState(), { forceNativeTitlebar: true });
 
-		const windowOptions: Electron.BrowserWindowConstructorOptions = {
+		const windowOptions: BrowserWindowConstructorOptions = {
 			...options,
 			parent: parentWindow ?? undefined,
 			...overrideWindowOptions

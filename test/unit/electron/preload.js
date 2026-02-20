@@ -7,7 +7,7 @@
 (function () {
 	'use strict';
 
-	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electron');
+	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electrobun');
 
 	const globals = {
 

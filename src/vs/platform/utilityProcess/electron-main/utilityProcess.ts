@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserWindow, Details, MessageChannelMain, app, utilityProcess, UtilityProcess as ElectronUtilityProcess } from 'electron';
+import { BrowserWindow, Details, MessageChannelMain, app, utilityProcess, UtilityProcess as ElectronUtilityProcess } from 'electrobun';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ILogService } from '../../log/common/log.js';
@@ -18,6 +18,7 @@ import { removeDangerousEnvVariables } from '../../../base/common/processes.js';
 import { deepClone } from '../../../base/common/objects.js';
 import { isWindows } from '../../../base/common/platform.js';
 import { isUNCAccessRestrictionsDisabled, getUNCHostAllowlist } from '../../../base/node/unc.js';
+import type { MessagePortMain } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export interface IUtilityProcessConfiguration {
 
@@ -380,17 +381,33 @@ export class UtilityProcess extends Disposable {
 		}));
 	}
 
-	postMessage(message: unknown, transfer?: Electron.MessagePortMain[]): boolean {
+	postMessage(message: unknown, transfer?: MessagePortMain[]): boolean {
 		if (!this.process) {
 			return false; // already killed, crashed or never started
 		}
 
-		this.process.postMessage(message, transfer);
+		const processCandidate = this.process as unknown as {
+			postMessage?: (message: unknown, transfer?: MessagePortMain[]) => void;
+			send?: (message: unknown) => void;
+		};
+
+		if (typeof processCandidate.postMessage === 'function') {
+			processCandidate.postMessage(message, transfer);
+			return true;
+		}
+
+		if (typeof processCandidate.send === 'function') {
+			// Electrobun shim may expose Node child_process semantics (`send`) instead of `postMessage`.
+			processCandidate.send(message);
+			return true;
+		}
+
+		this.log('unable to post message because child process IPC channel is unavailable', Severity.Warning);
 
 		return true;
 	}
 
-	connect(payload?: unknown): Electron.MessagePortMain {
+	connect(payload?: unknown): MessagePortMain {
 		const { port1: outPort, port2: utilityProcessPort } = new MessageChannelMain();
 		this.postMessage(payload, [utilityProcessPort]);
 

@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import electron from 'electron';
+import electron from 'electrobun';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { isLinux, isMacintosh, isWindows } from '../../../base/common/platform.js';
@@ -17,6 +17,7 @@ import { coalesce } from '../../../base/common/arrays.js';
 import { getAllWindowsExcludingOffscreen } from '../../windows/electron-main/windows.js';
 import { ILogService, LogLevel } from '../../log/common/log.js';
 import { IThemeMainService } from './themeMainService.js';
+import type { NativeTheme } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 // These default colors match our default themes
 // editor background color ("Dark Modern", etc...)
@@ -106,7 +107,8 @@ export class ThemeMainService extends Disposable implements IThemeMainService {
 			const logSetting = (setting: Setting<string | boolean>) => `${setting.key}=${setting.getValue(this.configurationService)}`;
 			this.logService.debug(`[theme main service] ${logSetting(Setting.DETECT_COLOR_SCHEME)}, ${logSetting(Setting.DETECT_HC)}, ${logSetting(Setting.SYSTEM_COLOR_THEME)}`);
 
-			const logProperty = (property: keyof Electron.NativeTheme) => `${String(property)}=${electron.nativeTheme[property]}`;
+			const nativeThemeRecord = electron.nativeTheme as unknown as Record<keyof NativeTheme, unknown>;
+			const logProperty = (property: keyof NativeTheme) => `${String(property)}=${nativeThemeRecord[property]}`;
 			this.logService.debug(`[theme main service] electron.nativeTheme: ${logProperty('themeSource')}, ${logProperty('shouldUseDarkColors')}, ${logProperty('shouldUseHighContrastColors')}, ${logProperty('shouldUseInvertedColorScheme')}, ${logProperty('shouldUseDarkColorsForSystemIntegratedUI')}	`);
 			this.logService.debug(`[theme main service] New color scheme: ${JSON.stringify(this.getColorScheme())}`);
 		}

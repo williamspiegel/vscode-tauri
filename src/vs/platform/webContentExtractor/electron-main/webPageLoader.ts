@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { BeforeSendResponse, BrowserWindow, BrowserWindowConstructorOptions, Event, HeadersReceivedResponse, OnBeforeSendHeadersListenerDetails, OnHeadersReceivedListenerDetails } from 'electron';
+import type { BeforeSendResponse, BrowserWindow, BrowserWindowConstructorOptions, Event, HeadersReceivedResponse, OnBeforeSendHeadersListenerDetails, OnHeadersReceivedListenerDetails } from 'electrobun';
 import { Queue, raceTimeout, TimeoutTimer } from '../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../base/common/cancellation.js';
 import { createSingleCallFunction } from '../../../base/common/functional.js';
@@ -13,6 +13,7 @@ import { generateUuid } from '../../../base/common/uuid.js';
 import { ILogService } from '../../log/common/log.js';
 import { IWebContentExtractorOptions, WebContentExtractResult } from '../common/webContentExtractor.js';
 import { AXNode, convertAXTreeToMarkdown } from './cdpAccessibilityDomain.js';
+import type { Debugger, DownloadItem } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 type NetworkRequestEventParams = Readonly<{
 	requestId?: string;
@@ -44,7 +45,7 @@ export class WebPageLoader extends Disposable {
 	private static readonly MIN_CONTENT_LENGTH = 100; // Minimum content length to consider extraction successful
 
 	private readonly _window: BrowserWindow;
-	private readonly _debugger: Electron.Debugger;
+	private readonly _debugger: Debugger;
 	private readonly _requests = new Set<string>();
 	private readonly _queue = this._register(new Queue());
 	private readonly _timeout = this._register(new TimeoutTimer());
@@ -214,7 +215,7 @@ export class WebPageLoader extends Disposable {
 	/**
 	 * Handles the 'will-download' event, blocking any downloads.
 	 */
-	private onDownload(_event: Event, item: Electron.DownloadItem) {
+	private onDownload(_event: Event, item: DownloadItem) {
 		const filename = item.getFilename();
 		this.trace(`Blocked download: ${filename}`);
 		item.cancel();

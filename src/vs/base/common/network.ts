@@ -352,6 +352,16 @@ class FileAccessImpl {
 			});
 		}
 
+		// Electrobun dev runtime serves source files through a local HTTP server
+		// under `/fs/<absolute-path>`. Convert those browser URLs back into real
+		// file URIs for any node.js callsites that ask for `.fsPath`.
+		if ((uri.scheme === Schemas.http || uri.scheme === Schemas.https) && uri.path.startsWith('/fs/')) {
+			const filePath = decodeURIComponent(uri.path.slice('/fs'.length));
+			if (filePath.startsWith('/')) {
+				return URI.file(filePath);
+			}
+		}
+
 		return uri;
 	}
 

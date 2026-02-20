@@ -3,11 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { session } from 'electron';
+import { session } from 'electrobun';
 import { Disposable, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { joinPath } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
 import { BrowserViewStorageScope } from '../common/browserView.js';
+import type { Session, WebContents } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 // Same as webviews
 const allowedPermissions = new Set([
@@ -20,7 +21,7 @@ const allowedPermissions = new Set([
 /**
  * Holds an Electron session along with its storage scope and unique browser
  * context identifier.  Each instance maps one-to-one to an Electron
- * {@link Electron.Session} -- the {@link id} is derived from what makes the
+ * {@link Session} -- the {@link id} is derived from what makes the
  * Electron session unique (scope + workspace), **not** from any view id.
  * Multiple browser views may reference the same `BrowserSession`.
  *
@@ -48,16 +49,16 @@ export class BrowserSession extends Disposable {
 
 	/**
 	 * Weak set mirroring the Electron sessions owned by any BrowserSession.
-	 * Useful for quickly checking whether a given {@link Electron.WebContents}
+	 * Useful for quickly checking whether a given {@link WebContents}
 	 * belongs to the integrated browser.
 	 */
-	static readonly knownSessions = new WeakSet<Electron.Session>();
+	static readonly knownSessions = new WeakSet<Session>();
 
 	/**
-	 * Check if a {@link Electron.WebContents} belongs to an integrated browser
+	 * Check if a {@link WebContents} belongs to an integrated browser
 	 * view backed by a BrowserSession.
 	 */
-	static isBrowserViewWebContents(contents: Electron.WebContents): boolean {
+	static isBrowserViewWebContents(contents: WebContents): boolean {
 		return BrowserSession.knownSessions.has(contents.session);
 	}
 
@@ -165,7 +166,7 @@ export class BrowserSession extends Disposable {
 		 */
 		readonly id: string,
 		/** The underlying Electron session. */
-		readonly electronSession: Electron.Session,
+		readonly electronSession: Session,
 		/** Resolved storage scope. */
 		readonly storageScope: BrowserViewStorageScope,
 	) {
@@ -184,10 +185,10 @@ export class BrowserSession extends Disposable {
 	 * Apply the standard permission policy to the session.
 	 */
 	private configureSession(): void {
-		this.electronSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+		this.electronSession.setPermissionRequestHandler((_webContents: unknown, permission: string, callback: (permissionGranted: boolean) => void) => {
 			return callback(allowedPermissions.has(permission));
 		});
-		this.electronSession.setPermissionCheckHandler((_webContents, permission, _origin) => {
+		this.electronSession.setPermissionCheckHandler((_webContents: unknown, permission: string, _origin: unknown) => {
 			return allowedPermissions.has(permission);
 		});
 	}

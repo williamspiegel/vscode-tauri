@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { WebContentsView, webContents } from 'electron';
+import { WebContentsView, webContents } from 'electrobun';
 import { FileAccess } from '../../../base/common/network.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
@@ -20,6 +20,7 @@ import { BrowserViewDebugger } from './browserViewDebugger.js';
 import { ILogService } from '../../log/common/log.js';
 import { ICDPTarget, ICDPConnection, CDPTargetInfo } from '../common/cdp/types.js';
 import { BrowserSession } from './browserSession.js';
+import type { WebContentsViewConstructorOptions, WebPreferences, WebContents, KeyboardInputEvent, Input } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 /** Key combinations that are used in system-level shortcuts. */
 const nativeShortcuts = new Set([
@@ -87,15 +88,15 @@ export class BrowserView extends Disposable implements ICDPTarget {
 	constructor(
 		public readonly id: string,
 		public readonly session: BrowserSession,
-		createChildView: (options?: Electron.WebContentsViewConstructorOptions) => BrowserView,
-		options: Electron.WebContentsViewConstructorOptions | undefined,
+		createChildView: (options?: WebContentsViewConstructorOptions) => BrowserView,
+		options: WebContentsViewConstructorOptions | undefined,
 		@IWindowsMainService private readonly windowsMainService: IWindowsMainService,
 		@IAuxiliaryWindowsMainService private readonly auxiliaryWindowsMainService: IAuxiliaryWindowsMainService,
 		@ILogService private readonly logService: ILogService
 	) {
 		super();
 
-		const webPreferences: Electron.WebPreferences & { type: ReturnType<Electron.WebContents['getType']> } = {
+		const webPreferences: WebPreferences & { type: ReturnType<WebContents['getType']> } = {
 			...options?.webPreferences,
 
 			nodeIntegration: false,
@@ -340,7 +341,7 @@ export class BrowserView extends Disposable implements ICDPTarget {
 		}
 	}
 
-	get webContents(): Electron.WebContents {
+	get webContents(): WebContents {
 		return this._view.webContents;
 	}
 
@@ -486,7 +487,7 @@ export class BrowserView extends Disposable implements ICDPTarget {
 	 * Dispatch a keyboard event to this view
 	 */
 	async dispatchKeyEvent(keyEvent: IBrowserViewKeyDownEvent): Promise<void> {
-		const event: Electron.KeyboardInputEvent = {
+		const event: KeyboardInputEvent = {
 			type: 'keyDown',
 			keyCode: keyEvent.key,
 			modifiers: []
@@ -620,7 +621,7 @@ export class BrowserView extends Disposable implements ICDPTarget {
 	 * Potentially handle an input event as a VS Code command.
 	 * Returns `true` if the event was forwarded to VS Code and should not be handled natively.
 	 */
-	private tryHandleCommand(input: Electron.Input): boolean {
+	private tryHandleCommand(input: Input): boolean {
 		const eventKeyCode = SCAN_CODE_STR_TO_EVENT_KEY_CODE[input.code] || 0;
 		const keyCode = EVENT_KEY_CODE_MAP[eventKeyCode] || KeyCode.Unknown;
 

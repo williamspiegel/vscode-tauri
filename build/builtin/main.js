@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 // @ts-check
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electrobun');
 const url = require('url');
 const path = require('path');
 

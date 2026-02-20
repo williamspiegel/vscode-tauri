@@ -25,3 +25,22 @@ product.overrides.json
 .vscode-test
 vscode-telemetry-docs/
 test-output.json
+.bun-cache/*
+.tmp/*
+.bun-tmp/*
+
+# Electrobun runtime artifacts (generated locally, not source)
+/bun
+/launcher
+/bsdiff
+/bspatch
+/extractor
+/process_helper
+/zig-asar
+/zig-zstd
+/libNativeWrapper.dylib
+/libasar.dylib
+/main.js
+/npmbin.js
+/compile.log
+/compile.pid

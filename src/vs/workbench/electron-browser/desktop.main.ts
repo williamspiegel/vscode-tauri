@@ -65,6 +65,8 @@ import { IDefaultAccountService } from '../../platform/defaultAccount/common/def
 import { DefaultAccountService } from '../services/accounts/browser/defaultAccount.js';
 import { AccountPolicyService } from '../services/policies/common/accountPolicyService.js';
 import { MultiplexPolicyService } from '../services/policies/common/multiplexPolicyService.js';
+import { IDesktopRuntimeBrowserService } from '../../platform/desktopRuntime/common/desktopRuntime.js';
+import { ElectrobunBrowserService } from '../../platform/desktopRuntime/electron-browser/electrobunBrowserService.js';
 
 export class DesktopMain extends Disposable {
 
@@ -171,6 +173,9 @@ export class DesktopMain extends Disposable {
 	private async initServices(): Promise<{ serviceCollection: ServiceCollection; logService: ILogService; storageService: NativeWorkbenchStorageService; configurationService: IConfigurationService }> {
 		const serviceCollection = new ServiceCollection();
 
+		// Desktop Runtime
+		serviceCollection.set(IDesktopRuntimeBrowserService, new ElectrobunBrowserService());
+
 
 		// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 		//
@@ -195,7 +200,9 @@ export class DesktopMain extends Disposable {
 		serviceCollection.set(INativeWorkbenchEnvironmentService, environmentService);
 
 		// Logger
-		const loggers = this.configuration.loggers.map(loggerResource => ({ ...loggerResource, resource: URI.revive(loggerResource.resource) }));
+		const loggers = Array.isArray(this.configuration.loggers)
+			? this.configuration.loggers.map(loggerResource => ({ ...loggerResource, resource: URI.revive(loggerResource.resource) }))
+			: [];
 		const loggerService = new LoggerChannelClient(this.configuration.windowId, this.configuration.logLevel, environmentService.windowLogsPath, loggers, mainProcessService.getChannel('logger'));
 		serviceCollection.set(ILoggerService, loggerService);
 

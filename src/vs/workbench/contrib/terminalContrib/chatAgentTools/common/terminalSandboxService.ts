@@ -99,14 +99,14 @@ export class TerminalSandboxService extends Disposable implements ITerminalSandb
 		if (!this._srtPath) {
 			throw new Error('Sandbox runtime path not resolved');
 		}
-		// Use ELECTRON_RUN_AS_NODE=1 to make Electron executable behave as Node.js
+		// Use desktop runtime run-as-node flags so the app executable behaves as Node.js.
 		// TMPDIR must be set as environment variable before the command
 		// Use -c to pass the command string directly (like sh -c), avoiding argument parsing issues
 		const wrappedCommand = `"${this._execPath}" "${this._srtPath}" TMPDIR=${this._tempDir.path} --settings "${this._sandboxConfigPath}" -c "${command}"`;
 		if (this._remoteEnvDetails) {
 			return `${wrappedCommand}`;
 		}
-		return `ELECTRON_RUN_AS_NODE=1 ${wrappedCommand}`;
+		return `ELECTRON_RUN_AS_NODE=1 ELECTROBUN_RUN_AS_NODE=1 ${wrappedCommand}`;
 	}
 
 	public getTempDir(): URI | undefined {

@@ -41,6 +41,7 @@ export class CustomEndpointTelemetryService implements ICustomEndpointTelemetryS
 					args,
 					env: {
 						ELECTRON_RUN_AS_NODE: 1,
+						ELECTROBUN_RUN_AS_NODE: 1,
 						VSCODE_PIPE_LOGGING: 'true',
 						VSCODE_ESM_ENTRYPOINT: 'vs/workbench/contrib/debug/node/telemetryApp'
 					}

@@ -13,10 +13,10 @@ cd $ROOT
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	NAME=`node -p "require('./product.json').nameLong"`
 	EXE_NAME=`node -p "require('./product.json').nameShort"`
-	CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
+	CODE="./.build/electrobun/$NAME.app/Contents/MacOS/$EXE_NAME"
 else
 	NAME=`node -p "require('./product.json').applicationName"`
-	CODE=".build/electron/$NAME"
+	CODE=".build/electrobun/$NAME"
 fi
 
 VSCODECRASHDIR=$ROOT/.build/crashes
@@ -24,19 +24,21 @@ VSCODECRASHDIR=$ROOT/.build/crashes
 # Node modules
 test -d node_modules || npm i
 
-# Get electron
+# Get electrobun runtime
 if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
-	npm run electron
+	npm run electrobun
 fi
 
 # Unit Tests
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	cd $ROOT ; ulimit -n 4096 ; \
+		VSCODE_DESKTOP_RUNTIME=electrobun \
 		ELECTRON_ENABLE_LOGGING=1 \
 		"$CODE" \
 		test/unit/electron/index.js --crash-reporter-directory=$VSCODECRASHDIR "$@"
 else
 	cd $ROOT ; \
+		VSCODE_DESKTOP_RUNTIME=electrobun \
 		ELECTRON_ENABLE_LOGGING=1 \
 		"$CODE" \
 		test/unit/electron/index.js --crash-reporter-directory=$VSCODECRASHDIR "$@"

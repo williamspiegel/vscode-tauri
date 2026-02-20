@@ -8,11 +8,12 @@ import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../..
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { Client as MessagePortClient } from '../../../../base/parts/ipc/common/ipc.mp.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
-import { IPCClient, ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
+import { IChannel, IChannelClient, IChannelServer, ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
 import { IOnDidTerminateUtilityrocessWorkerProcess, ipcUtilityProcessWorkerChannelName, IUtilityProcessWorkerProcess, IUtilityProcessWorkerService } from '../../../../platform/utilityProcess/common/utilityProcessWorkerService.js';
 import { Barrier, timeout } from '../../../../base/common/async.js';
+import { Event } from '../../../../base/common/event.js';
 
 export const IUtilityProcessWorkerWorkbenchService = createDecorator<IUtilityProcessWorkerWorkbenchService>('utilityProcessWorkerWorkbenchService');
 
@@ -21,7 +22,7 @@ export interface IUtilityProcessWorker extends IDisposable {
 	/**
 	 * A IPC client to communicate to the worker process.
 	 */
-	client: IPCClient<string>;
+	client: IChannelClient & IChannelServer<string>;
 
 	/**
 	 * A promise that resolves to an object once the
@@ -84,6 +85,17 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 	}
 
 	private readonly restoredBarrier = new Barrier();
+	private readonly isElectrobunRuntime = process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun';
+
+	private readonly noopChannel: IChannel = {
+		listen: () => Event.None,
+		call: async () => undefined
+	};
+
+	private readonly noopClient: IChannelClient & IChannelServer<string> = {
+		getChannel: () => this.noopChannel,
+		registerChannel: () => undefined
+	};
 
 	constructor(
 		readonly windowId: number,
@@ -95,6 +107,19 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 
 	async createWorker(process: IUtilityProcessWorkerProcess): Promise<IUtilityProcessWorker> {
 		this.logService.trace('Renderer->UtilityProcess#createWorker');
+		if (this.isElectrobunRuntime) {
+			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport unavailable on Electrobun runtime (module: ${process.moduleId}), using no-op channel.`);
+			try {
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_DISABLED_ELECTROBUN:${process.moduleId}`)}`);
+			} catch {
+				// ignore diagnostics failures
+			}
+			return {
+				client: this.noopClient,
+				onDidTerminate: Promise.resolve({ reason: { code: 0, signal: 'unknown' } }),
+				dispose: () => undefined
+			};
+		}
 
 		// We want to avoid heavy utility process work to happen before
 		// the window has restored. As such, make sure we await the
@@ -106,7 +131,10 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 		// Get ready to acquire the message port from the utility process worker
 		const nonce = generateUuid();
 		const responseChannel = 'vscode:createUtilityProcessWorkerMessageChannelResult';
-		const portPromise = acquirePort(undefined /* we trigger the request via service call! */, responseChannel, nonce);
+		const portPromise = Promise.race<MessagePort | undefined>([
+			acquirePort(undefined /* we trigger the request via service call! */, responseChannel, nonce).catch(() => undefined),
+			timeout(6000).then(() => undefined)
+		]);
 
 		// Actually talk with the utility process service
 		// to create a new process from a worker
@@ -127,8 +155,19 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 		}));
 
 		const port = await portPromise;
-		const client = disposables.add(new MessagePortClient(port, `window:${this.windowId},module:${process.moduleId}`));
-		this.logService.trace('Renderer->UtilityProcess#createWorkerChannel: connection established');
+		let client: IChannelClient & IChannelServer<string>;
+		if (port) {
+			client = disposables.add(new MessagePortClient(port, `window:${this.windowId},module:${process.moduleId}`));
+			this.logService.trace('Renderer->UtilityProcess#createWorkerChannel: connection established');
+		} else {
+			this.logService.warn(`Renderer->UtilityProcess#createWorkerChannel: timed out waiting for MessagePort (module: ${process.moduleId}), using no-op channel.`);
+			try {
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_CONNECT_TIMEOUT:${process.moduleId}`)}`);
+			} catch {
+				// ignore diagnostics failures
+			}
+			client = this.noopClient;
+		}
 
 		onDidTerminate.then(({ reason }) => {
 			if (reason?.code === 0) {

@@ -5,22 +5,24 @@ title VSCode Dev
 
 pushd %~dp0..
 
-:: Get electron, compile, built-in extensions
+:: Get electrobun runtime, compile, built-in extensions
 if "%VSCODE_SKIP_PRELAUNCH%"=="" node build/lib/preLaunch.ts
 
 set "NAMESHORT="
 for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\":.*" product.json') do if not defined NAMESHORT set "NAMESHORT=%%~a"
 set NAMESHORT=%NAMESHORT: "=%
 set NAMESHORT=%NAMESHORT:"=%.exe
-set CODE=".build\electron\%NAMESHORT%"
+set CODE=".build\electrobun\%NAMESHORT%"
 
 :: Manage built-in extensions
 if "%~1"=="--builtin" goto builtin
 
 :: Configuration
 set ELECTRON_RUN_AS_NODE=1
+set ELECTROBUN_RUN_AS_NODE=1
 set NODE_ENV=development
 set VSCODE_DEV=1
+set VSCODE_DESKTOP_RUNTIME=electrobun
 set ELECTRON_ENABLE_LOGGING=1
 set ELECTRON_ENABLE_STACK_DUMPING=1
 

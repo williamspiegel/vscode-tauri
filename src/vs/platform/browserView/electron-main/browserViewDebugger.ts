@@ -8,6 +8,7 @@ import { Disposable, DisposableMap } from '../../../base/common/lifecycle.js';
 import { ILogService } from '../../log/common/log.js';
 import { CDPEvent, CDPTargetInfo, ICDPConnection, ICDPTarget } from '../common/cdp/types.js';
 import { BrowserView } from './browserView.js';
+import type { Event, Debugger } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 /**
  * Wraps a browser view's Electron debugger with per-client session management.
@@ -27,8 +28,8 @@ export class BrowserViewDebugger extends Disposable implements ICDPTarget {
 	 */
 	private _realTargetId: string | undefined;
 	private _initializePromise: Promise<void> | undefined;
-	private readonly _messageHandler: (event: Electron.Event, method: string, params: unknown, sessionId?: string) => void;
-	private readonly _electronDebugger: Electron.Debugger;
+	private readonly _messageHandler: (event: Event, method: string, params: unknown, sessionId?: string) => void;
+	private readonly _electronDebugger: Debugger;
 
 	constructor(
 		private readonly view: BrowserView,
@@ -39,7 +40,7 @@ export class BrowserViewDebugger extends Disposable implements ICDPTarget {
 		this._electronDebugger = view.webContents.debugger;
 
 		// Set up message handler bound to this instance - note the sessionId parameter
-		this._messageHandler = (_event: Electron.Event, method: string, params: unknown, sessionId?: string) => {
+		this._messageHandler = (_event: Event, method: string, params: unknown, sessionId?: string) => {
 			this.routeCDPEvent(method, params, sessionId);
 		};
 	}
@@ -182,7 +183,7 @@ class DebugSession extends Disposable implements ICDPConnection {
 
 	constructor(
 		public readonly sessionId: string,
-		private readonly _electronDebugger: Electron.Debugger
+		private readonly _electronDebugger: Debugger
 	) {
 		super();
 	}

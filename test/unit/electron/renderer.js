@@ -62,7 +62,7 @@ const fs = require('fs');
 	});
 })();
 
-const { ipcRenderer } = require('electron');
+const { ipcRenderer } = require('electrobun');
 const assert = require('assert');
 const path = require('path');
 const glob = require('glob');

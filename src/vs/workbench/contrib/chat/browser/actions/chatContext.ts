@@ -269,7 +269,7 @@ class ScreenshotContextValuePick implements IChatContextValueItem {
 	readonly type = 'valuePick';
 	readonly icon = Codicon.deviceCamera;
 	readonly label = (isElectron
-		? localize('chatContext.attachScreenshot.labelElectron.Window', 'Screenshot Window')
+		? localize('chatContext.attachScreenshot.labelWindow', 'Screenshot Window')
 		: localize('chatContext.attachScreenshot.labelWeb', 'Screenshot'));
 
 	constructor(

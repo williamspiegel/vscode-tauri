@@ -11,7 +11,7 @@ pushd %ROOT_DIR%
 set NODE_ENV=development
 set VSCODE_DEV=1
 
-:: Get electron, compile, built-in extensions
+:: Get electrobun runtime, compile, built-in extensions
 if "%VSCODE_SKIP_PRELAUNCH%"=="" (
 	node build/lib/preLaunch.ts
 )

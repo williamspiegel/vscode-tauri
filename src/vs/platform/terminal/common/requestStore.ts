@@ -5,6 +5,7 @@
 
 import { timeout } from '../../../base/common/async.js';
 import { CancellationTokenSource } from '../../../base/common/cancellation.js';
+import { isCancellationError } from '../../../base/common/errors.js';
 import { Emitter } from '../../../base/common/event.js';
 import { Disposable, dispose, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { ILogService } from '../../log/common/log.js';
@@ -49,7 +50,21 @@ export class RequestStore<T, RequestArgs> extends Disposable {
 			this._pendingRequests.set(requestId, resolve);
 			this._onCreateRequest.fire({ requestId, ...args });
 			const tokenSource = new CancellationTokenSource();
-			timeout(this._timeout, tokenSource.token).then(() => reject(`Request ${requestId} timed out (${this._timeout}ms)`));
+			void timeout(this._timeout, tokenSource.token).then(() => {
+				if (!this._pendingRequests.has(requestId)) {
+					return;
+				}
+
+				this._pendingRequests.delete(requestId);
+				dispose(this._pendingRequestDisposables.get(requestId) || []);
+				this._pendingRequestDisposables.delete(requestId);
+				reject(`Request ${requestId} timed out (${this._timeout}ms)`);
+			}, error => {
+				// The request completed and canceled the timeout token.
+				if (!isCancellationError(error)) {
+					reject(error);
+				}
+			});
 			this._pendingRequestDisposables.set(requestId, [toDisposable(() => tokenSource.cancel())]);
 		});
 	}

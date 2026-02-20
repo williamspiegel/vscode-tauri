@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserWindow } from 'electron';
+import { BrowserWindow } from 'electrobun';
 import type { Server } from 'http';
 import { Socket } from 'net';
 import { VSBuffer } from '../../../base/common/buffer.js';
@@ -15,6 +15,7 @@ import { OPTIONS, parseArgs } from '../../environment/node/argv.js';
 import { IWindowsMainService, OpenContext } from '../../windows/electron-main/windows.js';
 import { IOpenExtensionWindowResult } from '../common/extensionHostDebug.js';
 import { ExtensionHostDebugBroadcastChannel } from '../common/extensionHostDebugIpc.js';
+import type { Event } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export class ElectronExtensionHostDebugBroadcastChannel<TContext> extends ExtensionHostDebugBroadcastChannel<TContext> {
 
@@ -144,7 +145,7 @@ export class ElectronExtensionHostDebugBroadcastChannel<TContext> extends Extens
 				}
 			};
 
-			const onMessage = (_event: Electron.Event, method: string, params: unknown, sessionId?: string) =>
+			const onMessage = (_event: Event, method: string, params: unknown, sessionId?: string) =>
 				writeMessage({ method, params, sessionId: sessionId || pageSessionId });
 
 			const onWindowClose = () => {

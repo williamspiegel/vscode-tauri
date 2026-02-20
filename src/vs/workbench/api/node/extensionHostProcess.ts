@@ -116,6 +116,7 @@ function patchProcess(allowExit: boolean) {
 	// on the desktop.
 	// Refs https://github.com/microsoft/vscode/issues/151012#issuecomment-1156593228
 	process.env['ELECTRON_RUN_AS_NODE'] = '1';
+	process.env['ELECTROBUN_RUN_AS_NODE'] = '1';
 
 	// eslint-disable-next-line local/code-no-any-casts
 	process.on = <any>function (event: string, listener: (...args: any[]) => void) {
@@ -186,6 +187,9 @@ function _createExtHostProtocol(): Promise<IMessagePassingProtocol> {
 
 			const withPorts = (ports: MessagePortMain[]) => {
 				const port = ports[0];
+				if (!port) {
+					return;
+				}
 				const onMessage = new BufferedEmitter<VSBuffer>();
 				port.on('message', (e) => onMessage.fire(VSBuffer.wrap(e.data as Uint8Array)));
 				port.on('close', () => {
@@ -199,7 +203,18 @@ function _createExtHostProtocol(): Promise<IMessagePassingProtocol> {
 				});
 			};
 
-			(process as unknown as { parentPort: { on: (event: 'message', listener: (messageEvent: UtilityMessageEvent) => void) => void } }).parentPort.on('message', (e: UtilityMessageEvent) => withPorts(e.ports));
+			const utilityProcess = process as unknown as { parentPort?: { on: (event: 'message', listener: (messageEvent: UtilityMessageEvent) => void) => void } };
+			if (utilityProcess.parentPort?.on) {
+				utilityProcess.parentPort.on('message', (e: UtilityMessageEvent) => withPorts(e.ports));
+			} else {
+				// Electrobun child-process compatibility path: `parentPort` may be missing.
+				process.on('message', (message: unknown) => {
+					const candidate = message as UtilityMessageEvent | undefined;
+					if (candidate && Array.isArray(candidate.ports)) {
+						withPorts(candidate.ports);
+					}
+				});
+			}
 		});
 
 	} else if (extHostConnection.type === ExtHostConnectionType.Socket) {

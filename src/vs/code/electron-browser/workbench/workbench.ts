@@ -290,7 +290,25 @@
 		setupNLS<T>(configuration);
 
 		// Compute base URL and set as global
-		const baseUrl = new URL(`${fileUriFromPath(configuration.appRoot, { isWindows: safeProcess.platform === 'win32', scheme: 'vscode-file', fallbackAuthority: 'vscode-app' })}/out/`);
+		const electrobunWindow = window as Window & Partial<Record<'__electrobunInternalBridge' | '__electrobunWindowId', unknown>>;
+		const isElectrobunRuntime = Boolean(electrobunWindow.__electrobunInternalBridge || electrobunWindow.__electrobunWindowId || (safeProcess.versions as Record<string, string | undefined> | undefined)?.['bun'] || safeProcess.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun');
+		const usesElectronScheme = !isElectrobunRuntime;
+		let baseUrl: URL | undefined;
+		if (!usesElectronScheme) {
+			const href = String(window.location.href || '');
+			const marker = '/out/vs/code/electron-browser/workbench/';
+			const markerIndex = href.indexOf(marker);
+			if (markerIndex >= 0) {
+				baseUrl = new URL(`${href.substring(0, markerIndex)}/out/`);
+			}
+		}
+		if (!baseUrl) {
+			baseUrl = new URL(`${fileUriFromPath(configuration.appRoot, {
+				isWindows: safeProcess.platform === 'win32',
+				scheme: usesElectronScheme ? 'vscode-file' : 'file',
+				fallbackAuthority: usesElectronScheme ? 'vscode-app' : undefined
+			})}/out/`);
+		}
 		globalThis._VSCODE_FILE_ROOT = baseUrl.toString();
 
 		// Dev only: CSS import map tricks
@@ -299,7 +317,9 @@
 		// ESM Import
 		try {
 			let workbenchUrl: string;
-			if (!!safeProcess.env['VSCODE_DEV'] && globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
+			if (!usesElectronScheme) {
+				workbenchUrl = '../../../workbench/workbench.desktop.main.js';
+			} else if (!!safeProcess.env['VSCODE_DEV'] && globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
 				workbenchUrl = '../../../workbench/workbench.desktop.main.js'; // for dev purposes only
 			} else {
 				workbenchUrl = new URL(`vs/workbench/workbench.desktop.main.js`, baseUrl).href;
@@ -514,9 +534,16 @@
 				showSplash(windowConfig);
 
 				// Code windows have a `vscodeWindowId` property to identify them
-				Object.defineProperty(window, 'vscodeWindowId', {
-					get: () => windowConfig.windowId
-				});
+				try {
+					const existingWindowIdDescriptor = Object.getOwnPropertyDescriptor(window, 'vscodeWindowId');
+					if (!existingWindowIdDescriptor || existingWindowIdDescriptor.configurable) {
+						Object.defineProperty(window, 'vscodeWindowId', {
+							get: () => windowConfig.windowId
+						});
+					}
+				} catch {
+					// Some runtimes expose this via an unconfigurable getter.
+				}
 
 				// It looks like browsers only lazily enable
 				// the <canvas> element when needed. Since we
@@ -524,12 +551,18 @@
 				// locations, we try to help the browser to
 				// initialize canvas when it is idle, right
 				// before we wait for the scripts to be loaded.
-				window.requestIdleCallback(() => {
+				const warmupCanvas = () => {
 					const canvas = document.createElement('canvas');
 					const context = canvas.getContext('2d');
 					context?.clearRect(0, 0, canvas.width, canvas.height);
 					canvas.remove();
-				}, { timeout: 50 });
+				};
+
+				if (typeof window.requestIdleCallback === 'function') {
+					window.requestIdleCallback(warmupCanvas, { timeout: 50 });
+				} else {
+					setTimeout(warmupCanvas, 0);
+				}
 
 				// Track import() perf
 				performance.mark('code/willLoadWorkbenchMain');
@@ -541,5 +574,33 @@
 	performance.mark('code/didLoadWorkbenchMain');
 
 	// Load workbench
-	result.main(configuration);
+	try {
+		void fetch(`${window.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('WORKBENCH_MAIN_CALL')}`);
+	} catch {
+		// ignore diagnostic failures
+	}
+	Promise.resolve(result.main(configuration)).catch(error => {
+		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		console.error('[workbench main] startup failed', error);
+		try {
+			void fetch(`${window.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`WORKBENCH_MAIN_ERROR:${message}`)}`);
+		} catch {
+			// ignore diagnostic failures
+		}
+		const pre = document.createElement('pre');
+		pre.textContent = `Workbench startup failed:\n${message}`;
+		pre.style.whiteSpace = 'pre-wrap';
+		pre.style.padding = '16px';
+		pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+		pre.style.fontSize = '13px';
+		pre.style.color = '#f8f8f2';
+		pre.style.backgroundColor = '#1e1e1e';
+		pre.style.margin = '0';
+		window.document.body.replaceChildren(pre);
+	});
+	try {
+		void fetch(`${window.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('WORKBENCH_MAIN_RETURN')}`);
+	} catch {
+		// ignore diagnostic failures
+	}
 }());

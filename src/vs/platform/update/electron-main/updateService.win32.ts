@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ChildProcess, spawn } from 'child_process';
-import { app } from 'electron';
+import { app } from 'electrobun';
 import { existsSync, unlinkSync } from 'fs';
 import { mkdir, readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';

@@ -10,7 +10,7 @@
 // come before any mocha imports.
 process.env.MOCHA_COLORS = '1';
 
-const { app, BrowserWindow, ipcMain, crashReporter, session } = require('electron');
+const { app, BrowserWindow, ipcMain, crashReporter, session } = require('electrobun');
 const product = require('../../../product.json');
 const { tmpdir } = require('os');
 const { existsSync, mkdirSync, promises } = require('fs');

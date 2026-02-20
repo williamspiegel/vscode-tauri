@@ -3,11 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRuntimeTypes.js';
+
 /* eslint-disable no-restricted-globals */
 
 (function () {
 
-	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electron');
+	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electrobun');
 
 	type ISandboxConfiguration = import('../common/sandboxTypes.js').ISandboxConfiguration;
 
@@ -121,7 +123,7 @@
 				return ipcRenderer.invoke(channel, ...args);
 			},
 
-			on(channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) {
+			on(channel: string, listener: (event: IpcRendererEvent, ...args: unknown[]) => void) {
 				validateIPC(channel);
 
 				ipcRenderer.on(channel, listener);
@@ -129,7 +131,7 @@
 				return this;
 			},
 
-			once(channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) {
+			once(channel: string, listener: (event: IpcRendererEvent, ...args: unknown[]) => void) {
 				validateIPC(channel);
 
 				ipcRenderer.once(channel, listener);
@@ -137,7 +139,7 @@
 				return this;
 			},
 
-			removeListener(channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) {
+			removeListener(channel: string, listener: (event: IpcRendererEvent, ...args: unknown[]) => void) {
 				validateIPC(channel);
 
 				ipcRenderer.removeListener(channel, listener);
@@ -150,7 +152,7 @@
 
 			acquire(responseChannel: string, nonce: string) {
 				if (validateIPC(responseChannel)) {
-					const responseListener = (e: Electron.IpcRendererEvent, responseNonce: string) => {
+					const responseListener = (e: IpcRendererEvent, responseNonce: string) => {
 						// validate that the nonce from the response is the same
 						// as when requested. and if so, use `postMessage` to
 						// send the `MessagePort` safely over, even when context
@@ -211,7 +213,7 @@
 				return resolveShellEnv;
 			},
 
-			getProcessMemoryInfo(): Promise<Electron.ProcessMemoryInfo> {
+			getProcessMemoryInfo(): Promise<ProcessMemoryInfo> {
 				return process.getProcessMemoryInfo();
 			},
 

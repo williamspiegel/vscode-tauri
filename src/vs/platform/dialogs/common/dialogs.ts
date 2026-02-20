@@ -12,7 +12,7 @@ import { URI } from '../../../base/common/uri.js';
 import { localize } from '../../../nls.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { ITelemetryData } from '../../telemetry/common/telemetry.js';
-import { MessageBoxOptions } from '../../../base/parts/sandbox/common/electronTypes.js';
+import { MessageBoxOptions } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 import { mnemonicButtonLabel } from '../../../base/common/labels.js';
 import { isLinux, isMacintosh, isWindows } from '../../../base/common/platform.js';
 import { IProductService } from '../../product/common/productService.js';
