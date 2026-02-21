@@ -19,7 +19,6 @@ import { IWorkspaceIdentifier } from '../../../workspace/common/workspace.js';
 import { FileAccess } from '../../../../base/common/network.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { FocusMode } from '../../../native/common/native.js';
-import type { BrowserWindow, Rectangle, WebContents } from '../../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 suite('WindowsFinder', () => {
 
@@ -46,7 +45,7 @@ suite('WindowsFinder', () => {
 			readonly onDidLeaveFullScreen: Event<void> = Event.None;
 			whenClosedOrLoaded: Promise<void> = Promise.resolve();
 			id: number = -1;
-			win: BrowserWindow = null!;
+			win: Electron.BrowserWindow = null!;
 			config: INativeWindowConfiguration | undefined;
 			openedWorkspace = options.openedFolderUri ? { id: '', uri: options.openedFolderUri } : options.openedWorkspace;
 			backupPath?: string | undefined;
@@ -64,7 +63,7 @@ suite('WindowsFinder', () => {
 			reload(cli?: NativeParsedArgs): void { throw new Error('Method not implemented.'); }
 			focus(options?: { mode: FocusMode }): void { throw new Error('Method not implemented.'); }
 			close(): void { throw new Error('Method not implemented.'); }
-			getBounds(): Rectangle { throw new Error('Method not implemented.'); }
+			getBounds(): Electron.Rectangle { throw new Error('Method not implemented.'); }
 			send(channel: string, ...args: unknown[]): void { throw new Error('Method not implemented.'); }
 			sendWhenReady(channel: string, token: CancellationToken, ...args: unknown[]): void { throw new Error('Method not implemented.'); }
 			toggleFullScreen(): void { throw new Error('Method not implemented.'); }
@@ -76,7 +75,7 @@ suite('WindowsFinder', () => {
 			serializeWindowState(): IWindowState { throw new Error('Method not implemented'); }
 			updateWindowControls(options: { height?: number | undefined; backgroundColor?: string | undefined; foregroundColor?: string | undefined; dimmed?: boolean | undefined }): void { throw new Error('Method not implemented.'); }
 			notifyZoomLevel(level: number): void { throw new Error('Method not implemented.'); }
-			matches(webContents: WebContents): boolean { throw new Error('Method not implemented.'); }
+			matches(webContents: Electron.WebContents): boolean { throw new Error('Method not implemented.'); }
 			dispose(): void { }
 		};
 	}

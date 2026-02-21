@@ -153,14 +153,12 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	const productJsonFilter = filter('product.json', { restore: true });
 	const snapshotFilter = filter(['**', '!**/*.snap', '!**/*.snap.actual']);
 	const yarnLockFilter = filter(['**', '!**/yarn.lock']);
-	const bunLockFilter = filter(['**', '!**/bun.lock']);
 	const unicodeFilterStream = filter(Array.from(unicodeFilter), { restore: true });
 
 	const result = input
 		.pipe(filter((f) => Boolean(f.stat && !f.stat.isDirectory())))
 		.pipe(snapshotFilter)
 		.pipe(yarnLockFilter)
-		.pipe(bunLockFilter)
 		.pipe(productJsonFilter)
 		.pipe(process.env['BUILD_SOURCEVERSION'] ? es.through() : productJson)
 		.pipe(productJsonFilter.restore)

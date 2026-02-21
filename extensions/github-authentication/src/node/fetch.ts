@@ -43,7 +43,7 @@ const _fetchers: Fetcher[] = [];
 try {
 	_fetchers.push({
 		name: 'Electron fetch',
-		fetch: require('electrobun').net.fetch
+		fetch: require('electron').net.fetch
 	});
 } catch {
 	// ignore

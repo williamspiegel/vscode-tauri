@@ -573,20 +573,26 @@
 	// Mark start of workbench
 	performance.mark('code/didLoadWorkbenchMain');
 
+	let emitElectrobunDiagnosticsBeacon: ((payload: string) => void) | undefined;
+	const emitWorkbenchDiagnostic = async (payload: string): Promise<void> => {
+		if (!emitElectrobunDiagnosticsBeacon) {
+			try {
+				const diagnostics = await import('../../../base/common/electrobunDiagnostics.js');
+				emitElectrobunDiagnosticsBeacon = diagnostics.emitElectrobunDiagnosticsBeacon;
+			} catch {
+				return;
+			}
+		}
+
+		emitElectrobunDiagnosticsBeacon(payload);
+	};
+
 	// Load workbench
-	try {
-		void fetch(`${window.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('WORKBENCH_MAIN_CALL')}`);
-	} catch {
-		// ignore diagnostic failures
-	}
+	void emitWorkbenchDiagnostic('WORKBENCH_MAIN_CALL');
 	Promise.resolve(result.main(configuration)).catch(error => {
 		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
 		console.error('[workbench main] startup failed', error);
-		try {
-			void fetch(`${window.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`WORKBENCH_MAIN_ERROR:${message}`)}`);
-		} catch {
-			// ignore diagnostic failures
-		}
+		void emitWorkbenchDiagnostic(`WORKBENCH_MAIN_ERROR:${message}`);
 		const pre = document.createElement('pre');
 		pre.textContent = `Workbench startup failed:\n${message}`;
 		pre.style.whiteSpace = 'pre-wrap';
@@ -598,9 +604,5 @@
 		pre.style.margin = '0';
 		window.document.body.replaceChildren(pre);
 	});
-	try {
-		void fetch(`${window.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('WORKBENCH_MAIN_RETURN')}`);
-	} catch {
-		// ignore diagnostic failures
-	}
+	void emitWorkbenchDiagnostic('WORKBENCH_MAIN_RETURN');
 }());

@@ -50,7 +50,6 @@ import { NativeWorkingCopyBackupService } from '../../services/workingCopy/elect
 import { workbenchInstantiationService as browserWorkbenchInstantiationService, ITestInstantiationService, TestEncodingOracle, TestEnvironmentService, TestFileDialogService, TestFilesConfigurationService, TestLifecycleService, TestTextFileService } from '../browser/workbenchTestServices.js';
 import { TestContextService, TestFileService } from '../common/workbenchTestServices.js';
 import { ReadableStreamEvents } from '../../../base/common/stream.js';
-import type { MessageBoxOptions, MessageBoxReturnValue, SaveDialogOptions, SaveDialogReturnValue, OpenDialogOptions, OpenDialogReturnValue, OpenDevToolsOptions } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export class TestSharedProcessService implements ISharedProcessService {
 
@@ -124,9 +123,9 @@ export class TestNativeHostService implements INativeHostService {
 	async saveWindowSplash(value: IPartsSplash): Promise<void> { }
 	async setBackgroundThrottling(throttling: boolean): Promise<void> { }
 	async focusWindow(options?: INativeHostOptions): Promise<void> { }
-	async showMessageBox(options: MessageBoxOptions): Promise<MessageBoxReturnValue> { throw new Error('Method not implemented.'); }
-	async showSaveDialog(options: SaveDialogOptions): Promise<SaveDialogReturnValue> { throw new Error('Method not implemented.'); }
-	async showOpenDialog(options: OpenDialogOptions): Promise<OpenDialogReturnValue> { throw new Error('Method not implemented.'); }
+	async showMessageBox(options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> { throw new Error('Method not implemented.'); }
+	async showSaveDialog(options: Electron.SaveDialogOptions): Promise<Electron.SaveDialogReturnValue> { throw new Error('Method not implemented.'); }
+	async showOpenDialog(options: Electron.OpenDialogOptions): Promise<Electron.OpenDialogReturnValue> { throw new Error('Method not implemented.'); }
 	async pickFileFolderAndOpen(options: INativeOpenDialogOptions): Promise<void> { }
 	async pickFileAndOpen(options: INativeOpenDialogOptions): Promise<void> { }
 	async pickFolderAndOpen(options: INativeOpenDialogOptions): Promise<void> { }
@@ -161,7 +160,7 @@ export class TestNativeHostService implements INativeHostService {
 	async closeWindow(): Promise<void> { }
 	async quit(): Promise<void> { }
 	async exit(code: number): Promise<void> { }
-	async openDevTools(options?: Partial<OpenDevToolsOptions> & INativeHostOptions | undefined): Promise<void> { }
+	async openDevTools(options?: Partial<Electron.OpenDevToolsOptions> & INativeHostOptions | undefined): Promise<void> { }
 	async toggleDevTools(): Promise<void> { }
 	async stopTracing(): Promise<void> { }
 	async openDevToolsWindow(url: string): Promise<void> { }
@@ -360,7 +359,7 @@ export class TestIPCFileSystemProvider implements IFileSystemProvider {
 	readonly onDidChangeFile = Event.None;
 
 	async stat(resource: URI): Promise<IStat> {
-		const { ipcRenderer } = require('electrobun');
+		const { ipcRenderer } = require('electron');
 		const stats = await ipcRenderer.invoke('vscode:statFile', resource.fsPath);
 		return {
 			type: stats.isDirectory ? FileType.Directory : (stats.isFile ? FileType.File : FileType.Unknown),
@@ -372,7 +371,7 @@ export class TestIPCFileSystemProvider implements IFileSystemProvider {
 	}
 
 	async readFile(resource: URI): Promise<Uint8Array> {
-		const { ipcRenderer } = require('electrobun');
+		const { ipcRenderer } = require('electron');
 		const result = await ipcRenderer.invoke('vscode:readFile', resource.fsPath);
 		return VSBuffer.wrap(result).buffer;
 	}

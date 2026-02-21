@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import electron, { BrowserWindowConstructorOptions, Display, screen } from 'electrobun';
+import electron, { BrowserWindowConstructorOptions, Display, screen } from 'electron';
 import { DeferredPromise, RunOnceScheduler, timeout, Delayer } from '../../../base/common/async.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { toErrorMessage } from '../../../base/common/errorMessage.js';
@@ -47,7 +47,6 @@ import { VSBuffer } from '../../../base/common/buffer.js';
 import { errorHandler } from '../../../base/common/errors.js';
 import { FocusMode } from '../../native/common/native.js';
 import { Color } from '../../../base/common/color.js';
-import type { Event as DesktopEvent, Point } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export interface IWindowCreationOptions {
 	readonly state: IWindowState;
@@ -201,7 +200,7 @@ export abstract class BaseWindow extends Disposable implements IBaseWindow {
 
 		// Setup windows/linux system context menu so it only is allowed over the app icon
 		if ((isWindows || isLinux) && useCustomTitleStyle) {
-			this._register(Event.fromNodeEventEmitter(win, 'system-context-menu', (event: DesktopEvent, point: Point) => ({ event, point }))(e => {
+			this._register(Event.fromNodeEventEmitter(win, 'system-context-menu', (event: Electron.Event, point: Electron.Point) => ({ event, point }))(e => {
 				const [x, y] = win.getPosition();
 				const cursorPos = electron.screen.screenToDipPoint(e.point);
 				const cx = Math.floor(cursorPos.x) - x;
@@ -239,7 +238,7 @@ export abstract class BaseWindow extends Disposable implements IBaseWindow {
 			// Handles the display-added event on Windows RDP multi-monitor scenarios.
 			// This helps restore maximized windows to their correct monitor after RDP reconnection.
 			// Refs https://github.com/electron/electron/issues/47016
-			this._register(Event.fromNodeEventEmitter(screen, 'display-added', (event: DesktopEvent, display: Display) => ({ event, display }))((e) => {
+			this._register(Event.fromNodeEventEmitter(screen, 'display-added', (event: Electron.Event, display: Display) => ({ event, display }))((e) => {
 				this.onDisplayAdded(e.display);
 			}));
 		}
@@ -1142,7 +1141,7 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 	private readonly swipeListenerDisposable = this._register(new MutableDisposable());
 
 	private registerSwipeListener(): void {
-		this.swipeListenerDisposable.value = Event.fromNodeEventEmitter<string>(this._win, 'swipe', (event: DesktopEvent, cmd: string) => cmd)(cmd => {
+		this.swipeListenerDisposable.value = Event.fromNodeEventEmitter<string>(this._win, 'swipe', (event: Electron.Event, cmd: string) => cmd)(cmd => {
 			if (!this.isReady) {
 				return; // window must be ready
 			}
@@ -1210,7 +1209,6 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 		} else {
 			windowUrl = FileAccess.asBrowserUri(`vs/code/electron-browser/workbench/workbench${this.environmentMainService.isBuilt ? '' : '-dev'}.html`).toString(true);
 		}
-
 		this._win.loadURL(windowUrl);
 
 		// Remember that we did load
@@ -1288,7 +1286,6 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 
 		// Update in config object URL for usage in renderer
 		this.configObjectUrl.update(configuration);
-		(this._win as unknown as { setVSCodeWindowConfig?: (configuration: INativeWindowConfiguration) => void }).setVSCodeWindowConfig?.(configuration);
 	}
 
 	async reload(cli?: NativeParsedArgs): Promise<void> {

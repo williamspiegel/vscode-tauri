@@ -580,7 +580,7 @@ const handle = setTimeout(() => {
 	process.parentPort.postMessage({ warning: '[SharedProcess] did not receive configuration within 30s...' });
 }, 30000);
 
-process.parentPort.once('message', (e: MessageEvent) => {
+process.parentPort.once('message', (e: Electron.MessageEvent) => {
 	clearTimeout(handle);
 	main(e.data as ISharedProcessConfiguration);
 });

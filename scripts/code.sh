@@ -19,19 +19,15 @@ function code() {
 	if [[ "$OSTYPE" == "darwin"* ]]; then
 		NAME=`node -p "require('./product.json').nameLong"`
 		EXE_NAME=`node -p "require('./product.json').nameShort"`
-		CODE="./.build/electrobun/$NAME.app/Contents/MacOS/$EXE_NAME"
+		CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
 	else
 		NAME=`node -p "require('./product.json').applicationName"`
-		CODE=".build/electrobun/$NAME"
+		CODE=".build/electron/$NAME"
 	fi
 
-	# Get electrobun runtime, compile, built-in extensions
+	# Get electron, compile, built-in extensions
 	if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
 		node build/lib/preLaunch.ts
-	else
-		# Even when skipping full prelaunch, refresh the Electrobun app wrapper.
-		# This keeps `out/**` import rewrites in sync after local transpiles.
-		node --experimental-strip-types build/lib/electrobun.ts
 	fi
 
 	# Manage built-in extensions
@@ -44,12 +40,8 @@ function code() {
 	export NODE_ENV=development
 	export VSCODE_DEV=1
 	export VSCODE_CLI=1
-	export VSCODE_DESKTOP_RUNTIME=electrobun
 	export ELECTRON_ENABLE_STACK_DUMPING=1
 	export ELECTRON_ENABLE_LOGGING=1
-	if command -v node >/dev/null 2>&1; then
-		export VSCODE_NODE_EXEC_PATH="$(command -v node)"
-	fi
 
 	DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests"
 	if [[ "$@" == *"--extensionTestsPath"* ]]; then
@@ -66,13 +58,13 @@ function code-wsl()
 	export DISPLAY="$HOST_IP:0"
 
 	# in a wsl shell
-	ELECTROBUN="$ROOT/.build/electrobun/Code - OSS.exe"
-	if [ -f "$ELECTROBUN"  ]; then
+	ELECTRON="$ROOT/.build/electron/Code - OSS.exe"
+	if [ -f "$ELECTRON"  ]; then
 		local CWD=$(pwd)
 		cd $ROOT
-		export WSLENV=ELECTRON_RUN_AS_NODE/w:ELECTROBUN_RUN_AS_NODE/w:VSCODE_DEV/w:$WSLENV
+		export WSLENV=ELECTRON_RUN_AS_NODE/w:VSCODE_DEV/w:$WSLENV
 		local WSL_EXT_ID="ms-vscode-remote.remote-wsl"
-		local WSL_EXT_WLOC=$(echo "" | VSCODE_DEV=1 ELECTRON_RUN_AS_NODE=1 ELECTROBUN_RUN_AS_NODE=1 "$ROOT/.build/electrobun/Code - OSS.exe" "out/cli.js" --locate-extension $WSL_EXT_ID)
+		local WSL_EXT_WLOC=$(echo "" | VSCODE_DEV=1 ELECTRON_RUN_AS_NODE=1 "$ROOT/.build/electron/Code - OSS.exe" "out/cli.js" --locate-extension $WSL_EXT_ID)
 		cd $CWD
 		if [ -n "$WSL_EXT_WLOC" ]; then
 			# replace \r\n with \n in WSL_EXT_WLOC

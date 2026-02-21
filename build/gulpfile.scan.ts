@@ -7,6 +7,8 @@ import gulp from 'gulp';
 import * as path from 'path';
 import * as task from './lib/task.ts';
 import * as util from './lib/util.ts';
+import electron from '@vscode/gulp-electron';
+import { config } from './lib/electron.ts';
 import filter from 'gulp-filter';
 import * as deps from './lib/dependencies.ts';
 import { existsSync, readdirSync } from 'fs';
@@ -43,19 +45,19 @@ BUILD_TARGETS.forEach(buildTarget => {
 	tasks.push(util.rimraf(destinationExe), util.rimraf(destinationPdb));
 
 	// electron
-	tasks.push(() => Promise.resolve() /* electron.dest(...) Removed */);
+	tasks.push(() => electron.dest(destinationExe, { ...config, platform, arch: arch === 'armhf' ? 'arm' : arch }));
 
 	// pdbs for windows
 	if (platform === 'win32') {
 		tasks.push(
-			() => Promise.resolve() /* electron.dest(...) for pdbs Removed */,
+			() => electron.dest(destinationPdb, { ...config, platform, arch: arch === 'armhf' ? 'arm' : arch, pdbs: true }),
 			() => confirmPdbsExist(destinationExe, destinationPdb)
 		);
 	}
 
 	if (platform === 'linux') {
 		tasks.push(
-			() => Promise.resolve() /* electron.dest(...) for symbols Removed */
+			() => electron.dest(destinationPdb, { ...config, platform, arch: arch === 'armhf' ? 'arm' : arch, symbols: true })
 		);
 	}
 

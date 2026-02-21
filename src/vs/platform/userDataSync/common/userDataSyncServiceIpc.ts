@@ -162,12 +162,7 @@ export class UserDataSyncServiceChannelClient extends Disposable implements IUse
 				return userDataSyncChannel.listen(event, arg);
 			}
 		};
-		this.channel.call<[SyncStatus, IUserDataSyncResourceConflicts[], number | undefined] | undefined>('_getInitialData').then(initialData => {
-			if (!Array.isArray(initialData)) {
-				return;
-			}
-
-			const [status, conflicts, lastSyncTime] = initialData;
+		this.channel.call<[SyncStatus, IUserDataSyncResourceConflicts[], number | undefined]>('_getInitialData').then(([status, conflicts, lastSyncTime]) => {
 			this.updateStatus(status);
 			this.updateConflicts(conflicts);
 			if (lastSyncTime) {
@@ -175,7 +170,7 @@ export class UserDataSyncServiceChannelClient extends Disposable implements IUse
 			}
 			this._register(this.channel.listen<SyncStatus>('onDidChangeStatus')(status => this.updateStatus(status)));
 			this._register(this.channel.listen<number>('onDidChangeLastSyncTime')(lastSyncTime => this.updateLastSyncTime(lastSyncTime)));
-		}).catch(() => undefined);
+		});
 		this._register(this.channel.listen<IUserDataSyncResourceConflicts[]>('onDidChangeConflicts')(conflicts => this.updateConflicts(conflicts)));
 		this._register(this.channel.listen<IUserDataSyncResourceError[]>('onSyncErrors')(errors => this._onSyncErrors.fire(errors.map(syncError => ({ ...syncError, error: UserDataSyncError.toUserDataSyncError(syncError.error) })))));
 	}

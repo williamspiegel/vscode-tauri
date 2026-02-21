@@ -66,7 +66,7 @@ export interface ParentPort extends NodeJS.EventEmitter {
 export interface UtilityNodeJSProcess extends NodeJS.Process {
 
 	/**
-	 * A `ParentPort` property if this is a `UtilityProcess` (or `null`
+	 * A `Electron.ParentPort` property if this is a `UtilityProcess` (or `null`
 	 * otherwise) allowing communication with the parent process.
 	 */
 	parentPort: ParentPort;

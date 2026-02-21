@@ -1417,9 +1417,7 @@ export default tseslint.config(
 					// - browser
 					// - electron-browser
 					'when': 'hasBrowser',
-					'allow': [
-						'electrobun'
-					]
+					'allow': []
 				},
 				{
 					// imports that are allowed in all files of layers:
@@ -1490,8 +1488,7 @@ export default tseslint.config(
 					// - electron-main
 					'when': 'hasElectron',
 					'allow': [
-						'electron',
-						'electrobun'
+						'electron'
 					]
 				},
 				{
@@ -1554,35 +1551,6 @@ export default tseslint.config(
 						'@microsoft/1ds-core-js', // node module allowed even in /common/
 						'@microsoft/1ds-post-js', // node module allowed even in /common/
 						'@xterm/headless' // node module allowed even in /common/
-					]
-				},
-				{
-					'target': 'src/vs/platform/desktopRuntime/electrobun-main/*',
-					'layer': 'electron-main',
-					'restrictions': [
-						'vs/base/~',
-						'vs/base/parts/*/~',
-						'vs/platform/*/~'
-					]
-				},
-				{
-					'target': 'src/vs/platform/desktopRuntime/electrobun-browser/*',
-					'layer': 'electron-browser',
-					'restrictions': [
-						'vs/base/~',
-						'vs/base/parts/*/~',
-						'vs/platform/*/~',
-						'electrobun'
-					]
-				},
-				{
-					'target': 'src/vs/platform/desktopRuntime/electron-browser/electrobunBrowserService.ts',
-					'layer': 'electron-browser',
-					'restrictions': [
-						'vs/base/~',
-						'vs/base/parts/*/~',
-						'vs/platform/*/~',
-						'electrobun'
 					]
 				},
 				{

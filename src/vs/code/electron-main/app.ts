@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, Details, GPUFeatureStatus, powerMonitor, protocol, session, Session, systemPreferences, WebFrameMain } from 'electrobun';
+import { app, Details, GPUFeatureStatus, powerMonitor, protocol, session, Session, systemPreferences, WebFrameMain } from 'electron';
 import { addUNCHostToAllowlist, disableUNCAccessRestrictions } from '../../base/node/unc.js';
 import { validatedIpcMain } from '../../base/parts/ipc/electron-main/ipcMain.js';
 import { hostname, release } from 'os';
@@ -136,9 +136,6 @@ import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js'
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
 import { NativeWebContentExtractorService } from '../../platform/webContentExtractor/electron-main/webContentExtractorService.js';
 import ErrorTelemetry from '../../platform/telemetry/electron-main/errorTelemetry.js';
-import { IDesktopRuntimeMainService } from '../../platform/desktopRuntime/common/desktopRuntime.js';
-import { ElectrobunMainService } from '../../platform/desktopRuntime/electron-main/electrobunMainService.js';
-import type { OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, ProtocolResponse } from '../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 /**
  * The main VS Code application. There will only ever be one instance,
@@ -242,11 +239,11 @@ export class CodeApplication extends Disposable {
 			return false;
 		};
 
-		const isSvgRequestFromSafeContext = (details: OnBeforeRequestListenerDetails | OnHeadersReceivedListenerDetails): boolean => {
+		const isSvgRequestFromSafeContext = (details: Electron.OnBeforeRequestListenerDetails | Electron.OnHeadersReceivedListenerDetails): boolean => {
 			return details.resourceType === 'xhr' || isSafeFrame(details.frame);
 		};
 
-		const isAllowedVsCodeFileRequest = (details: OnBeforeRequestListenerDetails) => {
+		const isAllowedVsCodeFileRequest = (details: Electron.OnBeforeRequestListenerDetails) => {
 			const frame = details.frame;
 			if (!frame || !this.windowsMainService) {
 				return false;
@@ -263,7 +260,7 @@ export class CodeApplication extends Disposable {
 			return false;
 		};
 
-		const isAllowedWebviewRequest = (uri: URI, details: OnBeforeRequestListenerDetails): boolean => {
+		const isAllowedWebviewRequest = (uri: URI, details: Electron.OnBeforeRequestListenerDetails): boolean => {
 			if (uri.path !== '/index.html') {
 				return true; // Only restrict top level page of webviews: index.html
 			}
@@ -681,7 +678,7 @@ export class CodeApplication extends Disposable {
 	}
 
 	private setupManagedRemoteResourceUrlHandler(mainProcessElectronServer: ElectronIPCServer) {
-		const notFound = (): ProtocolResponse => ({ statusCode: 404, data: 'Not found' });
+		const notFound = (): Electron.ProtocolResponse => ({ statusCode: 404, data: 'Not found' });
 		const remoteResourceChannel = new Lazy(() => mainProcessElectronServer.getChannel(
 			NODE_REMOTE_RESOURCE_CHANNEL_NAME,
 			new NodeRemoteResourceRouter(),
@@ -1006,9 +1003,6 @@ export class CodeApplication extends Disposable {
 
 	private async initServices(machineId: string, sqmId: string, devDeviceId: string, sharedProcessReady: Promise<MessagePortClient>): Promise<IInstantiationService> {
 		const services = new ServiceCollection();
-
-		// Desktop Runtime
-		services.set(IDesktopRuntimeMainService, new ElectrobunMainService());
 
 		// Update
 		const isElectrobunRuntime = !!process.versions['bun'] || process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun';

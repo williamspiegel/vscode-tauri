@@ -5,7 +5,7 @@
 
 (function () {
 
-	const { ipcRenderer, webFrame, contextBridge } = require('electrobun');
+	const { ipcRenderer, webFrame, contextBridge } = require('electron');
 
 	function validateIPC(channel: string): true | never {
 		if (!channel?.startsWith('vscode:')) {

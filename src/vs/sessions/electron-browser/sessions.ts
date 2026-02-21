@@ -68,25 +68,7 @@
 		setupNLS<T>(configuration);
 
 		// Compute base URL and set as global
-		const electrobunWindow = window as Window & Partial<Record<'__electrobunInternalBridge' | '__electrobunWindowId', unknown>>;
-		const isElectrobunRuntime = Boolean(electrobunWindow.__electrobunInternalBridge || electrobunWindow.__electrobunWindowId || (safeProcess.versions as Record<string, string | undefined> | undefined)?.['bun'] || safeProcess.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun');
-		const usesElectronScheme = !isElectrobunRuntime;
-		let baseUrl: URL | undefined;
-		if (!usesElectronScheme) {
-			const href = String(window.location.href || '');
-			const marker = '/out/vs/sessions/electron-browser/';
-			const markerIndex = href.indexOf(marker);
-			if (markerIndex >= 0) {
-				baseUrl = new URL(`${href.substring(0, markerIndex)}/out/`);
-			}
-		}
-		if (!baseUrl) {
-			baseUrl = new URL(`${fileUriFromPath(configuration.appRoot, {
-				isWindows: safeProcess.platform === 'win32',
-				scheme: usesElectronScheme ? 'vscode-file' : 'file',
-				fallbackAuthority: usesElectronScheme ? 'vscode-app' : undefined
-			})}/out/`);
-		}
+		const baseUrl = new URL(`${fileUriFromPath(configuration.appRoot, { isWindows: safeProcess.platform === 'win32', scheme: 'vscode-file', fallbackAuthority: 'vscode-app' })}/out/`);
 		globalThis._VSCODE_FILE_ROOT = baseUrl.toString();
 
 		// Dev only: CSS import map tricks
@@ -95,9 +77,7 @@
 		// ESM Import - load the sessions workbench main module
 		try {
 			let workbenchUrl: string;
-			if (!usesElectronScheme) {
-				workbenchUrl = './workbench.desktop.main.js';
-			} else if (!!safeProcess.env['VSCODE_DEV'] && globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
+			if (!!safeProcess.env['VSCODE_DEV'] && globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
 				workbenchUrl = './workbench.desktop.main.js'; // for dev purposes only
 			} else {
 				workbenchUrl = new URL(`vs/sessions/sessions.desktop.main.js`, baseUrl).href;
@@ -312,16 +292,9 @@
 				showSplash(windowConfig);
 
 				// Code windows have a `vscodeWindowId` property to identify them
-				try {
-					const existingWindowIdDescriptor = Object.getOwnPropertyDescriptor(window, 'vscodeWindowId');
-					if (!existingWindowIdDescriptor || existingWindowIdDescriptor.configurable) {
-						Object.defineProperty(window, 'vscodeWindowId', {
-							get: () => windowConfig.windowId
-						});
-					}
-				} catch {
-					// Some runtimes expose this via an unconfigurable getter.
-				}
+				Object.defineProperty(window, 'vscodeWindowId', {
+					get: () => windowConfig.windowId
+				});
 
 				// It looks like browsers only lazily enable
 				// the <canvas> element when needed. Since we
@@ -329,18 +302,12 @@
 				// locations, we try to help the browser to
 				// initialize canvas when it is idle, right
 				// before we wait for the scripts to be loaded.
-				const warmupCanvas = () => {
+				window.requestIdleCallback(() => {
 					const canvas = document.createElement('canvas');
 					const context = canvas.getContext('2d');
 					context?.clearRect(0, 0, canvas.width, canvas.height);
 					canvas.remove();
-				};
-
-				if (typeof window.requestIdleCallback === 'function') {
-					window.requestIdleCallback(warmupCanvas, { timeout: 50 });
-				} else {
-					setTimeout(warmupCanvas, 0);
-				}
+				}, { timeout: 50 });
 
 				// Track import() perf
 				performance.mark('code/willLoadWorkbenchMain');

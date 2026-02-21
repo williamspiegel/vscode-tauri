@@ -3,13 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRuntimeTypes.js';
-
 /* eslint-disable no-restricted-globals */
 
 (function () {
 
-	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electrobun');
+	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electron');
 
 	type ISandboxConfiguration = import('../common/sandboxTypes.js').ISandboxConfiguration;
 
@@ -123,7 +121,7 @@ import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRunti
 				return ipcRenderer.invoke(channel, ...args);
 			},
 
-			on(channel: string, listener: (event: IpcRendererEvent, ...args: unknown[]) => void) {
+			on(channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) {
 				validateIPC(channel);
 
 				ipcRenderer.on(channel, listener);
@@ -131,7 +129,7 @@ import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRunti
 				return this;
 			},
 
-			once(channel: string, listener: (event: IpcRendererEvent, ...args: unknown[]) => void) {
+			once(channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) {
 				validateIPC(channel);
 
 				ipcRenderer.once(channel, listener);
@@ -139,7 +137,7 @@ import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRunti
 				return this;
 			},
 
-			removeListener(channel: string, listener: (event: IpcRendererEvent, ...args: unknown[]) => void) {
+			removeListener(channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) {
 				validateIPC(channel);
 
 				ipcRenderer.removeListener(channel, listener);
@@ -152,7 +150,7 @@ import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRunti
 
 			acquire(responseChannel: string, nonce: string) {
 				if (validateIPC(responseChannel)) {
-					const responseListener = (e: IpcRendererEvent, responseNonce: string) => {
+					const responseListener = (e: Electron.IpcRendererEvent, responseNonce: string) => {
 						// validate that the nonce from the response is the same
 						// as when requested. and if so, use `postMessage` to
 						// send the `MessagePort` safely over, even when context
@@ -213,7 +211,7 @@ import type { IpcRendererEvent, ProcessMemoryInfo } from '../common/desktopRunti
 				return resolveShellEnv;
 			},
 
-			getProcessMemoryInfo(): Promise<ProcessMemoryInfo> {
+			getProcessMemoryInfo(): Promise<Electron.ProcessMemoryInfo> {
 				return process.getProcessMemoryInfo();
 			},
 

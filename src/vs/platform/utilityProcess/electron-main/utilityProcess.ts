@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserWindow, Details, MessageChannelMain, app, utilityProcess, UtilityProcess as ElectronUtilityProcess } from 'electrobun';
+import { BrowserWindow, Details, MessageChannelMain, app, utilityProcess, UtilityProcess as ElectronUtilityProcess } from 'electron';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ILogService } from '../../log/common/log.js';
@@ -18,7 +18,6 @@ import { removeDangerousEnvVariables } from '../../../base/common/processes.js';
 import { deepClone } from '../../../base/common/objects.js';
 import { isWindows } from '../../../base/common/platform.js';
 import { isUNCAccessRestrictionsDisabled, getUNCHostAllowlist } from '../../../base/node/unc.js';
-import type { MessagePortMain } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export interface IUtilityProcessConfiguration {
 
@@ -387,13 +386,13 @@ export class UtilityProcess extends Disposable {
 		}));
 	}
 
-	postMessage(message: unknown, transfer?: MessagePortMain[]): boolean {
+	postMessage(message: unknown, transfer?: Electron.MessagePortMain[]): boolean {
 		if (!this.process) {
 			return false; // already killed, crashed or never started
 		}
 
 		const processCandidate = this.process as unknown as {
-			postMessage?: (message: unknown, transfer?: MessagePortMain[]) => void;
+			postMessage?: (message: unknown, transfer?: Electron.MessagePortMain[]) => void;
 			send?: (message: unknown) => void;
 		};
 
@@ -413,7 +412,7 @@ export class UtilityProcess extends Disposable {
 		return true;
 	}
 
-	connect(payload?: unknown): MessagePortMain {
+	connect(payload?: unknown): Electron.MessagePortMain {
 		const { port1: outPort, port2: utilityProcessPort } = new MessageChannelMain();
 		this.postMessage(payload, [utilityProcessPort]);
 

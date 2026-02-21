@@ -14,6 +14,7 @@ import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.
 import { IOnDidTerminateUtilityrocessWorkerProcess, ipcUtilityProcessWorkerChannelName, IUtilityProcessWorkerProcess, IUtilityProcessWorkerService } from '../../../../platform/utilityProcess/common/utilityProcessWorkerService.js';
 import { Barrier, timeout } from '../../../../base/common/async.js';
 import { Event } from '../../../../base/common/event.js';
+import { emitElectrobunDiagnosticsBeacon } from '../../../../base/common/electrobunDiagnostics.js';
 
 export const IUtilityProcessWorkerWorkbenchService = createDecorator<IUtilityProcessWorkerWorkbenchService>('utilityProcessWorkerWorkbenchService');
 
@@ -121,11 +122,7 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 				? 'VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'
 				: 'electrobun-runtime';
 			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled (${reason}, module: ${workerProcess.moduleId}), using no-op channel.`);
-			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_MESSAGEPORT_DISABLED:${reason}:${workerProcess.moduleId}`)}`);
-			} catch {
-				// ignore diagnostics failures
-			}
+			emitElectrobunDiagnosticsBeacon(`UTILITY_PROCESS_MESSAGEPORT_DISABLED:${reason}:${workerProcess.moduleId}`);
 			return {
 				client: this.noopClient,
 				onDidTerminate: Promise.resolve({ reason: { code: 0, signal: 'unknown' } }),
@@ -173,11 +170,7 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 			this.logService.trace('Renderer->UtilityProcess#createWorkerChannel: connection established');
 		} else {
 			this.logService.warn(`Renderer->UtilityProcess#createWorkerChannel: timed out waiting for MessagePort (module: ${workerProcess.moduleId}), using no-op channel.`);
-			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_CONNECT_TIMEOUT:${workerProcess.moduleId}`)}`);
-			} catch {
-				// ignore diagnostics failures
-			}
+			emitElectrobunDiagnosticsBeacon(`UTILITY_PROCESS_CONNECT_TIMEOUT:${workerProcess.moduleId}`);
 			client = this.noopClient;
 		}
 

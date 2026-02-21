@@ -136,11 +136,11 @@ export function getDevElectronPath(): string {
 
 	switch (process.platform) {
 		case 'darwin':
-			return join(buildPath, 'electrobun', `${product.nameLong}.app`, 'Contents', 'MacOS', `${product.nameShort}`);
+			return join(buildPath, 'electron', `${product.nameLong}.app`, 'Contents', 'MacOS', `${product.nameShort}`);
 		case 'linux':
-			return join(buildPath, 'electrobun', `${product.applicationName}`);
+			return join(buildPath, 'electron', `${product.applicationName}`);
 		case 'win32':
-			return join(buildPath, 'electrobun', `${product.nameShort}.exe`);
+			return join(buildPath, 'electron', `${product.nameShort}.exe`);
 		default:
 			throw new Error('Unsupported platform.');
 	}

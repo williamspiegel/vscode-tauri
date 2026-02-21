@@ -8,6 +8,7 @@ import { MessageChannel } from "node:worker_threads";
 
 const noop = () => undefined;
 const runtimeDebug = process.env["VSCODE_ELECTROBUN_DEBUG"] === "1";
+const runtimeDiagEnabled = process.env["VSCODE_ELECTROBUN_DIAG"] === "1";
 const isForkedVsCodeProcess =
 	typeof process.env["VSCODE_ESM_ENTRYPOINT"] === "string" &&
 	process.env["VSCODE_ESM_ENTRYPOINT"].length > 0;
@@ -28,6 +29,10 @@ const runtimeDiagLogPath =
 	);
 
 function appendRuntimeDiag(message) {
+	if (!runtimeDiagEnabled) {
+		return;
+	}
+
 	try {
 		fs.mkdirSync(path.dirname(runtimeDiagLogPath), { recursive: true });
 		fs.appendFileSync(
@@ -155,16 +160,18 @@ async function createRuntimeFileServer() {
 				}
 
 				let absolutePath = "";
-				if (requestUrl.pathname.startsWith("/DIAGNOSTICS")) {
-					const diagPayload = requestUrl.searchParams.get("data");
-					console.log(
-						"\\n\\n[electrobun-renderer-diag] DIAGNOSTICS VIA FETCH:",
-						diagPayload,
-						"\\n\\n",
-					);
-					appendRuntimeDiag(`[renderer] ${diagPayload ?? "<empty>"}`);
-					response.writeHead(200);
-					response.end("ok");
+					if (requestUrl.pathname.startsWith("/DIAGNOSTICS")) {
+						const diagPayload = requestUrl.searchParams.get("data");
+						if (runtimeDiagEnabled) {
+							console.log(
+								"\\n\\n[electrobun-renderer-diag] DIAGNOSTICS VIA FETCH:",
+								diagPayload,
+								"\\n\\n",
+							);
+						}
+						appendRuntimeDiag(`[renderer] ${diagPayload ?? "<empty>"}`);
+						response.writeHead(200);
+						response.end("ok");
 					return;
 				}
 				if (requestUrl.pathname.startsWith("/fs/")) {
@@ -319,11 +326,13 @@ export default defaultExport;
 				settle(undefined);
 				return;
 			}
-			const origin = `http://127.0.0.1:${address.port}`;
-			console.log("[electrobun-runtime-shim] Runtime file server", origin);
-			settle({ origin, server });
+				const origin = `http://127.0.0.1:${address.port}`;
+				if (runtimeDebug || runtimeDiagEnabled) {
+					console.log("[electrobun-runtime-shim] Runtime file server", origin);
+				}
+				settle({ origin, server });
+			});
 		});
-	});
 }
 
 const runtimeFileServer = shouldStartRuntimeFileServer
@@ -1141,7 +1150,9 @@ app.dock = {
 };
 
 function emitAppReadyLifecycle() {
-	console.log("[electrobun-runtime-shim] emitAppReadyLifecycle called");
+	if (runtimeDiagEnabled) {
+		console.log("[electrobun-runtime-shim] emitAppReadyLifecycle called");
+	}
 	if (appReady) {
 		return;
 	}
@@ -1149,7 +1160,9 @@ function emitAppReadyLifecycle() {
 	appEmitter.emit("will-finish-launching");
 	appReady = true;
 	resolveAppReady?.();
-	console.log("[electrobun-runtime-shim] Emitting ready event");
+	if (runtimeDiagEnabled) {
+		console.log("[electrobun-runtime-shim] Emitting ready event");
+	}
 	appEmitter.emit("ready");
 }
 
@@ -1162,7 +1175,9 @@ const originalOnce = app.once.bind(app);
 const originalAddListener = app.addListener.bind(app);
 
 function invokeReadyListener(listener) {
-	console.log("[electrobun-runtime-shim] invokeReadyListener called");
+	if (runtimeDiagEnabled) {
+		console.log("[electrobun-runtime-shim] invokeReadyListener called");
+	}
 	queueMicrotask(() => {
 		try {
 			listener();
@@ -1791,27 +1806,31 @@ export class BrowserWindow extends EventEmitter {
 					preload: runtimePreloadScript,
 				});
 
-				if (typeof this._nativeWindow.id === "number") {
-					this.id = this._nativeWindow.id;
-				}
-				console.log(
-					"[electrobun-runtime-shim] Created native BrowserWindow",
-					this.id,
-					this._bounds,
-					{
-						titleBarStyle: options.titleBarStyle,
-						runtimeTitleBarStyle,
-						runtimeRenderer,
-						runtimeSandbox,
-					},
-				);
-				if (this._visible) {
-					console.log(
-						"[electrobun-runtime-shim] Showing native BrowserWindow",
-						this.id,
-					);
-					this._nativeWindow.show?.();
-					this._nativeWindow.focus?.();
+					if (typeof this._nativeWindow.id === "number") {
+						this.id = this._nativeWindow.id;
+					}
+					if (runtimeDiagEnabled) {
+						console.log(
+							"[electrobun-runtime-shim] Created native BrowserWindow",
+							this.id,
+							this._bounds,
+							{
+								titleBarStyle: options.titleBarStyle,
+								runtimeTitleBarStyle,
+								runtimeRenderer,
+								runtimeSandbox,
+							},
+						);
+					}
+					if (this._visible) {
+						if (runtimeDiagEnabled) {
+							console.log(
+								"[electrobun-runtime-shim] Showing native BrowserWindow",
+								this.id,
+							);
+						}
+						this._nativeWindow.show?.();
+						this._nativeWindow.focus?.();
 
 					if (runtimeDebug) {
 						try {
@@ -2301,7 +2320,7 @@ const ipcMainEmitter = runtimeSharedState.ipcMainEmitter;
 
 export const ipcMain = Object.assign(ipcMainEmitter, {
 	handle(channel, handler) {
-		if (typeof channel === "string" && channel.startsWith("vscode:")) {
+		if (runtimeDiagEnabled && typeof channel === "string" && channel.startsWith("vscode:")) {
 			console.log("[electrobun-runtime-shim] ipcMain.handle", channel);
 		}
 		ipcHandlers.set(channel, handler);
@@ -2319,14 +2338,14 @@ export const ipcMain = Object.assign(ipcMainEmitter, {
 
 export const ipcRenderer = Object.assign(new EventEmitter(), {
 	send(channel, ...args) {
-		if (typeof channel === "string" && channel.startsWith("vscode:")) {
+		if (runtimeDiagEnabled && typeof channel === "string" && channel.startsWith("vscode:")) {
 			console.log("[electrobun-runtime-shim] ipcRenderer.send", channel);
 		}
 		ipcMainEmitter.emit(channel, { sender: ipcRenderer }, ...args);
 	},
 	async invoke(channel, ...args) {
 		const handler = ipcHandlers.get(channel);
-		if (typeof channel === "string" && channel.startsWith("vscode:")) {
+		if (runtimeDiagEnabled && typeof channel === "string" && channel.startsWith("vscode:")) {
 			console.log(
 				"[electrobun-runtime-shim] ipcRenderer.invoke",
 				channel,

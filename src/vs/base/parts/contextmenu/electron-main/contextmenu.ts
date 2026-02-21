@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IpcMainEvent, Menu, MenuItem } from 'electrobun';
+import { IpcMainEvent, Menu, MenuItem } from 'electron';
 import { validatedIpcMain } from '../../ipc/electron-main/ipcMain.js';
 import { CONTEXT_MENU_CHANNEL, CONTEXT_MENU_CLOSE_CHANNEL, IPopupOptions, ISerializableContextMenuItem } from '../common/contextmenu.js';
 

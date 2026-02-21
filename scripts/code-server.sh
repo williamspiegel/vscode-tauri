@@ -10,7 +10,7 @@ fi
 function code() {
 	pushd $ROOT
 
-	# Get electrobun runtime, compile, built-in extensions
+	# Get electron, compile, built-in extensions
 	if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
 		node build/lib/preLaunch.ts
 	fi

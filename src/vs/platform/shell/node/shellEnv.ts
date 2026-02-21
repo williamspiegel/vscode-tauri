@@ -101,9 +101,7 @@ export async function getResolvedShellEnv(configurationService: IConfigurationSe
 
 async function doResolveUnixShellEnv(logService: ILogService, token: CancellationToken): Promise<typeof process.env> {
 	const runAsNode = process.env['ELECTRON_RUN_AS_NODE'];
-	const runAsNodeElectrobun = process.env['ELECTROBUN_RUN_AS_NODE'];
 	logService.trace('getUnixShellEnvironment#runAsNode', runAsNode);
-	logService.trace('getUnixShellEnvironment#runAsNodeElectrobun', runAsNodeElectrobun);
 
 	const noAttach = process.env['ELECTRON_NO_ATTACH_CONSOLE'];
 	logService.trace('getUnixShellEnvironment#noAttach', noAttach);
@@ -114,7 +112,6 @@ async function doResolveUnixShellEnv(logService: ILogService, token: Cancellatio
 	const env = {
 		...process.env,
 		ELECTRON_RUN_AS_NODE: '1',
-		ELECTROBUN_RUN_AS_NODE: '1',
 		ELECTRON_NO_ATTACH_CONSOLE: '1',
 		VSCODE_RESOLVING_ENVIRONMENT: '1'
 	};
@@ -201,12 +198,6 @@ async function doResolveUnixShellEnv(logService: ILogService, token: Cancellatio
 					env['ELECTRON_RUN_AS_NODE'] = runAsNode;
 				} else {
 					delete env['ELECTRON_RUN_AS_NODE'];
-				}
-
-				if (runAsNodeElectrobun) {
-					env['ELECTROBUN_RUN_AS_NODE'] = runAsNodeElectrobun;
-				} else {
-					delete env['ELECTROBUN_RUN_AS_NODE'];
 				}
 
 				if (noAttach) {

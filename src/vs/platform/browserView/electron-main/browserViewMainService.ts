@@ -17,7 +17,6 @@ import { IWindowsMainService } from '../../windows/electron-main/windows.js';
 import { BrowserSession } from './browserSession.js';
 import { IProductService } from '../../product/common/productService.js';
 import { CDPBrowserProxy } from '../common/cdp/proxy.js';
-import type { WebContents, WebContentsViewConstructorOptions } from '../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 export const IBrowserViewMainService = createDecorator<IBrowserViewMainService>('browserViewMainService');
 
@@ -34,7 +33,7 @@ export class BrowserViewMainService extends Disposable implements IBrowserViewMa
 	 * Check if a webContents belongs to an integrated browser view.
 	 * Delegates to {@link BrowserSession.isBrowserViewWebContents}.
 	 */
-	static isBrowserViewWebContents(contents: WebContents): boolean {
+	static isBrowserViewWebContents(contents: Electron.WebContents): boolean {
 		return BrowserSession.isBrowserViewWebContents(contents);
 	}
 
@@ -59,7 +58,7 @@ export class BrowserViewMainService extends Disposable implements IBrowserViewMa
 	/**
 	 * Create a browser view backed by the given {@link BrowserSession}.
 	 */
-	private createBrowserView(id: string, browserSession: BrowserSession, options?: WebContentsViewConstructorOptions): BrowserView {
+	private createBrowserView(id: string, browserSession: BrowserSession, options?: Electron.WebContentsViewConstructorOptions): BrowserView {
 		if (this.browserViews.has(id)) {
 			throw new Error(`Browser view with id ${id} already exists`);
 		}
@@ -69,7 +68,7 @@ export class BrowserViewMainService extends Disposable implements IBrowserViewMa
 			id,
 			browserSession,
 			// Recursive factory for nested windows (child views share the same session)
-			(childOptions?: WebContentsViewConstructorOptions) => this.createBrowserView(generateUuid(), browserSession, childOptions),
+			(childOptions) => this.createBrowserView(generateUuid(), browserSession, childOptions),
 			options
 		);
 		this.browserViews.set(id, view);

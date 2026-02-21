@@ -39,6 +39,7 @@ import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { IRemoteAgentService } from '../../../services/remote/common/remoteAgentService.js';
 import { shouldUseEnvironmentVariableCollection } from '../../../../platform/terminal/common/terminalEnvironment.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { emitElectrobunDiagnosticsBeacon } from '../../../../base/common/electrobunDiagnostics.js';
 
 export class LocalTerminalBackendContribution implements IWorkbenchContribution {
 
@@ -187,11 +188,7 @@ class LocalTerminalBackend extends BaseTerminalBackend implements ITerminalBacke
 			this._directProxyClientEventually = undefined;
 			this._directProxy = undefined;
 			this._ensureIndirectProxyConnected('direct-messageport-failed', error);
-			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`PTY_CONNECT_TIMEOUT:${String(error)}`)}`);
-			} catch {
-				// ignore diagnostic failures
-			}
+			emitElectrobunDiagnosticsBeacon(`PTY_CONNECT_TIMEOUT:${String(error)}`);
 		});
 	}
 

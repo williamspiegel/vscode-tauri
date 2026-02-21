@@ -12,7 +12,6 @@ import { NullLogService } from '../../../log/common/log.js';
 import { AXNode } from '../../electron-main/cdpAccessibilityDomain.js';
 import { WebPageLoader } from '../../electron-main/webPageLoader.js';
 import { IWebContentExtractorOptions } from '../../common/webContentExtractor.js';
-import type { BrowserWindowConstructorOptions } from '../../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 interface MockElectronEvent {
 	preventDefault?: sinon.SinonStub;
@@ -106,7 +105,7 @@ class MockBrowserWindow {
 	public destroy = sinon.stub();
 	public loadURL = sinon.stub().resolves();
 
-	constructor(_options?: BrowserWindowConstructorOptions) {
+	constructor(_options?: Electron.BrowserWindowConstructorOptions) {
 		this.webContents = new MockWebContents();
 	}
 }

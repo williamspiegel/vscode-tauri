@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserWindow, IpcMainEvent, MessagePortMain } from 'electrobun';
+import { BrowserWindow, IpcMainEvent, MessagePortMain } from 'electron';
 import { validatedIpcMain } from './ipcMain.js';
 import { Event } from '../../../common/event.js';
 import { IDisposable } from '../../../common/lifecycle.js';

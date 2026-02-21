@@ -20,15 +20,6 @@
 			"DOM",
 			"DOM.Iterable",
 			"WebWorker.ImportScripts"
-		],
-		"baseUrl": ".",
-		"paths": {
-			"electrobun": [
-				"./typings/electrobun.d.cts"
-			],
-			"electrobun/*": [
-				"./typings/electrobun.d.cts"
-			]
-		}
+		]
 	}
 }

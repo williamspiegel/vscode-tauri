@@ -32,7 +32,6 @@ import { UserDataProfilesMainService } from '../../../userDataProfile/electron-m
 import { IRawFileWorkspaceFolder, IRawUriWorkspaceFolder, WORKSPACE_EXTENSION } from '../../../workspace/common/workspace.js';
 import { IStoredWorkspace, IStoredWorkspaceFolder, IWorkspaceFolderCreationData, rewriteWorkspaceFileForNewLocation } from '../../common/workspaces.js';
 import { WorkspacesManagementMainService } from '../../electron-main/workspacesManagementMainService.js';
-import type { BrowserWindow, MessageBoxOptions, MessageBoxReturnValue, SaveDialogOptions, SaveDialogReturnValue, OpenDialogOptions, OpenDialogReturnValue } from '../../../../base/parts/sandbox/common/desktopRuntimeTypes.js';
 
 flakySuite('WorkspacesManagementMainService', () => {
 
@@ -40,13 +39,13 @@ flakySuite('WorkspacesManagementMainService', () => {
 
 		declare readonly _serviceBrand: undefined;
 
-		pickFileFolder(options: INativeOpenDialogOptions, window?: BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
-		pickFolder(options: INativeOpenDialogOptions, window?: BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
-		pickFile(options: INativeOpenDialogOptions, window?: BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
-		pickWorkspace(options: INativeOpenDialogOptions, window?: BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
-		showMessageBox(options: MessageBoxOptions, window?: BrowserWindow | undefined): Promise<MessageBoxReturnValue> { throw new Error('Method not implemented.'); }
-		showSaveDialog(options: SaveDialogOptions, window?: BrowserWindow | undefined): Promise<SaveDialogReturnValue> { throw new Error('Method not implemented.'); }
-		showOpenDialog(options: OpenDialogOptions, window?: BrowserWindow | undefined): Promise<OpenDialogReturnValue> { throw new Error('Method not implemented.'); }
+		pickFileFolder(options: INativeOpenDialogOptions, window?: Electron.BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
+		pickFolder(options: INativeOpenDialogOptions, window?: Electron.BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
+		pickFile(options: INativeOpenDialogOptions, window?: Electron.BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
+		pickWorkspace(options: INativeOpenDialogOptions, window?: Electron.BrowserWindow | undefined): Promise<string[] | undefined> { throw new Error('Method not implemented.'); }
+		showMessageBox(options: Electron.MessageBoxOptions, window?: Electron.BrowserWindow | undefined): Promise<Electron.MessageBoxReturnValue> { throw new Error('Method not implemented.'); }
+		showSaveDialog(options: Electron.SaveDialogOptions, window?: Electron.BrowserWindow | undefined): Promise<Electron.SaveDialogReturnValue> { throw new Error('Method not implemented.'); }
+		showOpenDialog(options: Electron.OpenDialogOptions, window?: Electron.BrowserWindow | undefined): Promise<Electron.OpenDialogReturnValue> { throw new Error('Method not implemented.'); }
 	}
 
 	class TestBackupMainService implements IBackupMainService {

@@ -13,6 +13,7 @@ import { mark } from '../../../../base/common/performance.js';
 import { Barrier, timeout } from '../../../../base/common/async.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
 import { Event } from '../../../../base/common/event.js';
+import { emitElectrobunDiagnosticsBeacon } from '../../../../base/common/electrobunDiagnostics.js';
 
 type ISharedProcessConnection = Pick<MessagePortClient, 'getChannel' | 'registerChannel'>;
 
@@ -55,11 +56,7 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 				? 'VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'
 				: 'electrobun-runtime';
 			this.logService.warn(`Renderer->SharedProcess#connect: MessagePort transport disabled (${reason}), using no-op shared process connection.`);
-			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`SHARED_PROCESS_MESSAGEPORT_DISABLED:${reason}`)}`);
-			} catch {
-				// ignore diagnostic failures
-			}
+			emitElectrobunDiagnosticsBeacon(`SHARED_PROCESS_MESSAGEPORT_DISABLED:${reason}`);
 			return {
 				getChannel: () => noopSharedProcessChannel,
 				registerChannel: () => undefined
@@ -85,11 +82,7 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 		mark('code/didConnectSharedProcess');
 		if (!port) {
 			this.logService.warn('Renderer->SharedProcess#connect: timed out waiting for MessagePort, using no-op shared process connection.');
-			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('SHARED_PROCESS_CONNECT_TIMEOUT')}`);
-			} catch {
-				// ignore diagnostic failures
-			}
+			emitElectrobunDiagnosticsBeacon('SHARED_PROCESS_CONNECT_TIMEOUT');
 			return {
 				getChannel: () => noopSharedProcessChannel,
 				registerChannel: () => undefined
@@ -135,11 +128,7 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 		}
 
 		this.logService.warn('Renderer->SharedProcess#createRawConnection: timed out waiting for MessagePort, returning local fallback port.');
-		try {
-			void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent('SHARED_PROCESS_RAW_TIMEOUT')}`);
-		} catch {
-			// ignore diagnostic failures
-		}
+		emitElectrobunDiagnosticsBeacon('SHARED_PROCESS_RAW_TIMEOUT');
 		const fallbackChannel = new MessageChannel();
 		return fallbackChannel.port1;
 	}

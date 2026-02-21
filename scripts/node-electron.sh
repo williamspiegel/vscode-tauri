@@ -12,27 +12,26 @@ pushd $ROOT
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	NAME=`node -p "require('./product.json').nameLong"`
 	EXE_NAME=`node -p "require('./product.json').nameShort"`
-	CODE="$ROOT/.build/electrobun/$NAME.app/Contents/MacOS/$EXE_NAME"
+	CODE="$ROOT/.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
 else
 	NAME=`node -p "require('./product.json').applicationName"`
-	CODE="$ROOT/.build/electrobun/$NAME"
+	CODE="$ROOT/.build/electron/$NAME"
 fi
 
-# Get electrobun runtime
+# Get electron
 if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
-	npm run electrobun
+	npm run electron
 fi
 
 popd
 
 export VSCODE_DEV=1
-export VSCODE_DESKTOP_RUNTIME=electrobun
 if [[ "$OSTYPE" == "darwin"* ]]; then
-	ulimit -n 4096 ; ELECTRON_RUN_AS_NODE=1 ELECTROBUN_RUN_AS_NODE=1 \
+	ulimit -n 4096 ; ELECTRON_RUN_AS_NODE=1 \
 		"$CODE" \
 		"$@"
 else
-	ELECTRON_RUN_AS_NODE=1 ELECTROBUN_RUN_AS_NODE=1 \
+	ELECTRON_RUN_AS_NODE=1 \
 		"$CODE" \
 		"$@"
 fi

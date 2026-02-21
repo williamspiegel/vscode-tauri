@@ -11,6 +11,7 @@ import vfs from 'vinyl-fs';
 import rename from 'gulp-rename';
 import replace from 'gulp-replace';
 import filter from 'gulp-filter';
+import electron from '@vscode/gulp-electron';
 import jsonEditor from 'gulp-json-editor';
 import * as util from './lib/util.ts';
 import { getVersion } from './lib/getVersion.ts';
@@ -512,11 +513,23 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			all = es.merge(all, shortcut, policyDest);
 		}
 
+		const electronConfig = {
+			...config,
+			platform,
+			arch: arch === 'armhf' ? 'arm' : arch,
+			ffmpegChromium: false,
+			...(embedded ? {
+				darwinMiniAppName: embedded.nameShort,
+				darwinMiniAppBundleIdentifier: embedded.darwinBundleIdentifier,
+				darwinMiniAppIcon: 'resources/darwin/sessions.icns',
+			} : {})
+		};
+
 		let result: NodeJS.ReadWriteStream = all
 			.pipe(util.skipDirectories())
 			.pipe(util.fixWin32DirectoryPermissions())
 			.pipe(filter(['**', '!**/.github/**'], { dot: true })) // https://github.com/microsoft/vscode/issues/116523
-			// .pipe(electron(electronConfig)) // Removed for Electrobun
+			.pipe(electron(electronConfig))
 			.pipe(filter(['**', '!LICENSE', '!version'], { dot: true }));
 
 		if (platform === 'linux') {

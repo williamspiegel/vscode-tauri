@@ -121,18 +121,24 @@ function rewriteOutImportsToRuntimeShim(runtimeShimPath: string, runtimeShimCjsP
 				continue;
 			}
 
-			if (!entry.isFile() || !entry.name.endsWith('.js')) {
-				continue;
-			}
+				if (!entry.isFile() || !entry.name.endsWith('.js')) {
+					continue;
+				}
 
-			const originalText = fs.readFileSync(fullPath, 'utf8');
-			const updatedText = originalText
-				.replace(/from 'electrobun'/g, `from '${runtimeShimPath}'`)
-				.replace(/from "electrobun"/g, `from "${runtimeShimPath}"`)
-				.replace(/require\('electrobun'\)/g, `require('${runtimeShimCjsPath}')`)
-				.replace(/require\("electrobun"\)/g, `require("${runtimeShimCjsPath}")`)
-				.replaceAll(`require('${runtimeShimPath}')`, `require('${runtimeShimCjsPath}')`)
-				.replaceAll(`require("${runtimeShimPath}")`, `require("${runtimeShimCjsPath}")`);
+				const originalText = fs.readFileSync(fullPath, 'utf8');
+				const updatedText = originalText
+					.replace(/from 'electron'/g, `from '${runtimeShimPath}'`)
+					.replace(/from "electron"/g, `from "${runtimeShimPath}"`)
+					.replace(/require\('electron'\)/g, `require('${runtimeShimCjsPath}')`)
+					.replace(/require\("electron"\)/g, `require("${runtimeShimCjsPath}")`)
+					.replace(/import\('electron'\)/g, `import('${runtimeShimPath}')`)
+					.replace(/import\("electron"\)/g, `import("${runtimeShimPath}")`)
+					.replace(/from 'electrobun'/g, `from '${runtimeShimPath}'`)
+					.replace(/from "electrobun"/g, `from "${runtimeShimPath}"`)
+					.replace(/require\('electrobun'\)/g, `require('${runtimeShimCjsPath}')`)
+					.replace(/require\("electrobun"\)/g, `require("${runtimeShimCjsPath}")`)
+					.replaceAll(`require('${runtimeShimPath}')`, `require('${runtimeShimCjsPath}')`)
+					.replaceAll(`require("${runtimeShimPath}")`, `require("${runtimeShimCjsPath}")`);
 
 			if (updatedText !== originalText) {
 				fs.writeFileSync(fullPath, updatedText, 'utf8');

@@ -236,7 +236,6 @@ export async function getApplication({ recordVideo, workspacePath }: { recordVid
 	process.env.VSCODE_DEV = '1';
 	process.env.VSCODE_CLI = '1';
 	delete process.env.ELECTRON_RUN_AS_NODE; // Ensure we run as Node.js
-	delete process.env.ELECTROBUN_RUN_AS_NODE;
 
 	await setup();
 	const application = createApp({

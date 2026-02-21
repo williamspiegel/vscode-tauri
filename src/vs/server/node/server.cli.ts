@@ -278,7 +278,7 @@ export async function main(desc: ProductDescription, args: string[]): Promise<vo
 			});
 		} else {
 			const cliCwd = dirname(cliCommand);
-			const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', ELECTROBUN_RUN_AS_NODE: '1' };
+			const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
 			const versionFolder = desc.commit.substring(0, 10);
 			if (fs.existsSync(join(cliCwd, versionFolder))) {
 				newCommandline.unshift(`${versionFolder}/resources/app/out/cli.js`);
@@ -286,7 +286,7 @@ export async function main(desc: ProductDescription, args: string[]): Promise<vo
 				newCommandline.unshift('resources/app/out/cli.js');
 			}
 			if (verbose) {
-				console.log(`Invoking: cd "${cliCwd}" && ELECTRON_RUN_AS_NODE=1 ELECTROBUN_RUN_AS_NODE=1 "${cliCommand}" "${newCommandline.join('" "')}"`);
+				console.log(`Invoking: cd "${cliCwd}" && ELECTRON_RUN_AS_NODE=1 "${cliCommand}" "${newCommandline.join('" "')}"`);
 			}
 			if (runningInWSL2()) {
 				if (verbose) {

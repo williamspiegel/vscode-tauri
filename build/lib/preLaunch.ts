@@ -32,8 +32,8 @@ async function ensureNodeModules() {
 	}
 }
 
-async function getElectrobun() {
-	await runProcess(npm, ['run', 'electrobun']);
+async function getElectron() {
+	await runProcess(npm, ['run', 'electron']);
 }
 
 async function ensureCompiled() {
@@ -44,7 +44,7 @@ async function ensureCompiled() {
 
 async function main() {
 	await ensureNodeModules();
-	await getElectrobun();
+	await getElectron();
 	await ensureCompiled();
 
 	// Can't require this until after dependencies are installed

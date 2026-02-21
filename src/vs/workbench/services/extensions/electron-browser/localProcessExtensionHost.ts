@@ -363,10 +363,7 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 		writeExtHostConnection(new MessagePortExtHostConnection(), opts.env);
 
 		// Get ready to acquire the message port from the shared process worker
-		const portPromise = Promise.race<MessagePort | undefined>([
-			acquirePort(undefined /* we trigger the request via service call! */, opts.responseChannel, opts.responseNonce).catch(() => undefined),
-			timeout(15000).then(() => undefined)
-		]);
+		const portPromise = acquirePort(undefined /* we trigger the request via service call! */, opts.responseChannel, opts.responseNonce);
 
 		return new Promise<IMessagePassingProtocol>((resolve, reject) => {
 
@@ -375,12 +372,6 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 			}, 60 * 1000);
 
 			portPromise.then((port) => {
-				if (!port) {
-					clearTimeout(handle);
-					reject('Failed to establish extension host MessagePort connection.');
-					return;
-				}
-
 				this._register(toDisposable(() => {
 					// Close the message port when the extension host is disposed
 					port.close();
@@ -400,9 +391,6 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 					onMessage: onMessage.event,
 					send: message => port.postMessage(message.buffer),
 				});
-			}, error => {
-				clearTimeout(handle);
-				reject(error);
 			});
 
 			// Now that the message port listener is installed, start the ext host process

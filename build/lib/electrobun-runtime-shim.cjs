@@ -3,6 +3,7 @@
 const { EventEmitter } = require('node:events');
 
 const noop = () => undefined;
+const runtimeDiagEnabled = process.env['VSCODE_ELECTROBUN_DIAG'] === '1';
 
 const sharedState = globalThis.__electrobunRuntimeSharedState ?? (globalThis.__electrobunRuntimeSharedState = {
 	ipcHandlers: new Map(),
@@ -14,18 +15,18 @@ const ipcMainEmitter = sharedState.ipcMainEmitter;
 
 const ipcRenderer = Object.assign(new EventEmitter(), {
 	send(channel, ...args) {
-		if (typeof channel === 'string' && channel.startsWith('vscode:')) {
+		if (runtimeDiagEnabled && typeof channel === 'string' && channel.startsWith('vscode:')) {
 			console.log('[electrobun-runtime-shim.cjs] ipcRenderer.send', channel);
 		}
 		ipcMainEmitter.emit(channel, { sender: ipcRenderer }, ...args);
 	},
 	async invoke(channel, ...args) {
-		if (typeof channel === 'string' && channel.startsWith('vscode:')) {
+		if (runtimeDiagEnabled && typeof channel === 'string' && channel.startsWith('vscode:')) {
 			console.log('[electrobun-runtime-shim.cjs] ipcRenderer.invoke', channel);
 		}
 		const handler = ipcHandlers.get(channel);
 		if (!handler) {
-			if (typeof channel === 'string' && channel.startsWith('vscode:')) {
+			if (runtimeDiagEnabled && typeof channel === 'string' && channel.startsWith('vscode:')) {
 				console.warn('[electrobun-runtime-shim.cjs] ipcRenderer.invoke missing handler', channel);
 			}
 			return undefined;

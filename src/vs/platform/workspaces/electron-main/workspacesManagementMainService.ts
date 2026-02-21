@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
-import electron from 'electrobun';
+import electron from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { parse } from '../../../base/common/json.js';
 import { Disposable } from '../../../base/common/lifecycle.js';

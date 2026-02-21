@@ -13,13 +13,13 @@ function code() {
 	if [[ "$OSTYPE" == "darwin"* ]]; then
 		NAME=`node -p "require('./product.json').nameLong"`
 		EXE_NAME=`node -p "require('./product.json').nameShort"`
-		CODE="./.build/electrobun/$NAME.app/Contents/MacOS/$EXE_NAME"
+		CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
 	else
 		NAME=`node -p "require('./product.json').applicationName"`
-		CODE=".build/electrobun/$NAME"
+		CODE=".build/electron/$NAME"
 	fi
 
-	# Get electrobun runtime, compile, built-in extensions
+	# Get electron, compile, built-in extensions
 	if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
 		node build/lib/preLaunch.ts
 	fi
@@ -37,10 +37,8 @@ function code() {
 	fi
 
 	ELECTRON_RUN_AS_NODE=1 \
-	ELECTROBUN_RUN_AS_NODE=1 \
 	NODE_ENV=development \
 	VSCODE_DEV=1 \
-	VSCODE_DESKTOP_RUNTIME=electrobun \
 	ELECTRON_ENABLE_LOGGING=1 \
 	ELECTRON_ENABLE_STACK_DUMPING=1 \
 	"$CODE" --inspect=5874 "$ROOT/out/cli.js" . $DISABLE_TEST_EXTENSION "$@"

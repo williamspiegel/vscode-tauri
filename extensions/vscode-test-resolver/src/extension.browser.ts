@@ -82,12 +82,6 @@ class OpeningManagedMessagePassing {
 	private isOpen = false;
 	private bufferedData: Uint8Array[] = [];
 
-	private toWebSocketPayload(data: Uint8Array): BufferSource {
-		const payload = new Uint8Array(data.byteLength);
-		payload.set(data);
-		return payload;
-	}
-
 	constructor(
 		url: URL,
 		dataEmitter: vscode.EventEmitter<Uint8Array>,
@@ -104,7 +98,7 @@ class OpeningManagedMessagePassing {
 		this.socket.addEventListener('open', () => {
 			while (this.bufferedData.length > 0) {
 				const first = this.bufferedData.shift()!;
-				this.socket.send(this.toWebSocketPayload(first));
+				this.socket.send(first);
 			}
 			this.isOpen = true;
 
@@ -130,7 +124,7 @@ class OpeningManagedMessagePassing {
 			this.bufferedData.push(d);
 			return;
 		}
-		this.socket.send(this.toWebSocketPayload(d));
+		this.socket.send(d);
 	}
 
 	public end(): void {
