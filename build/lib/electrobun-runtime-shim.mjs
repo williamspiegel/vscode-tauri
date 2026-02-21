@@ -8,6 +8,10 @@ import { MessageChannel } from "node:worker_threads";
 
 const noop = () => undefined;
 const runtimeDebug = process.env["VSCODE_ELECTROBUN_DEBUG"] === "1";
+const isForkedVsCodeProcess =
+	typeof process.env["VSCODE_ESM_ENTRYPOINT"] === "string" &&
+	process.env["VSCODE_ESM_ENTRYPOINT"].length > 0;
+const shouldStartRuntimeFileServer = !isForkedVsCodeProcess;
 const vscodeWindowConfigurations = new Map();
 const vscodeWindowConfigurationsByChannel = new Map();
 const rendererHostWebviewIds = new Map();
@@ -63,14 +67,6 @@ function reviveSerializedIpcArg(value) {
 		if (value.type === "Buffer" && Array.isArray(value.data)) {
 			return Buffer.from(value.data);
 		}
-		const keys = Object.keys(value);
-		if (keys.length > 0 && keys.every((key) => /^\d+$/.test(key))) {
-			const sortedNumericKeys = keys.sort((a, b) => Number(a) - Number(b));
-			const bytes = Uint8Array.from(
-				sortedNumericKeys.map((key) => Number(value[key]) || 0),
-			);
-			return Buffer.from(bytes);
-		}
 	}
 	return value;
 }
@@ -102,28 +98,32 @@ function getFileContentType(filePath) {
 
 function stripMissingSourceMapReferences(filePath, fileContents) {
 	const sourceText = fileContents.toString("utf8");
-	const sourceMapPattern = /^[ \t]*\/\/[#@][ \t]*sourceMappingURL=([^\s]+)[ \t]*$/gm;
+	const sourceMapPattern =
+		/^[ \t]*\/\/[#@][ \t]*sourceMappingURL=([^\s]+)[ \t]*$/gm;
 
 	let changed = false;
-	const rewritten = sourceText.replace(sourceMapPattern, (fullMatch, rawTarget) => {
-		const target = String(rawTarget ?? "").trim();
-		if (
-			!target ||
-			target.startsWith("data:") ||
-			target.startsWith("http://") ||
-			target.startsWith("https://")
-		) {
-			return fullMatch;
-		}
+	const rewritten = sourceText.replace(
+		sourceMapPattern,
+		(fullMatch, rawTarget) => {
+			const target = String(rawTarget ?? "").trim();
+			if (
+				!target ||
+				target.startsWith("data:") ||
+				target.startsWith("http://") ||
+				target.startsWith("https://")
+			) {
+				return fullMatch;
+			}
 
-		const targetPath = path.resolve(path.dirname(filePath), target);
-		if (fs.existsSync(targetPath)) {
-			return fullMatch;
-		}
+			const targetPath = path.resolve(path.dirname(filePath), target);
+			if (fs.existsSync(targetPath)) {
+				return fullMatch;
+			}
 
-		changed = true;
-		return "";
-	});
+			changed = true;
+			return "";
+		},
+	);
 
 	return changed ? Buffer.from(rewritten, "utf8") : fileContents;
 }
@@ -280,7 +280,11 @@ export default defaultExport;
 					}
 
 					let responseContents = contents;
-					if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
+					if (
+						extension === ".js" ||
+						extension === ".mjs" ||
+						extension === ".cjs"
+					) {
 						responseContents = stripMissingSourceMapReferences(
 							absolutePath,
 							responseContents,
@@ -322,7 +326,9 @@ export default defaultExport;
 	});
 }
 
-const runtimeFileServer = await createRuntimeFileServer();
+const runtimeFileServer = shouldStartRuntimeFileServer
+	? await createRuntimeFileServer()
+	: undefined;
 
 function translateElectronUrlToRuntime(url) {
 	if (typeof url !== "string") {
@@ -426,7 +432,7 @@ try {
 			if (index >= 0) {
 				__vscodeInFlightBatches.splice(index, 1);
 			}
-		}, 250);
+		}, 10000);
 	}
 
 	function __vscodeEnsureVirtualPort(portId) {
@@ -495,6 +501,12 @@ try {
 	}
 
 	function __vscodeReviveArg(value) {
+		if (value instanceof ArrayBuffer) {
+			return new Uint8Array(value);
+		}
+		if (ArrayBuffer.isView(value)) {
+			return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+		}
 		if (value && typeof value === 'object') {
 			if (value.type === 'Buffer' && Array.isArray(value.data)) {
 				return Uint8Array.from(value.data);
@@ -504,6 +516,29 @@ try {
 				const sortedKeys = keys.sort((a, b) => Number(a) - Number(b));
 				return Uint8Array.from(sortedKeys.map((key) => Number(value[key]) || 0));
 			}
+		}
+		return value;
+	}
+
+	function __vscodeSerializeArg(value) {
+		if (value instanceof ArrayBuffer) {
+			return { type: 'Buffer', data: Array.from(new Uint8Array(value)) };
+		}
+		if (ArrayBuffer.isView(value)) {
+			return {
+				type: 'Buffer',
+				data: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+			};
+		}
+		if (Array.isArray(value)) {
+			return value.map(__vscodeSerializeArg);
+		}
+		if (value && typeof value === 'object') {
+			const revived = {};
+			for (const [key, entryValue] of Object.entries(value)) {
+				revived[key] = __vscodeSerializeArg(entryValue);
+			}
+			return revived;
 		}
 		return value;
 	}
@@ -565,7 +600,7 @@ try {
 			return;
 		}
 		__vscodeBridgeBusy = true;
-		const batchEntries = __vscodeOutgoingQueue.splice(0, Math.min(__vscodeOutgoingQueue.length, 16));
+		const batchEntries = __vscodeOutgoingQueue.splice(0, Math.min(__vscodeOutgoingQueue.length, 8));
 		const batch = JSON.stringify(batchEntries);
 		const posted = __vscodePostBatch(batch);
 		if (!posted) {
@@ -578,7 +613,7 @@ try {
 		setTimeout(() => {
 			__vscodeBridgeBusy = false;
 			__vscodeProcessOutgoingQueue();
-		}, 6);
+		}, 10);
 	}
 
 	function __vscodePost(entry) {
@@ -593,6 +628,7 @@ try {
 		return true;
 	}
 
+	let __vscodeIncomingMessageCount = 0;
 	__electrobunObj.receiveInternalMessageFromBun = (message) => {
 		try {
 			if (Array.isArray(message)) {
@@ -621,6 +657,25 @@ try {
 				}
 					if (message.type === 'event' && typeof message.channel === 'string') {
 						const revivedArgs = Array.isArray(message.args) ? message.args.map(__vscodeReviveArg) : [];
+						if (message.channel === 'vscode:message') {
+							__vscodeIncomingMessageCount++;
+							if (__vscodeIncomingMessageCount <= 10 || __vscodeIncomingMessageCount % 500 === 0) {
+								const first = revivedArgs[0];
+								let firstType = typeof first;
+								let firstSize = -1;
+								if (first instanceof Uint8Array) {
+									firstType = 'Uint8Array';
+									firstSize = first.byteLength;
+								} else if (first instanceof ArrayBuffer) {
+									firstType = 'ArrayBuffer';
+									firstSize = first.byteLength;
+								} else if (first && typeof first === 'object') {
+									firstType = 'object';
+									firstSize = Object.keys(first).length;
+								}
+								__vscodeReportRendererIssue('RENDERER_VSCODE_MESSAGE_RECV', 'count=' + __vscodeIncomingMessageCount + ' firstType=' + firstType + ' firstSize=' + firstSize);
+							}
+						}
 						if (message.channel === 'vscode:__virtualPortMessage') {
 							const portId = typeof revivedArgs[0] === 'string' ? revivedArgs[0] : String(revivedArgs[0] ?? '');
 							if (portId) {
@@ -652,7 +707,7 @@ try {
 			__vscodePost({
 				type: 'message',
 				id: 'vscodeIpcSend',
-				payload: { channel, args, windowId: window.__electrobunWindowId, hostWebviewId: window.__electrobunWebviewId }
+				payload: { channel, args: args.map(__vscodeSerializeArg), windowId: window.__electrobunWindowId, hostWebviewId: window.__electrobunWebviewId }
 			});
 		},
 		invoke(channel, ...args) {
@@ -664,7 +719,7 @@ try {
 					method: 'vscodeIpcInvoke',
 					id,
 					hostWebviewId: window.__electrobunWebviewId,
-					params: { requestId: id, channel, args, windowId: window.__electrobunWindowId, hostWebviewId: window.__electrobunWebviewId }
+					params: { requestId: id, channel, args: args.map(__vscodeSerializeArg), windowId: window.__electrobunWindowId, hostWebviewId: window.__electrobunWebviewId }
 				});
 				if (!posted) {
 					__vscodePending.delete(id);
@@ -971,14 +1026,18 @@ try {
 }
 
 let electrobunRuntime = undefined;
-try {
-	const runtimeModule = await import("electrobun");
-	electrobunRuntime = runtimeModule.default ?? runtimeModule;
-} catch (error) {
-	console.warn(
-		"[electrobun-runtime-shim] Failed to import electrobun package, using fallback stubs only.",
-		error,
-	);
+let runtimeContextMenu = undefined;
+if (!isForkedVsCodeProcess) {
+	try {
+		const runtimeModule = await import("electrobun");
+		electrobunRuntime = runtimeModule.default ?? runtimeModule;
+		runtimeContextMenu = electrobunRuntime?.ContextMenu;
+	} catch (error) {
+		console.warn(
+			"[electrobun-runtime-shim] Failed to import electrobun package, using fallback stubs only.",
+			error,
+		);
+	}
 }
 
 const appEmitter = new EventEmitter();
@@ -1148,41 +1207,6 @@ export const protocol = {
 export const crashReporter = {
 	start: noop,
 };
-
-export class MenuItem {
-	constructor(options = {}) {
-		Object.assign(this, options);
-	}
-}
-
-export class Menu {
-	constructor() {
-		this.items = [];
-	}
-
-	append(item) {
-		this.items.push(item);
-	}
-
-	popup() {}
-
-	closePopup() {}
-
-	static setApplicationMenu(menu) {}
-
-	static buildFromTemplate(template) {
-		const menu = new Menu();
-		for (const item of template ?? []) {
-			menu.append(item instanceof MenuItem ? item : new MenuItem(item));
-		}
-		return menu;
-	}
-
-	static getApplicationMenu() {
-		return null;
-	}
-}
-
 export const contentTracing = {
 	startRecording: async () => undefined,
 	stopRecording: async () => "",
@@ -1269,15 +1293,19 @@ export const dialog = {
 	async showOpenDialog(optionsOrWindow, maybeOptions) {
 		const options = maybeOptions ?? optionsOrWindow ?? {};
 		const openFileDialog = electrobunRuntime?.Utils?.openFileDialog;
-			if (typeof openFileDialog === "function") {
-				const properties = Array.isArray(options?.properties) ? options.properties : [];
-				const hasOpenDirectory = properties.includes("openDirectory");
-				const hasOpenFile = properties.includes("openFile");
-				const canChooseDirectory = hasOpenDirectory || (!hasOpenDirectory && !hasOpenFile);
-				const canChooseFiles = hasOpenFile || (!hasOpenDirectory && !hasOpenFile);
-				const canChooseFilesForRuntime =
-					canChooseFiles || (canChooseDirectory && !hasOpenFile);
-				const allowsMultipleSelection = properties.includes("multiSelections");
+		if (typeof openFileDialog === "function") {
+			const properties = Array.isArray(options?.properties)
+				? options.properties
+				: [];
+			const hasOpenDirectory = properties.includes("openDirectory");
+			const hasOpenFile = properties.includes("openFile");
+			const canChooseDirectory =
+				hasOpenDirectory || (!hasOpenDirectory && !hasOpenFile);
+			const canChooseFiles = hasOpenFile || (!hasOpenDirectory && !hasOpenFile);
+			// Electrobun's macOS open panel currently requires file selection enabled
+			// to keep the Open button active for folder picks in some views.
+			const canChooseFilesForRuntime = canChooseFiles || canChooseDirectory;
+			const allowsMultipleSelection = properties.includes("multiSelections");
 			const filters = Array.isArray(options?.filters) ? options.filters : [];
 			const extensionFilters = filters
 				.flatMap((filter) =>
@@ -1289,51 +1317,49 @@ export const dialog = {
 				extensionFilters.length > 0 && !extensionFilters.includes("*")
 					? extensionFilters.join(",")
 					: "*";
-				const paths = await openFileDialog({
-					startingFolder:
-						typeof options?.defaultPath === "string"
-							? options.defaultPath
-							: "~/",
-					allowedFileTypes,
-					canChooseDirectory,
-					canChooseFiles: canChooseFilesForRuntime,
-					allowsMultipleSelection,
-				});
-				const normalizeDialogPath = (value) => {
-					let filePath = String(value ?? "").trim();
-					if (!filePath) {
-						return "";
-					}
-					if (filePath.startsWith("file://")) {
-						try {
-							filePath = decodeURIComponent(new URL(filePath).pathname);
-						} catch {}
-					}
-					if (filePath === "~") {
-						filePath = process.env["HOME"] ?? filePath;
-					} else if (filePath.startsWith("~/")) {
-						filePath = path.join(process.env["HOME"] ?? "~", filePath.slice(2));
-					}
-					return filePath;
-				};
-				const normalizedFilePaths = (Array.isArray(paths) ? paths : [])
-					.map((filePath) => normalizeDialogPath(filePath))
-					.filter(Boolean);
-				let filePaths = normalizedFilePaths;
-				if (hasOpenDirectory && !hasOpenFile) {
-					filePaths = filePaths.filter((filePath) => {
-						try {
-							return fs.statSync(filePath).isDirectory();
-						} catch {
-							return false;
-						}
-					});
-					if (filePaths.length === 0 && normalizedFilePaths.length > 0) {
-						filePaths = normalizedFilePaths;
-					}
+			const paths = await openFileDialog({
+				startingFolder:
+					typeof options?.defaultPath === "string" ? options.defaultPath : "~/",
+				allowedFileTypes,
+				canChooseDirectory,
+				canChooseFiles: canChooseFilesForRuntime,
+				allowsMultipleSelection,
+			});
+			const normalizeDialogPath = (value) => {
+				let filePath = String(value ?? "").trim();
+				if (!filePath) {
+					return "";
 				}
-				return { canceled: filePaths.length === 0, filePaths };
+				if (filePath.startsWith("file://")) {
+					try {
+						filePath = decodeURIComponent(new URL(filePath).pathname);
+					} catch {}
+				}
+				if (filePath === "~") {
+					filePath = process.env["HOME"] ?? filePath;
+				} else if (filePath.startsWith("~/")) {
+					filePath = path.join(process.env["HOME"] ?? "~", filePath.slice(2));
+				}
+				return filePath;
+			};
+			const normalizedFilePaths = (Array.isArray(paths) ? paths : [])
+				.map((filePath) => normalizeDialogPath(filePath))
+				.filter(Boolean);
+			let filePaths = normalizedFilePaths;
+			if (hasOpenDirectory && !hasOpenFile) {
+				filePaths = filePaths.filter((filePath) => {
+					try {
+						return fs.statSync(filePath).isDirectory();
+					} catch {
+						return false;
+					}
+				});
+				if (filePaths.length === 0 && normalizedFilePaths.length > 0) {
+					filePaths = normalizedFilePaths;
+				}
 			}
+			return { canceled: filePaths.length === 0, filePaths };
+		}
 		return { canceled: true, filePaths: [] };
 	},
 	async showSaveDialog() {
@@ -1572,8 +1598,13 @@ class WebContentsImpl extends EventEmitter {
 
 	send(channel, ...args) {
 		const ownerWindowId =
-			typeof this.ownerWindow?.id === "number" ? this.ownerWindow.id : undefined;
-		if (typeof ownerWindowId === "number" && typeof rendererEventBridge.send === "function") {
+			typeof this.ownerWindow?.id === "number"
+				? this.ownerWindow.id
+				: undefined;
+		if (
+			typeof ownerWindowId === "number" &&
+			typeof rendererEventBridge.send === "function"
+		) {
 			rendererEventBridge.send(ownerWindowId, channel, args);
 			return;
 		}
@@ -1582,8 +1613,13 @@ class WebContentsImpl extends EventEmitter {
 
 	postMessage(channel, message, transfer) {
 		const ownerWindowId =
-			typeof this.ownerWindow?.id === "number" ? this.ownerWindow.id : undefined;
-		if (typeof ownerWindowId === "number" && typeof rendererEventBridge.send === "function") {
+			typeof this.ownerWindow?.id === "number"
+				? this.ownerWindow.id
+				: undefined;
+		if (
+			typeof ownerWindowId === "number" &&
+			typeof rendererEventBridge.send === "function"
+		) {
 			const eventArgs = [message];
 			if (
 				Array.isArray(transfer) &&
@@ -1591,7 +1627,9 @@ class WebContentsImpl extends EventEmitter {
 				typeof rendererEventBridge.registerTransferPort === "function"
 			) {
 				const portTokens = transfer
-					.map((port) => rendererEventBridge.registerTransferPort(ownerWindowId, port))
+					.map((port) =>
+						rendererEventBridge.registerTransferPort(ownerWindowId, port),
+					)
 					.filter((token) => typeof token === "string");
 				if (portTokens.length > 0) {
 					eventArgs.push({ __vscodePortTokens: portTokens });
@@ -1662,6 +1700,7 @@ export class BrowserWindow extends EventEmitter {
 		this._destroyed = false;
 		this._visible = options.show !== false;
 		this._url = "";
+		this._title = options.title ?? "Code - OSS";
 		this._representedFilename = "";
 		this._simpleFullScreen = false;
 		this._bounds = {
@@ -1673,7 +1712,9 @@ export class BrowserWindow extends EventEmitter {
 		this._minimumSize = [0, 0];
 		this._maximumSize = [0, 0];
 		this._vscodeWindowConfigChannel = undefined;
-		const additionalArgs = Array.isArray(options.webPreferences?.additionalArguments)
+		const additionalArgs = Array.isArray(
+			options.webPreferences?.additionalArguments,
+		)
 			? options.webPreferences.additionalArguments
 			: [];
 		for (const arg of additionalArgs) {
@@ -1728,25 +1769,28 @@ export class BrowserWindow extends EventEmitter {
 					}
 				}
 				if (runtimeDebug) {
-					console.log(
-						"[electrobun-runtime-shim] Generated preload script",
-						{
-							length: runtimePreloadScript.length,
-							preloadPath: options.webPreferences?.preload ?? null,
-						},
-					);
+					console.log("[electrobun-runtime-shim] Generated preload script", {
+						length: runtimePreloadScript.length,
+						preloadPath: options.webPreferences?.preload ?? null,
+					});
 				}
 				this._nativeWindow = new electrobunRuntime.BrowserWindow({
-					title: options.title ?? "Code - OSS",
-					frame: { ...this._bounds },
-					url: null,
-					html: null,
-					preload: runtimePreloadScript,
-					renderer: runtimeRenderer,
+					id: this.id,
+					title: this._title,
+					url: "http://127.0.0.1:0", // Placeholder until loadURL is called
+					frame: {
+						width: this._bounds.width,
+						height: this._bounds.height,
+						x: this._bounds.x,
+						y: this._bounds.y,
+					},
 					titleBarStyle: runtimeTitleBarStyle,
-					transparent: Boolean(options.transparent),
+					renderer: runtimeRenderer,
 					sandbox: runtimeSandbox,
+					transparent: options.transparent === true,
+					preload: runtimePreloadScript,
 				});
+
 				if (typeof this._nativeWindow.id === "number") {
 					this.id = this._nativeWindow.id;
 				}
@@ -1832,7 +1876,9 @@ export class BrowserWindow extends EventEmitter {
 		this._destroyed = true;
 		vscodeWindowConfigurations.delete(this.id);
 		if (this._vscodeWindowConfigChannel) {
-			vscodeWindowConfigurationsByChannel.delete(this._vscodeWindowConfigChannel);
+			vscodeWindowConfigurationsByChannel.delete(
+				this._vscodeWindowConfigChannel,
+			);
 		}
 		browserWindows.delete(this.id);
 		webContentsById.delete(this.webContents.id);
@@ -2003,7 +2049,15 @@ export class BrowserWindow extends EventEmitter {
 	}
 
 	setTitle(title) {
+		this._title = String(title ?? "");
 		this._nativeWindow?.setTitle?.(title);
+	}
+
+	getTitle() {
+		if (typeof this._nativeWindow?.getTitle === "function") {
+			return this._nativeWindow.getTitle();
+		}
+		return this._title ?? "";
 	}
 
 	setSheetOffset() {}
@@ -2108,11 +2162,131 @@ export class MessagePortMain extends EventEmitter {
 	close() {}
 }
 
+function createMessagePortMainAdapter(port) {
+	if (!port) {
+		return port;
+	}
+
+	const messageListenerMap = new WeakMap();
+	const closeListenerMap = new WeakMap();
+
+	const toEventObject = (value) => {
+		if (value && typeof value === "object" && "data" in value) {
+			return value;
+		}
+		return { data: value, ports: [] };
+	};
+
+	const adaptListener = (event, listener) => {
+		if (typeof listener !== "function") {
+			return listener;
+		}
+		if (event === "message") {
+			let wrapped = messageListenerMap.get(listener);
+			if (!wrapped) {
+				wrapped = (value) => listener(toEventObject(value));
+				messageListenerMap.set(listener, wrapped);
+			}
+			return wrapped;
+		}
+		if (event === "close") {
+			let wrapped = closeListenerMap.get(listener);
+			if (!wrapped) {
+				wrapped = () => listener();
+				closeListenerMap.set(listener, wrapped);
+			}
+			return wrapped;
+		}
+		return listener;
+	};
+
+	const addViaNodeApi = (event, listener) => {
+		const wrapped = adaptListener(event, listener);
+		if (typeof port.on === "function") {
+			port.on(event, wrapped);
+		} else if (typeof port.addListener === "function") {
+			port.addListener(event, wrapped);
+		}
+	};
+
+	const removeViaNodeApi = (event, listener) => {
+		const wrapped = adaptListener(event, listener);
+		if (typeof port.off === "function") {
+			port.off(event, wrapped);
+		} else if (typeof port.removeListener === "function") {
+			port.removeListener(event, wrapped);
+		}
+	};
+
+	return {
+		postMessage(message, transfer) {
+			if (Array.isArray(transfer) && transfer.length > 0) {
+				port.postMessage(message, transfer);
+				return;
+			}
+			port.postMessage(message);
+		},
+		start() {
+			port.start?.();
+		},
+		close() {
+			port.close?.();
+		},
+		on(event, listener) {
+			addViaNodeApi(event, listener);
+			return this;
+		},
+		once(event, listener) {
+			if (typeof listener !== "function") {
+				return this;
+			}
+			const onceWrapped = (value) => {
+				removeViaNodeApi(event, onceWrapped);
+				if (event === "message") {
+					listener(toEventObject(value));
+				} else {
+					listener();
+				}
+			};
+			addViaNodeApi(event, onceWrapped);
+			return this;
+		},
+		addListener(event, listener) {
+			addViaNodeApi(event, listener);
+			return this;
+		},
+		removeListener(event, listener) {
+			removeViaNodeApi(event, listener);
+			return this;
+		},
+		off(event, listener) {
+			removeViaNodeApi(event, listener);
+			return this;
+		},
+		addEventListener(event, listener) {
+			if (typeof listener === "function") {
+				addViaNodeApi(event, listener);
+			} else if (listener && typeof listener.handleEvent === "function") {
+				addViaNodeApi(event, (value) =>
+					listener.handleEvent(
+						event === "message" ? toEventObject(value) : value,
+					),
+				);
+			}
+		},
+		removeEventListener(event, listener) {
+			if (typeof listener === "function") {
+				removeViaNodeApi(event, listener);
+			}
+		},
+	};
+}
+
 export class MessageChannelMain {
 	constructor() {
 		const channel = new MessageChannel();
-		this.port1 = channel.port1;
-		this.port2 = channel.port2;
+		this.port1 = createMessagePortMainAdapter(channel.port1);
+		this.port2 = createMessagePortMainAdapter(channel.port2);
 	}
 }
 
@@ -2266,12 +2440,39 @@ async function registerElectrobunInternalBridgeHandlers() {
 				);
 				return;
 			}
+			if (!sendIpcEventToRenderer._messageCount) {
+				sendIpcEventToRenderer._messageCount = 0;
+			}
+			if (channel === "vscode:message") {
+				sendIpcEventToRenderer._messageCount++;
+				if (
+					sendIpcEventToRenderer._messageCount <= 10 ||
+					sendIpcEventToRenderer._messageCount % 500 === 0
+				) {
+					const first = Array.isArray(args) ? args[0] : undefined;
+					let firstType = typeof first;
+					let firstSize = -1;
+					if (first && typeof first === "object") {
+						if (Buffer.isBuffer(first) || ArrayBuffer.isView(first)) {
+							firstType = "binary";
+							firstSize = first.byteLength;
+						} else if (first instanceof ArrayBuffer) {
+							firstType = "arraybuffer";
+							firstSize = first.byteLength;
+						} else {
+							firstType = "object";
+							firstSize = Object.keys(first).length;
+						}
+					}
+					appendRuntimeDiag(
+						`[main->renderer] channel=vscode:message count=${sendIpcEventToRenderer._messageCount} firstType=${firstType} firstSize=${firstSize}`,
+					);
+				}
+			}
 			const payload = {
 				type: "event",
 				channel,
-				args: Array.isArray(args)
-					? args.map(serializeIpcArgForRenderer)
-					: [],
+				args: Array.isArray(args) ? args.map(serializeIpcArgForRenderer) : [],
 			};
 			enqueueRendererEvent(windowId, payload);
 		};
@@ -2300,7 +2501,9 @@ async function registerElectrobunInternalBridgeHandlers() {
 			const portId = `vp-${windowId}-${nextRendererVirtualPortId++}`;
 			const onMessage = (eventOrData) => {
 				const payload =
-					eventOrData && typeof eventOrData === "object" && "data" in eventOrData
+					eventOrData &&
+					typeof eventOrData === "object" &&
+					"data" in eventOrData
 						? eventOrData.data
 						: eventOrData;
 				sendIpcEventToRenderer(windowId, "vscode:__virtualPortMessage", [
@@ -2324,9 +2527,14 @@ async function registerElectrobunInternalBridgeHandlers() {
 			} catch {}
 			return portId;
 		};
-			rendererEventBridge.send = sendIpcEventToRenderer;
-			rendererEventBridge.registerTransferPort = registerRendererVirtualPort;
-			const sendInvokeResponseToRenderer = (windowId, requestId, success, payload) => {
+		rendererEventBridge.send = sendIpcEventToRenderer;
+		rendererEventBridge.registerTransferPort = registerRendererVirtualPort;
+		const sendInvokeResponseToRenderer = (
+			windowId,
+			requestId,
+			success,
+			payload,
+		) => {
 			if (typeof windowId !== "number" || typeof requestId !== "string") {
 				return;
 			}
@@ -2360,11 +2568,11 @@ async function registerElectrobunInternalBridgeHandlers() {
 				);
 			}
 		};
-			const createRendererEventSender = (windowId, hostWebviewId) => ({
-				id: typeof windowId === "number" ? windowId : -1,
-				send(channel, ...eventArgs) {
-					sendIpcEventToRenderer(windowId, channel, eventArgs);
-				},
+		const createRendererEventSender = (windowId, hostWebviewId) => ({
+			id: typeof windowId === "number" ? windowId : -1,
+			send(channel, ...eventArgs) {
+				sendIpcEventToRenderer(windowId, channel, eventArgs);
+			},
 			postMessage(channel, message, transfer) {
 				const eventArgs = [message];
 				if (Array.isArray(transfer) && transfer.length > 0) {
@@ -2374,46 +2582,45 @@ async function registerElectrobunInternalBridgeHandlers() {
 					if (portTokens.length > 0) {
 						eventArgs.push({ __vscodePortTokens: portTokens });
 					}
-					}
-					sendIpcEventToRenderer(windowId, channel, eventArgs);
-				},
-				isDestroyed() {
-					return false;
-				},
-				getURL() {
-					return "";
-				},
-				getOSProcessId() {
-					return process.pid;
-				},
-				reload() {},
-				openDevTools() {},
-				toggleDevTools() {},
-			});
-			const resolveRendererEventSender = (windowId, hostWebviewId) => {
-				if (typeof windowId === "number") {
-					const webContents = browserWindows.get(windowId)?.webContents;
-					if (webContents) {
-						return webContents;
-					}
 				}
-				return createRendererEventSender(windowId, hostWebviewId);
-			};
-			internalRpcHandlers.request.vscodeIpcInvoke = (params = {}) => {
+				sendIpcEventToRenderer(windowId, channel, eventArgs);
+			},
+			isDestroyed() {
+				return false;
+			},
+			getURL() {
+				return "";
+			},
+			getOSProcessId() {
+				return process.pid;
+			},
+			reload() {},
+			openDevTools() {},
+			toggleDevTools() {},
+		});
+		const resolveRendererEventSender = (windowId, hostWebviewId) => {
+			if (typeof windowId === "number") {
+				const webContents = browserWindows.get(windowId)?.webContents;
+				if (webContents) {
+					return webContents;
+				}
+			}
+			return createRendererEventSender(windowId, hostWebviewId);
+		};
+		let vscodeIpcMessageSendCount = 0;
+		const traceAllIpcSends =
+			process.env["VSCODE_ELECTROBUN_TRACE_IPC_SEND"] === "1";
+		internalRpcHandlers.request.vscodeIpcInvoke = (params = {}) => {
 			const { requestId, channel, args = [], windowId, hostWebviewId } = params;
 			const isWindowConfigChannel =
-				typeof channel === "string" &&
-				/^vscode:[0-9a-f-]{36}$/i.test(channel);
+				typeof channel === "string" && /^vscode:[0-9a-f-]{36}$/i.test(channel);
 			appendRuntimeDiag(
 				`[main] invoke channel=${String(channel)} windowId=${String(windowId)} args=${Array.isArray(args) ? args.length : 0}`,
 			);
-			if (
-				typeof windowId === "number" &&
-				typeof hostWebviewId === "number"
-			) {
+			if (typeof windowId === "number" && typeof hostWebviewId === "number") {
 				rendererHostWebviewIds.set(windowId, hostWebviewId);
 			}
-				const sender = resolveRendererEventSender(windowId, hostWebviewId);
+			const sender = resolveRendererEventSender(windowId, hostWebviewId);
 
 			// Startup critical: preload requests shell env very early.
 			if (channel === "vscode:fetchShellEnv") {
@@ -2499,16 +2706,26 @@ async function registerElectrobunInternalBridgeHandlers() {
 
 		internalRpcHandlers.message.vscodeIpcSend = (params = {}) => {
 			const { channel, args = [], windowId, hostWebviewId } = params;
-			appendRuntimeDiag(
-				`[main] send channel=${String(channel)} args=${Array.isArray(args) ? args.length : 0}`,
-			);
-			if (
-				typeof windowId === "number" &&
-				typeof hostWebviewId === "number"
-			) {
+			const isVscodeMessageChannel = channel === "vscode:message";
+			if (!isVscodeMessageChannel || traceAllIpcSends) {
+				appendRuntimeDiag(
+					`[main] send channel=${String(channel)} args=${Array.isArray(args) ? args.length : 0}`,
+				);
+			} else {
+				vscodeIpcMessageSendCount++;
+				if (
+					vscodeIpcMessageSendCount <= 10 ||
+					vscodeIpcMessageSendCount % 500 === 0
+				) {
+					appendRuntimeDiag(
+						`[main] send channel=vscode:message count=${vscodeIpcMessageSendCount} args=${Array.isArray(args) ? args.length : 0}`,
+					);
+				}
+			}
+			if (typeof windowId === "number" && typeof hostWebviewId === "number") {
 				rendererHostWebviewIds.set(windowId, hostWebviewId);
 			}
-				const sender = resolveRendererEventSender(windowId, hostWebviewId);
+			const sender = resolveRendererEventSender(windowId, hostWebviewId);
 			const normalizedArgs = Array.isArray(args)
 				? args.map(reviveSerializedIpcArg)
 				: [];
@@ -2550,7 +2767,9 @@ async function registerElectrobunInternalBridgeHandlers() {
 	}
 }
 
-await registerElectrobunInternalBridgeHandlers();
+if (shouldStartRuntimeFileServer) {
+	await registerElectrobunInternalBridgeHandlers();
+}
 
 export const contextBridge = {
 	exposeInMainWorld(name, value) {
@@ -2610,7 +2829,9 @@ export const utilityProcess = {
 			const portId = `cp-port-${nextTransferPortId++}`;
 			const onMessage = (eventOrData) => {
 				const data =
-					eventOrData && typeof eventOrData === "object" && "data" in eventOrData
+					eventOrData &&
+					typeof eventOrData === "object" &&
+					"data" in eventOrData
 						? eventOrData.data
 						: eventOrData;
 				child.send?.({
@@ -2741,6 +2962,156 @@ export const net = {
 	fetch: globalThis.fetch?.bind(globalThis),
 };
 
+const _menuItemRegistry = new Map();
+let _nextMenuItemId = 1;
+
+if (runtimeContextMenu?.on) {
+	runtimeContextMenu.on("context-menu-clicked", (event) => {
+		const action = event?.data?.action;
+		if (typeof action === "string" && action.startsWith("vscode-menu-action-")) {
+			const handler = _menuItemRegistry.get(action);
+			if (typeof handler === "function") {
+				handler();
+			}
+		}
+	});
+}
+
+export class MenuItem {
+	constructor(options = {}) {
+		this.id = options.id ?? `vscode-menu-item-${_nextMenuItemId++}`;
+		this.label = options.label || "";
+		this.sublabel = options.sublabel || "";
+		this.accelerator = options.accelerator;
+		this.click = options.click;
+		this.type = options.type || "normal";
+		this.role = options.role;
+		this.checked = Boolean(options.checked);
+		this.enabled = options.enabled !== false;
+		this.visible = options.visible !== false;
+		this.submenu = options.submenu; // This will be a Menu or an array
+		this.icon = options.icon;
+		this.toolTip = options.toolTip || options.tooltip;
+	}
+
+	_toApplicationMenuItemConfig() {
+		let actionId = undefined;
+		if (typeof this.click === "function") {
+			actionId = `vscode-menu-action-${this.id}`;
+			_menuItemRegistry.set(actionId, () => {
+				try {
+					this.click(this, BrowserWindow.getFocusedWindow() || null, {
+						shiftKey: false,
+						ctrlKey: false,
+						altKey: false,
+						metaKey: false,
+					});
+				} catch (err) {
+					console.error("Error executing menu item click", err);
+				}
+			});
+		}
+
+		if (this.type === "separator") {
+			return { type: "divider" };
+		}
+
+		const config = {
+			type:
+				this.type === "normal" ||
+				this.type === "checkbox" ||
+				this.type === "radio"
+					? this.type
+					: "normal",
+			label: this.label,
+			enabled: this.enabled,
+			checked: this.checked,
+			hidden: !this.visible,
+			tooltip: this.toolTip,
+		};
+
+		if (this.role) {
+			// VS Code roles might not perfectly match Electrobun roles, but we pass them along
+			config.role = this.role;
+		}
+
+		if (actionId) {
+			config.action = actionId;
+		}
+
+		if (this.accelerator) {
+			config.accelerator = this.accelerator;
+		}
+
+		if (this.submenu) {
+			config.submenu = this.submenu.items.map((item) =>
+				item._toApplicationMenuItemConfig(),
+			);
+		}
+
+		return config;
+	}
+}
+
+export class Menu {
+	constructor() {
+		this.items = [];
+	}
+
+	append(item) {
+		this.items.push(item);
+	}
+
+	insert(pos, item) {
+		this.items.splice(pos, 0, item);
+	}
+
+	popup(options = {}) {
+		const { callback } = options;
+		// Build the config array
+		const menuConfigArray = this.items.map((item) =>
+			item._toApplicationMenuItemConfig(),
+		);
+		runtimeContextMenu?.showContextMenu?.(menuConfigArray);
+
+		if (typeof callback === "function") {
+			// Callback fires when menu closes. We don't have a reliable way to know when it closes via showContextMenu in Electrobun yet,
+			// but we can just fire it immediately or on next tick to unstuck any promise wrappers in VS Code.
+			setTimeout(() => {
+				try {
+					callback();
+				} catch {}
+			}, 100);
+		}
+	}
+
+	closePopup(window) {
+		// Not supported in Electrobun ContextMenu API currently
+	}
+
+	static buildFromTemplate(template) {
+		const menu = new Menu();
+		if (Array.isArray(template)) {
+			for (const item of template) {
+				if (item instanceof MenuItem) {
+					menu.append(item);
+				} else {
+					menu.append(new MenuItem(item));
+				}
+			}
+		}
+		return menu;
+	}
+
+	static setApplicationMenu(menu) {
+		// Not requested, but stubbed
+	}
+
+	static getApplicationMenu() {
+		return null;
+	}
+}
+
 // Runtime placeholders for imported symbols that are used primarily as types.
 export const AuthInfo = Object;
 export const AuthenticationResponseDetails = Object;
@@ -2757,7 +3128,6 @@ export const IpcMainEvent = Object;
 export const JumpListCategory = Object;
 export const JumpListItem = Object;
 export const KeyboardEvent = Object;
-export const MenuItemConstructorOptions = Object;
 export const MessageBoxOptions = Object;
 export const MessageBoxReturnValue = Object;
 export const OnBeforeSendHeadersListenerDetails = Object;
@@ -2776,8 +3146,6 @@ const defaultExport = {
 	app,
 	protocol,
 	crashReporter,
-	Menu,
-	MenuItem,
 	contentTracing,
 	dialog,
 	session,
@@ -2804,6 +3172,8 @@ const defaultExport = {
 	webFrame,
 	webUtils,
 	safeStorage,
+	Menu,
+	MenuItem,
 	TouchBar,
 	nativeImage,
 	net,
@@ -2822,7 +3192,7 @@ const defaultExport = {
 	JumpListCategory,
 	JumpListItem,
 	KeyboardEvent,
-	MenuItemConstructorOptions,
+	MenuItemConstructorOptions: Object,
 	MessageBoxOptions,
 	MessageBoxReturnValue,
 	OnBeforeSendHeadersListenerDetails,

@@ -120,6 +120,7 @@ import { IUtilityProcessWorkerMainService, UtilityProcessWorkerMainService } fro
 import { ipcUtilityProcessWorkerChannelName } from '../../platform/utilityProcess/common/utilityProcessWorkerService.js';
 import { ILocalPtyService, LocalReconnectConstants, TerminalIpcChannels, TerminalSettingId } from '../../platform/terminal/common/terminal.js';
 import { ElectronPtyHostStarter } from '../../platform/terminal/electron-main/electronPtyHostStarter.js';
+import { NodePtyHostStarter } from '../../platform/terminal/node/nodePtyHostStarter.js';
 import { PtyHostService } from '../../platform/terminal/node/ptyHostService.js';
 import { NODE_REMOTE_RESOURCE_CHANNEL_NAME, NODE_REMOTE_RESOURCE_IPC_METHOD_NAME, NodeRemoteResourceResponse, NodeRemoteResourceRouter } from '../../platform/remote/common/electronRemoteResources.js';
 import { Lazy } from '../../base/common/lazy.js';
@@ -1086,11 +1087,23 @@ export class CodeApplication extends Disposable {
 		services.set(IApplicationStorageMainService, new SyncDescriptor(ApplicationStorageMainService));
 
 		// Terminal
-		const ptyHostStarter = new ElectronPtyHostStarter({
+		const reconnectConstants = {
 			graceTime: LocalReconnectConstants.GraceTime,
 			shortGraceTime: LocalReconnectConstants.ShortGraceTime,
 			scrollback: this.configurationService.getValue<number>(TerminalSettingId.PersistentSessionScrollback) ?? 100
-		}, this.configurationService, this.environmentMainService, this.lifecycleMainService, this.logService);
+		};
+		const ptyHostStarter = isElectrobunRuntime
+			? new NodePtyHostStarter(
+				reconnectConstants,
+				this.environmentMainService
+			)
+			: new ElectronPtyHostStarter(
+				reconnectConstants,
+				this.configurationService,
+				this.environmentMainService,
+				this.lifecycleMainService,
+				this.logService
+			);
 		const ptyHostService = new PtyHostService(
 			ptyHostStarter,
 			this.configurationService,

@@ -79,6 +79,12 @@ export interface IIPCOptions {
 	 * full of messages - see notes on that method.
 	 */
 	useQueue?: boolean;
+
+	/**
+	 * Optional executable path used for `fork`. Useful when the current runtime
+	 * is not fully Node-compatible for child-process IPC workloads.
+	 */
+	execPath?: string;
 }
 
 export class Client implements IChannelClient, IDisposable {
@@ -199,6 +205,10 @@ export class Client implements IChannelClient, IDisposable {
 				forkOpts.execArgv = process.execArgv			// if not set, the forked process inherits the execArgv of the parent process
 					.filter(a => !/^--inspect(-brk)?=/.test(a)) // --inspect and --inspect-brk can not be inherited as the port would conflict
 					.filter(a => !a.startsWith('--vscode-')); 	// --vscode-* arguments are unsupported by node.js and thus need to remove
+			}
+
+			if (this.options.execPath) {
+				forkOpts.execPath = this.options.execPath;
 			}
 
 			removeDangerousEnvVariables(forkOpts.env);

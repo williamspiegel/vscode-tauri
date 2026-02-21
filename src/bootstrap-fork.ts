@@ -358,6 +358,71 @@ function installElectrobunParentPortPolyfill(): void {
 	(utilityProcess as NodeJS.Process & { parentPort: typeof parentPort }).parentPort = parentPort;
 }
 
+function installBunNodeRuntimeCompatShims(): void {
+	if (!process.versions?.['bun']) {
+		return;
+	}
+	if (process.env['VSCODE_ESM_ENTRYPOINT'] !== 'vs/platform/terminal/node/ptyHostMain') {
+		return;
+	}
+
+	// Some browser-targeted bundles probe globals like `navigator`, `window`, and `self`
+	// to decide code paths. Limit this compatibility shim to the pty host only.
+	const globals = globalThis as typeof globalThis & {
+		navigator?: {
+			userAgent?: string;
+			platform?: string;
+			language?: string;
+			languages?: readonly string[];
+		};
+		window?: typeof globalThis;
+		self?: typeof globalThis;
+	};
+
+	try {
+		const currentNavigator = globals.navigator;
+		if (!currentNavigator?.userAgent?.startsWith('Node.js/')) {
+			Object.defineProperty(globalThis, 'navigator', {
+				configurable: true,
+				enumerable: true,
+				value: {
+					...(currentNavigator ?? {}),
+					userAgent: `Node.js/${process.version}`,
+					platform: process.platform,
+					language: currentNavigator?.language ?? 'en-US',
+					languages: currentNavigator?.languages ?? ['en-US']
+				}
+			});
+		}
+	} catch {
+		// best effort only
+	}
+
+	try {
+		if (typeof globals.window === 'undefined') {
+			Object.defineProperty(globalThis, 'window', {
+				configurable: true,
+				enumerable: true,
+				value: globalThis
+			});
+		}
+	} catch {
+		// best effort only
+	}
+
+	try {
+		if (typeof globals.self === 'undefined') {
+			Object.defineProperty(globalThis, 'self', {
+				configurable: true,
+				enumerable: true,
+				value: globalThis
+			});
+		}
+	} catch {
+		// best effort only
+	}
+}
+
 //#endregion
 
 // Crash reporter
@@ -365,6 +430,7 @@ configureCrashReporter();
 
 // Install MessagePort compatibility for forked utility processes under Electrobun shim.
 installElectrobunParentPortPolyfill();
+installBunNodeRuntimeCompatShims();
 
 // Remove global paths from the node module lookup (node.js only)
 removeGlobalNodeJsModuleLookupPaths();
@@ -392,4 +458,23 @@ if (process.env['VSCODE_PARENT_PID']) {
 await bootstrapESM();
 
 // Load ESM entry point
-await import([`./${process.env['VSCODE_ESM_ENTRYPOINT']}.js`].join('/') /* workaround: esbuild prints some strange warnings when trying to inline? */);
+const esmEntrypoint = process.env['VSCODE_ESM_ENTRYPOINT'];
+if (esmEntrypoint) {
+	const importPaths = [
+		`./${esmEntrypoint}.js`,
+		`../out/${esmEntrypoint}.js`
+	];
+	let lastError: unknown = undefined;
+	for (const importPath of importPaths) {
+		try {
+			await import([importPath].join('/') /* workaround: esbuild prints some strange warnings when trying to inline? */);
+			lastError = undefined;
+			break;
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	if (lastError) {
+		throw lastError;
+	}
+}

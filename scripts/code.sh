@@ -47,6 +47,9 @@ function code() {
 	export VSCODE_DESKTOP_RUNTIME=electrobun
 	export ELECTRON_ENABLE_STACK_DUMPING=1
 	export ELECTRON_ENABLE_LOGGING=1
+	if command -v node >/dev/null 2>&1; then
+		export VSCODE_NODE_EXEC_PATH="$(command -v node)"
+	fi
 
 	DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests"
 	if [[ "$@" == *"--extensionTestsPath"* ]]; then

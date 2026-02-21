@@ -217,7 +217,7 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 		const mainWindows = this.windowsMainService.getWindows().map(window => ({
 			id: window.id,
 			workspace: window.openedWorkspace ?? toWorkspaceIdentifier(window.backupPath, window.isExtensionDevelopmentHost),
-			title: window.win?.getTitle() ?? '',
+			title: window.win?.getTitle?.() ?? '',
 			filename: window.getRepresentedFilename(),
 			dirty: window.isDocumentEdited()
 		}));
@@ -227,7 +227,7 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 			auxiliaryWindows.push(...this.auxiliaryWindowsMainService.getWindows().map(window => ({
 				id: window.id,
 				parentId: window.parentId,
-				title: window.win?.getTitle() ?? '',
+				title: window.win?.getTitle?.() ?? '',
 				filename: window.getRepresentedFilename()
 			})));
 		}

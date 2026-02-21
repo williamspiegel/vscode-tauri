@@ -5,11 +5,13 @@
 
 import { Disposable, DisposableStore } from '../../../base/common/lifecycle.js';
 import { FileAccess, Schemas } from '../../../base/common/network.js';
+import { join } from '../../../base/common/path.js';
 import { Client, IIPCOptions } from '../../../base/parts/ipc/node/ipc.cp.js';
 import { IEnvironmentService, INativeEnvironmentService } from '../../environment/common/environment.js';
 import { parsePtyHostDebugPort } from '../../environment/node/environmentService.js';
 import { IReconnectConstants } from '../common/terminal.js';
 import { IPtyHostConnection, IPtyHostStarter } from './ptyHost.js';
+import * as fs from 'fs';
 
 export class NodePtyHostStarter extends Disposable implements IPtyHostStarter {
 	constructor(
@@ -32,6 +34,19 @@ export class NodePtyHostStarter extends Disposable implements IPtyHostStarter {
 				VSCODE_RECONNECT_SCROLLBACK: this._reconnectConstants.scrollback
 			}
 		};
+
+		// Bun currently has incompatibilities with node-pty event delivery.
+		// Force the pty host to run under Node when available.
+		if (process.versions?.['bun'] || process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun') {
+			const bundledNodePath = join(this._environmentService.appRoot, 'node');
+			if (fs.existsSync(bundledNodePath)) {
+				opts.execPath = bundledNodePath;
+			} else if (process.env['VSCODE_NODE_EXEC_PATH']) {
+				opts.execPath = process.env['VSCODE_NODE_EXEC_PATH'];
+			} else if (process.env['PATH']) {
+				opts.execPath = 'node';
+			}
+		}
 
 		const ptyHostDebug = parsePtyHostDebugPort(this._environmentService.args, this._environmentService.isBuilt);
 		if (ptyHostDebug) {

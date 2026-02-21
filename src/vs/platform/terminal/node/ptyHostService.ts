@@ -65,6 +65,10 @@ export class PtyHostService extends Disposable implements IPtyHostService {
 	private _isResponsive = true;
 	private _heartbeatFirstTimeout?: Timeout;
 	private _heartbeatSecondTimeout?: Timeout;
+	private readonly _enableElectrobunPtyDiag = process.env['VSCODE_ELECTROBUN_PTY_DIAG'] === '1';
+	private readonly _didLogFirstDataForProcess = new Set<number>();
+	private readonly _didLogStartForProcess = new Set<number>();
+	private readonly _didLogInputForProcess = new Set<number>();
 
 	private readonly _onPtyHostExit = this._register(new Emitter<number>());
 	readonly onPtyHostExit = this._onPtyHostExit.event;
@@ -145,6 +149,9 @@ export class PtyHostService extends Disposable implements IPtyHostService {
 	private _startPtyHost(): [IPtyHostConnection, IPtyService] {
 		const connection = this._ptyHostStarter.start();
 		const client = connection.client;
+		if (this._enableElectrobunPtyDiag) {
+			this._logService.warn('[ElectrobunPTY-main] pty host connection started');
+		}
 
 		// Log a full stack trace which will tell the exact reason the pty host is starting up
 		if (this._logService.getLevel() === LogLevel.Trace) {
@@ -172,9 +179,25 @@ export class PtyHostService extends Disposable implements IPtyHostService {
 
 		// Create proxy and forward events
 		const proxy = ProxyChannel.toService<IPtyService>(client.getChannel(TerminalIpcChannels.PtyHost));
-		this._register(proxy.onProcessData(e => this._onProcessData.fire(e)));
-		this._register(proxy.onProcessReady(e => this._onProcessReady.fire(e)));
-		this._register(proxy.onProcessExit(e => this._onProcessExit.fire(e)));
+		this._register(proxy.onProcessData(e => {
+			if (this._enableElectrobunPtyDiag && !this._didLogFirstDataForProcess.has(e.id)) {
+				this._didLogFirstDataForProcess.add(e.id);
+				this._logService.warn(`[ElectrobunPTY-main] onProcessData first id=${e.id} type=${typeof e.event}`);
+			}
+			this._onProcessData.fire(e);
+		}));
+		this._register(proxy.onProcessReady(e => {
+			if (this._enableElectrobunPtyDiag) {
+				this._logService.warn(`[ElectrobunPTY-main] onProcessReady id=${e.id} pid=${e.event?.pid ?? 'missing'} cwd=${e.event?.cwd ?? ''}`);
+			}
+			this._onProcessReady.fire(e);
+		}));
+		this._register(proxy.onProcessExit(e => {
+			if (this._enableElectrobunPtyDiag) {
+				this._logService.warn(`[ElectrobunPTY-main] onProcessExit id=${e.id} code=${e.event}`);
+			}
+			this._onProcessExit.fire(e);
+		}));
 		this._register(proxy.onDidChangeProperty(e => this._onDidChangeProperty.fire(e)));
 		this._register(proxy.onProcessReplay(e => this._onProcessReplay.fire(e)));
 		this._register(proxy.onProcessOrphanQuestion(e => this._onProcessOrphanQuestion.fire(e)));
@@ -211,8 +234,14 @@ export class PtyHostService extends Disposable implements IPtyHostService {
 		workspaceName: string
 	): Promise<number> {
 		const timeout = setTimeout(() => this._handleUnresponsiveCreateProcess(), HeartbeatConstants.CreateProcessTimeout);
+		if (this._enableElectrobunPtyDiag) {
+			this._logService.warn(`[ElectrobunPTY-main] createProcess start cwd=${cwd} shell=${shellLaunchConfig.executable ?? ''}`);
+		}
 		const id = await this._proxy.createProcess(shellLaunchConfig, cwd, cols, rows, unicodeVersion, env, executableEnv, options, shouldPersist, workspaceId, workspaceName);
 		clearTimeout(timeout);
+		if (this._enableElectrobunPtyDiag) {
+			this._logService.warn(`[ElectrobunPTY-main] createProcess success id=${id}`);
+		}
 		return id;
 	}
 	updateTitle(id: number, title: string, titleSource: TitleEventSource): Promise<void> {
@@ -240,12 +269,34 @@ export class PtyHostService extends Disposable implements IPtyHostService {
 		return this._optionalProxy?.reduceConnectionGraceTime();
 	}
 	start(id: number): Promise<ITerminalLaunchError | ITerminalLaunchResult | undefined> {
-		return this._proxy.start(id);
+		if (this._enableElectrobunPtyDiag && !this._didLogStartForProcess.has(id)) {
+			this._didLogStartForProcess.add(id);
+			this._logService.warn(`[ElectrobunPTY-main] start id=${id}`);
+		}
+		return this._proxy.start(id).then(result => {
+			if (this._enableElectrobunPtyDiag) {
+				let shape: string;
+				if (result === undefined) {
+					shape = 'undefined';
+				} else if (typeof result === 'object' && result !== null) {
+					const keys = Object.keys(result as Record<string, unknown>);
+					shape = keys.length > 0 ? keys.join(',') : 'object';
+				} else {
+					shape = typeof result;
+				}
+				this._logService.warn(`[ElectrobunPTY-main] startResult id=${id} shape=${shape}`);
+			}
+			return result;
+		});
 	}
 	shutdown(id: number, immediate: boolean): Promise<void> {
 		return this._proxy.shutdown(id, immediate);
 	}
 	input(id: number, data: string): Promise<void> {
+		if (this._enableElectrobunPtyDiag && !this._didLogInputForProcess.has(id)) {
+			this._didLogInputForProcess.add(id);
+			this._logService.warn(`[ElectrobunPTY-main] firstInput id=${id} bytes=${data.length}`);
+		}
 		return this._proxy.input(id, data);
 	}
 	sendSignal(id: number, signal: string): Promise<void> {

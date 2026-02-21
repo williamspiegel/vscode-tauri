@@ -85,7 +85,16 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 	}
 
 	private readonly restoredBarrier = new Barrier();
-	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true';
+	private readonly isElectrobunRuntime = (() => {
+		const maybeWindow = globalThis as typeof globalThis & { __electrobunInternalBridge?: unknown; __electrobunWindowId?: unknown };
+		return Boolean(
+			process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun' ||
+			process.versions?.['bun'] ||
+			maybeWindow.__electrobunInternalBridge ||
+			typeof maybeWindow.__electrobunWindowId === 'number'
+		);
+	})();
+	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true' || this.isElectrobunRuntime;
 
 	private readonly noopChannel: IChannel = {
 		listen: () => Event.None,
@@ -105,12 +114,15 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 		super();
 	}
 
-	async createWorker(process: IUtilityProcessWorkerProcess): Promise<IUtilityProcessWorker> {
+	async createWorker(workerProcess: IUtilityProcessWorkerProcess): Promise<IUtilityProcessWorker> {
 		this.logService.trace('Renderer->UtilityProcess#createWorker');
 		if (this.disableMessagePortTransport) {
-			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled via VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT (module: ${process.moduleId}), using no-op channel.`);
+			const reason = globalThis.process?.env?.['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true'
+				? 'VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'
+				: 'electrobun-runtime';
+			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled (${reason}, module: ${workerProcess.moduleId}), using no-op channel.`);
 			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_MESSAGEPORT_DISABLED_BY_ENV:${process.moduleId}`)}`);
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_MESSAGEPORT_DISABLED:${reason}:${workerProcess.moduleId}`)}`);
 			} catch {
 				// ignore diagnostics failures
 			}
@@ -139,17 +151,17 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 		// Actually talk with the utility process service
 		// to create a new process from a worker
 		const onDidTerminate = this.utilityProcessWorkerService.createWorker({
-			process,
+			process: workerProcess,
 			reply: { windowId: this.windowId, channel: responseChannel, nonce }
 		});
 
 		// Dispose worker upon disposal via utility process service
 		const disposables = new DisposableStore();
 		disposables.add(toDisposable(() => {
-			this.logService.trace('Renderer->UtilityProcess#disposeWorker', process);
+			this.logService.trace('Renderer->UtilityProcess#disposeWorker', workerProcess);
 
 			this.utilityProcessWorkerService.disposeWorker({
-				process,
+				process: workerProcess,
 				reply: { windowId: this.windowId }
 			});
 		}));
@@ -157,12 +169,12 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 		const port = await portPromise;
 		let client: IChannelClient & IChannelServer<string>;
 		if (port) {
-			client = disposables.add(new MessagePortClient(port, `window:${this.windowId},module:${process.moduleId}`));
+			client = disposables.add(new MessagePortClient(port, `window:${this.windowId},module:${workerProcess.moduleId}`));
 			this.logService.trace('Renderer->UtilityProcess#createWorkerChannel: connection established');
 		} else {
-			this.logService.warn(`Renderer->UtilityProcess#createWorkerChannel: timed out waiting for MessagePort (module: ${process.moduleId}), using no-op channel.`);
+			this.logService.warn(`Renderer->UtilityProcess#createWorkerChannel: timed out waiting for MessagePort (module: ${workerProcess.moduleId}), using no-op channel.`);
 			try {
-				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_CONNECT_TIMEOUT:${process.moduleId}`)}`);
+				void fetch(`${globalThis.location.origin}/DIAGNOSTICS?data=${encodeURIComponent(`UTILITY_PROCESS_CONNECT_TIMEOUT:${workerProcess.moduleId}`)}`);
 			} catch {
 				// ignore diagnostics failures
 			}
