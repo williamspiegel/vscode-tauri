@@ -508,6 +508,9 @@ async function copyAllNonTsFiles(outDir: string, excludeTests: boolean): Promise
 	const ignorePatterns = [
 		// Exclude .ts files but keep .d.ts files (they're needed at runtime for type references)
 		'**/*.ts',
+		// Do not copy TS project configs into runtime output. Bun discovers tsconfig.json
+		// near entrypoints and may apply path aliases intended only for type-checking.
+		'tsconfig*.json',
 	];
 	if (excludeTests) {
 		ignorePatterns.push('**/test/**');

@@ -272,6 +272,41 @@ export const nodeModulesAsarUnpackedPath: AppResourcePath = 'vs/../../node_modul
 
 export const VSCODE_AUTHORITY = 'vscode-app';
 
+function getElectrobunRuntimeFileServerOrigin(): string | undefined {
+	const electrobunGlobals = globalThis as typeof globalThis & {
+		__electrobunInternalBridge?: unknown;
+		__electrobunWindowId?: unknown;
+		process?: {
+			env?: Record<string, string | undefined>;
+			versions?: Record<string, string | undefined>;
+		};
+	};
+
+	const isElectrobunRuntime = Boolean(
+		electrobunGlobals.__electrobunInternalBridge ||
+		electrobunGlobals.__electrobunWindowId ||
+		electrobunGlobals.process?.env?.['VSCODE_DESKTOP_RUNTIME'] === 'electrobun' ||
+		electrobunGlobals.process?.versions?.['bun']
+	);
+	if (!isElectrobunRuntime) {
+		return undefined;
+	}
+
+	if (typeof globalThis._VSCODE_FILE_ROOT === 'string' && /^https?:\/\//i.test(globalThis._VSCODE_FILE_ROOT)) {
+		try {
+			return new URL(globalThis._VSCODE_FILE_ROOT).origin;
+		} catch {
+			// Ignore malformed values and fall back to location.
+		}
+	}
+
+	if (typeof location !== 'undefined' && /^https?:$/i.test(location.protocol)) {
+		return location.origin;
+	}
+
+	return undefined;
+}
+
 class FileAccessImpl {
 
 	private static readonly FALLBACK_AUTHORITY = VSCODE_AUTHORITY;
@@ -297,6 +332,15 @@ class FileAccessImpl {
 		// Handle remote URIs via `RemoteAuthorities`
 		if (uri.scheme === Schemas.vscodeRemote) {
 			return RemoteAuthorities.rewrite(uri);
+		}
+
+		// Electrobun runtime serves `file:` resources via a local HTTP endpoint at `/fs/<absolute-path>`.
+		if (uri.scheme === Schemas.file && !uri.authority) {
+			const electrobunOrigin = getElectrobunRuntimeFileServerOrigin();
+			if (electrobunOrigin) {
+				const suffix = `${uri.query ? `?${uri.query}` : ''}${uri.fragment ? `#${uri.fragment}` : ''}`;
+				return URI.parse(`${electrobunOrigin}/fs${encodeURI(uri.path)}${suffix}`);
+			}
 		}
 
 		// Convert to `vscode-file` resource..

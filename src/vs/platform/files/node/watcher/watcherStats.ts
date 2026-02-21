@@ -5,23 +5,27 @@
 
 import { INonRecursiveWatchRequest, IRecursiveWatchRequest, isRecursiveWatchRequest, IUniversalWatchRequest, requestFilterToString } from '../../common/watcher.js';
 import { INodeJSWatcherInstance, NodeJSWatcher } from './nodejs/nodejsWatcher.js';
-import { ParcelWatcher, ParcelWatcherInstance } from './parcel/parcelWatcher.js';
+import type { ParcelWatcher, ParcelWatcherInstance } from './parcel/parcelWatcher.js';
 
 export function computeStats(
 	requests: IUniversalWatchRequest[],
 	failedRecursiveRequests: number,
-	recursiveWatcher: ParcelWatcher,
+	recursiveWatcher: ParcelWatcher | undefined,
 	nonRecursiveWatcher: NodeJSWatcher
 ): string {
 	const lines: string[] = [];
 
 	const allRecursiveRequests = sortByPathPrefix(requests.filter(request => isRecursiveWatchRequest(request)));
-	const nonSuspendedRecursiveRequests = allRecursiveRequests.filter(request => recursiveWatcher.isSuspended(request) === false);
-	const suspendedPollingRecursiveRequests = allRecursiveRequests.filter(request => recursiveWatcher.isSuspended(request) === 'polling');
-	const suspendedNonPollingRecursiveRequests = allRecursiveRequests.filter(request => recursiveWatcher.isSuspended(request) === true);
+	const nonSuspendedRecursiveRequests = allRecursiveRequests.filter(request => recursiveWatcher ? recursiveWatcher.isSuspended(request) === false : true);
+	const suspendedPollingRecursiveRequests = allRecursiveRequests.filter(request => recursiveWatcher ? recursiveWatcher.isSuspended(request) === 'polling' : false);
+	const suspendedNonPollingRecursiveRequests = allRecursiveRequests.filter(request => recursiveWatcher ? recursiveWatcher.isSuspended(request) === true : false);
 
-	const recursiveRequestsStatus = computeRequestStatus(allRecursiveRequests, recursiveWatcher);
-	const recursiveWatcherStatus = computeRecursiveWatchStatus(recursiveWatcher);
+	const recursiveRequestsStatus = recursiveWatcher
+		? computeRequestStatus(allRecursiveRequests, recursiveWatcher)
+		: { suspended: 0, polling: 0 };
+	const recursiveWatcherStatus = recursiveWatcher
+		? computeRecursiveWatchStatus(recursiveWatcher)
+		: { active: 0, failed: 0, stopped: 0 };
 
 	const allNonRecursiveRequests = sortByPathPrefix(requests.filter(request => !isRecursiveWatchRequest(request)));
 	const nonSuspendedNonRecursiveRequests = allNonRecursiveRequests.filter(request => nonRecursiveWatcher.isSuspended(request) === false);
@@ -34,7 +38,7 @@ export function computeStats(
 	lines.push('[Summary]');
 	lines.push(`- Recursive Requests:     total: ${allRecursiveRequests.length}, suspended: ${recursiveRequestsStatus.suspended}, polling: ${recursiveRequestsStatus.polling}, failed: ${failedRecursiveRequests}`);
 	lines.push(`- Non-Recursive Requests: total: ${allNonRecursiveRequests.length}, suspended: ${nonRecursiveRequestsStatus.suspended}, polling: ${nonRecursiveRequestsStatus.polling}`);
-	lines.push(`- Recursive Watchers:     total: ${Array.from(recursiveWatcher.watchers).length}, active: ${recursiveWatcherStatus.active}, failed: ${recursiveWatcherStatus.failed}, stopped: ${recursiveWatcherStatus.stopped}`);
+	lines.push(`- Recursive Watchers:     total: ${recursiveWatcher ? Array.from(recursiveWatcher.watchers).length : 0}, active: ${recursiveWatcherStatus.active}, failed: ${recursiveWatcherStatus.failed}, stopped: ${recursiveWatcherStatus.stopped}`);
 	lines.push(`- Non-Recursive Watchers: total: ${Array.from(nonRecursiveWatcher.watchers).length}, active: ${nonRecursiveWatcherStatus.active}, failed: ${nonRecursiveWatcherStatus.failed}, reusing: ${nonRecursiveWatcherStatus.reusing}`);
 	lines.push(`- I/O Handles Impact:     total: ${recursiveRequestsStatus.polling + nonRecursiveRequestsStatus.polling + recursiveWatcherStatus.active + nonRecursiveWatcherStatus.active}`);
 
@@ -46,7 +50,11 @@ export function computeStats(
 	lines.push(...alignTextColumns(recursiveRequestLines));
 
 	const recursiveWatcheLines: string[] = [];
-	fillRecursiveWatcherStats(recursiveWatcheLines, recursiveWatcher);
+	if (recursiveWatcher) {
+		fillRecursiveWatcherStats(recursiveWatcheLines, recursiveWatcher);
+	} else {
+		recursiveWatcheLines.push('\n[Recursive Watchers]: unavailable (parcel watcher not loaded)');
+	}
 	lines.push(...alignTextColumns(recursiveWatcheLines));
 
 	lines.push(`\n[Non-Recursive Requests (${allNonRecursiveRequests.length}, suspended: ${nonRecursiveRequestsStatus.suspended}, polling: ${nonRecursiveRequestsStatus.polling})]:`);

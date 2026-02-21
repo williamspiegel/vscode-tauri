@@ -21,9 +21,32 @@ export class Client extends MessagePortClient implements IDisposable {
 	 * client can also be a server
 	 */
 	constructor(port: MessagePortMain, clientId: string) {
+		const portCandidate = port as unknown as {
+			addListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+			removeListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+			addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+			removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+		};
+		const addListener = (type: string, listener: EventListenerOrEventListenerObject) => {
+			if (typeof portCandidate.addListener === 'function') {
+				portCandidate.addListener(type, listener);
+				return;
+			}
+
+			portCandidate.addEventListener?.(type, listener);
+		};
+		const removeListener = (type: string, listener: EventListenerOrEventListenerObject) => {
+			if (typeof portCandidate.removeListener === 'function') {
+				portCandidate.removeListener(type, listener);
+				return;
+			}
+
+			portCandidate.removeEventListener?.(type, listener);
+		};
+
 		super({
-			addEventListener: (type, listener) => port.addListener(type, listener),
-			removeEventListener: (type, listener) => port.removeListener(type, listener),
+			addEventListener: (type, listener) => addListener(type, listener),
+			removeEventListener: (type, listener) => removeListener(type, listener),
 			postMessage: message => port.postMessage(message),
 			start: () => port.start(),
 			close: () => port.close()

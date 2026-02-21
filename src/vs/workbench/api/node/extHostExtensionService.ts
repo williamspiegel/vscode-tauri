@@ -20,6 +20,9 @@ import { realpathSync } from '../../../base/node/pfs.js';
 import { ExtHostConsoleForwarder } from './extHostConsoleForwarder.js';
 import { ExtHostDiskFileSystemProvider } from './extHostDiskFileSystemProvider.js';
 import nodeModule from 'node:module';
+import * as fs from 'fs/promises';
+import * as paths from '../../../base/common/path.js';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { assertType } from '../../../base/common/types.js';
 import { generateUuid } from '../../../base/common/uuid.js';
 import { BidirectionalMap } from '../../../base/common/map.js';
@@ -33,6 +36,21 @@ class NodeModuleRequireInterceptor extends RequireInterceptor {
 		const that = this;
 		const node_module = require('module');
 		const originalLoad = node_module._load;
+		const originalRequire = node_module.Module?.prototype?.require;
+		const originalCreateRequire = node_module.createRequire;
+		const fallbackParentUri = URI.file(realpathSync(import.meta.filename));
+		const toParentUri = (rawPathOrUrl: string | undefined): URI => {
+			if (!rawPathOrUrl) {
+				return fallbackParentUri;
+			}
+
+			try {
+				const normalizedPath = /^file:\/\//i.test(rawPathOrUrl) ? fileURLToPath(rawPathOrUrl) : rawPathOrUrl;
+				return URI.file(realpathSync(normalizedPath));
+			} catch {
+				return fallbackParentUri;
+			}
+		};
 		node_module._load = function load(request: string, parent: { filename: string }, isMain: boolean) {
 			request = applyAlternatives(request);
 			if (!that._factories.has(request)) {
@@ -43,6 +61,50 @@ class NodeModuleRequireInterceptor extends RequireInterceptor {
 				URI.file(realpathSync(parent.filename)),
 				request => originalLoad.apply(this, [request, parent, isMain])
 			);
+		};
+
+		// Bun's CommonJS compatibility can bypass `Module._load` in some paths.
+		// Intercept prototype `require` as well so `require('vscode')` still resolves
+		// to the extension API factory in those environments.
+		if (typeof originalRequire === 'function') {
+			node_module.Module.prototype.require = function patchedRequire(this: { filename?: string }, request: string) {
+				request = applyAlternatives(request);
+				if (!that._factories.has(request)) {
+					return originalRequire.call(this, request);
+				}
+
+				const parentFilename = typeof this.filename === 'string' ? this.filename : import.meta.filename;
+				return that._factories.get(request)!.load(
+					request,
+					URI.file(realpathSync(parentFilename)),
+					req => originalRequire.call(this, req)
+				);
+			};
+		}
+
+		// `createRequire(import.meta.url)` is common in ESM extensions and shims.
+		// Wrap it so `require('vscode')` keeps going through the extension API factory.
+		node_module.createRequire = function patchedCreateRequire(filename: string | URL) {
+			const createdRequire = originalCreateRequire.call(this, filename);
+			if (typeof createdRequire !== 'function') {
+				return createdRequire;
+			}
+
+			const parentUri = toParentUri(typeof filename === 'string' ? filename : filename?.toString());
+			const wrappedRequire = function wrappedCreateRequire(this: unknown, request: string) {
+				request = applyAlternatives(request);
+				if (!that._factories.has(request)) {
+					return createdRequire.call(this, request);
+				}
+
+				return that._factories.get(request)!.load(
+					request,
+					parentUri,
+					req => createdRequire.call(this, req)
+				);
+			} as typeof createdRequire;
+			Object.assign(wrappedRequire, createdRequire);
+			return wrappedRequire;
 		};
 
 		const originalLookup = node_module._resolveLookupPaths;
@@ -196,6 +258,7 @@ class NodeModuleESMInterceptor extends RequireInterceptor {
 export class ExtHostExtensionService extends AbstractExtHostExtensionService {
 
 	readonly extensionRuntime = ExtensionRuntime.Node;
+	private readonly electrobunEsmRewriteCache = new Map<string, string>();
 
 	protected async _beforeAlmostReadyToRunExtensions(): Promise<void> {
 		// make sure console.log calls make it to the render
@@ -232,6 +295,115 @@ export class ExtHostExtensionService extends AbstractExtHostExtensionService {
 		performance.mark('code/extHost/didInitProxyResolver');
 	}
 
+	private isElectrobunRuntime(): boolean {
+		return Boolean(process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun' || process.versions?.['bun']);
+	}
+
+	private async rewriteElectrobunEsmDirectory(sourceDir: string, rewrittenDir: string): Promise<string> {
+		const shimFilePath = paths.join(rewrittenDir, '__vscode_api_shim__.mjs');
+		const shimFileHref = pathToFileURL(shimFilePath).href;
+
+		await fs.rm(rewrittenDir, { recursive: true, force: true });
+		await fs.mkdir(rewrittenDir, { recursive: true });
+
+		// Keep extension-specific API behavior by resolving `require('vscode')` from
+		// a file that still lives under the extension folder.
+		const shimSource = [
+			`import { createRequire } from 'node:module';`,
+			`const require = createRequire(import.meta.url);`,
+			`const vscode = require('vscode');`,
+			`export default vscode;`
+		].join('\n');
+		await fs.writeFile(shimFilePath, `${shimSource}\n`, 'utf8');
+
+		const rewriteSpecifier = (source: string): string => {
+			let rewritten = source;
+			let seq = 0;
+
+			// Named imports from `vscode` need to become default imports from our shim.
+			rewritten = rewritten.replace(
+				/import\s+\{([^}]+)\}\s+from\s+['"]vscode['"]\s*;?/g,
+				(_match, imports: string) => {
+					const alias = `__vscode_api_${++seq}`;
+					const destructuring = imports.replace(/\bas\b/g, ':');
+					return `import ${alias} from '${shimFileHref}';\nconst { ${destructuring} } = ${alias};`;
+				}
+			);
+
+			rewritten = rewritten.replace(
+				/import\s+([A-Za-z_$][\w$]*)\s*,\s*\{([^}]+)\}\s+from\s+['"]vscode['"]\s*;?/g,
+				(_match, defaultImport: string, imports: string) => {
+					const destructuring = imports.replace(/\bas\b/g, ':');
+					return `import ${defaultImport} from '${shimFileHref}';\nconst { ${destructuring} } = ${defaultImport};`;
+				}
+			);
+
+			rewritten = rewritten.replace(
+				/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+['"]vscode['"]\s*;?/g,
+				`import $1 from '${shimFileHref}';`
+			);
+
+			rewritten = rewritten.replace(
+				/import\s+([A-Za-z_$][\w$]*)\s+from\s+['"]vscode['"]\s*;?/g,
+				`import $1 from '${shimFileHref}';`
+			);
+
+			rewritten = rewritten.replace(/from\s+(['"])vscode\1/g, `from '${shimFileHref}'`);
+			rewritten = rewritten.replace(/import\s*\(\s*(['"])vscode\1\s*\)/g, `import('${shimFileHref}')`);
+			return rewritten;
+		};
+
+		const copyRecursive = async (fromDir: string, toDir: string): Promise<void> => {
+			await fs.mkdir(toDir, { recursive: true });
+			const entries = await fs.readdir(fromDir, { withFileTypes: true });
+			for (const entry of entries) {
+				if (entry.name === '.electrobun-esm') {
+					continue;
+				}
+
+				const sourcePath = paths.join(fromDir, entry.name);
+				const targetPath = paths.join(toDir, entry.name);
+
+				if (entry.isDirectory()) {
+					await copyRecursive(sourcePath, targetPath);
+					continue;
+				}
+
+				if (!entry.isFile()) {
+					continue;
+				}
+
+				const extension = paths.extname(entry.name).toLowerCase();
+				if (extension === '.js' || extension === '.mjs' || extension === '.cjs') {
+					const content = await fs.readFile(sourcePath, 'utf8');
+					await fs.writeFile(targetPath, rewriteSpecifier(content), 'utf8');
+				} else {
+					await fs.copyFile(sourcePath, targetPath);
+				}
+			}
+		};
+
+		await copyRecursive(sourceDir, rewrittenDir);
+		return shimFileHref;
+	}
+
+	private async prepareElectrobunEsmModule(module: URI): Promise<URI> {
+		if (!this.isElectrobunRuntime()) {
+			return module;
+		}
+
+		const sourceDir = paths.dirname(module.fsPath);
+		let rewrittenDir = this.electrobunEsmRewriteCache.get(sourceDir);
+		if (!rewrittenDir) {
+			rewrittenDir = paths.join(sourceDir, '.electrobun-esm');
+			await this.rewriteElectrobunEsmDirectory(sourceDir, rewrittenDir);
+			this.electrobunEsmRewriteCache.set(sourceDir, rewrittenDir);
+		}
+
+		const rewrittenModulePath = paths.join(rewrittenDir, paths.basename(module.fsPath));
+		return URI.file(rewrittenModulePath);
+	}
+
 	protected _getEntryPoint(extensionDescription: IExtensionDescription): string | undefined {
 		return extensionDescription.main;
 	}
@@ -253,9 +425,22 @@ export class ExtHostExtensionService extends AbstractExtHostExtensionService {
 				performance.mark(`code/extHost/willLoadExtensionCode/${extensionId}`);
 			}
 			if (mode === 'esm') {
-				r = <T>await import(module.toString(true));
+				const resolvedModule = await this.prepareElectrobunEsmModule(module);
+				r = <T>await import(resolvedModule.toString(true));
 			} else {
-				r = <T>require(module.fsPath);
+				try {
+					r = <T>require(module.fsPath);
+				} catch (error) {
+					const maybeMissingVscodePackage = error instanceof Error && /Cannot find package ['"]vscode['"]/.test(error.message);
+					if (!this.isElectrobunRuntime() || extension?.type !== 'module' || !maybeMissingVscodePackage) {
+						throw error;
+					}
+
+					// Bun can attempt ESM resolution from `require(...)` for `type: module` packages.
+					// Retry through the Electrobun ESM rewrite path to guarantee `vscode` API shimming.
+					const resolvedModule = await this.prepareElectrobunEsmModule(module);
+					r = <T>await import(resolvedModule.toString(true));
+				}
 			}
 		} finally {
 			if (extensionId) {

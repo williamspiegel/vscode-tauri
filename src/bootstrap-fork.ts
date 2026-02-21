@@ -288,6 +288,29 @@ function installElectrobunParentPortPolyfill(): void {
 	};
 
 	const parentPort = new EventEmitter() as EventEmitter & { postMessage: (message: unknown) => void };
+	const pendingMessageEvents: IBridgedMessageEvent[] = [];
+	const emitOrQueueParentPortMessage = (event: IBridgedMessageEvent): void => {
+		if (parentPort.listenerCount('message') === 0) {
+			pendingMessageEvents.push(event);
+			return;
+		}
+
+		parentPort.emit('message', event);
+	};
+	const flushPendingMessageEvents = (): void => {
+		if (parentPort.listenerCount('message') === 0 || pendingMessageEvents.length === 0) {
+			return;
+		}
+
+		while (pendingMessageEvents.length > 0) {
+			parentPort.emit('message', pendingMessageEvents.shift()!);
+		}
+	};
+	parentPort.on('newListener', eventName => {
+		if (eventName === 'message') {
+			queueMicrotask(flushPendingMessageEvents);
+		}
+	});
 	parentPort.postMessage = (message: unknown): void => {
 		try {
 			process.send?.(message);
@@ -305,7 +328,7 @@ function installElectrobunParentPortPolyfill(): void {
 				data: reviveParentPortPayload(envelope.data),
 				ports
 			};
-			parentPort.emit('message', event);
+			emitOrQueueParentPortMessage(event);
 			return;
 		}
 		if (envelope?.__vscodeParentPortPortMessage && typeof envelope.id === 'string') {
@@ -329,7 +352,7 @@ function installElectrobunParentPortPolyfill(): void {
 			data: rawMessage,
 			ports: []
 		};
-		parentPort.emit('message', event);
+		emitOrQueueParentPortMessage(event);
 	});
 
 	(utilityProcess as NodeJS.Process & { parentPort: typeof parentPort }).parentPort = parentPort;

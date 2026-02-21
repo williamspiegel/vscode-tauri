@@ -28,6 +28,10 @@ function code() {
 	# Get electrobun runtime, compile, built-in extensions
 	if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
 		node build/lib/preLaunch.ts
+	else
+		# Even when skipping full prelaunch, refresh the Electrobun app wrapper.
+		# This keeps `out/**` import rewrites in sync after local transpiles.
+		node --experimental-strip-types build/lib/electrobun.ts
 	fi
 
 	# Manage built-in extensions

@@ -100,6 +100,34 @@ function getFileContentType(filePath) {
 	);
 }
 
+function stripMissingSourceMapReferences(filePath, fileContents) {
+	const sourceText = fileContents.toString("utf8");
+	const sourceMapPattern = /^[ \t]*\/\/[#@][ \t]*sourceMappingURL=([^\s]+)[ \t]*$/gm;
+
+	let changed = false;
+	const rewritten = sourceText.replace(sourceMapPattern, (fullMatch, rawTarget) => {
+		const target = String(rawTarget ?? "").trim();
+		if (
+			!target ||
+			target.startsWith("data:") ||
+			target.startsWith("http://") ||
+			target.startsWith("https://")
+		) {
+			return fullMatch;
+		}
+
+		const targetPath = path.resolve(path.dirname(filePath), target);
+		if (fs.existsSync(targetPath)) {
+			return fullMatch;
+		}
+
+		changed = true;
+		return "";
+	});
+
+	return changed ? Buffer.from(rewritten, "utf8") : fileContents;
+}
+
 async function createRuntimeFileServer() {
 	return await new Promise((resolve) => {
 		let settled = false;
@@ -251,11 +279,19 @@ export default defaultExport;
 						return;
 					}
 
+					let responseContents = contents;
+					if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
+						responseContents = stripMissingSourceMapReferences(
+							absolutePath,
+							responseContents,
+						);
+					}
+
 					response.writeHead(200, {
 						"Content-Type": getFileContentType(absolutePath),
 						"Cache-Control": "no-cache",
 					});
-					response.end(contents);
+					response.end(responseContents);
 				});
 			} catch (error) {
 				response.writeHead(500, {
@@ -477,10 +513,26 @@ try {
 		if (!listeners || listeners.size === 0) {
 			return;
 		}
-		const event = { sender: null, ports: [] };
+		let listenerArgs = Array.isArray(args) ? [...args] : [];
+		let transferredPorts = [];
+		const maybeTransferDescriptor =
+			listenerArgs.length > 0
+				? listenerArgs[listenerArgs.length - 1]
+				: undefined;
+		if (
+			maybeTransferDescriptor &&
+			typeof maybeTransferDescriptor === 'object' &&
+			Array.isArray(maybeTransferDescriptor.__vscodePortTokens)
+		) {
+			listenerArgs = listenerArgs.slice(0, -1);
+			transferredPorts = maybeTransferDescriptor.__vscodePortTokens
+				.map((portId) => __vscodeEnsureVirtualPort(String(portId)))
+				.filter((port) => !!port);
+		}
+		const event = { sender: null, ports: transferredPorts };
 		for (const listener of listeners) {
 			try {
-				listener(event, ...(Array.isArray(args) ? args : []));
+				listener(event, ...listenerArgs);
 			} catch (error) {
 				console.error('[electrobun preload bootstrap] ipc listener failed', error);
 			}
@@ -1247,9 +1299,27 @@ export const dialog = {
 					canChooseFiles: canChooseFilesForRuntime,
 					allowsMultipleSelection,
 				});
-				let filePaths = (Array.isArray(paths) ? paths : [])
-					.map((filePath) => String(filePath))
+				const normalizeDialogPath = (value) => {
+					let filePath = String(value ?? "").trim();
+					if (!filePath) {
+						return "";
+					}
+					if (filePath.startsWith("file://")) {
+						try {
+							filePath = decodeURIComponent(new URL(filePath).pathname);
+						} catch {}
+					}
+					if (filePath === "~") {
+						filePath = process.env["HOME"] ?? filePath;
+					} else if (filePath.startsWith("~/")) {
+						filePath = path.join(process.env["HOME"] ?? "~", filePath.slice(2));
+					}
+					return filePath;
+				};
+				const normalizedFilePaths = (Array.isArray(paths) ? paths : [])
+					.map((filePath) => normalizeDialogPath(filePath))
 					.filter(Boolean);
+				let filePaths = normalizedFilePaths;
 				if (hasOpenDirectory && !hasOpenFile) {
 					filePaths = filePaths.filter((filePath) => {
 						try {
@@ -1258,6 +1328,9 @@ export const dialog = {
 							return false;
 						}
 					});
+					if (filePaths.length === 0 && normalizedFilePaths.length > 0) {
+						filePaths = normalizedFilePaths;
+					}
 				}
 				return { canceled: filePaths.length === 0, filePaths };
 			}
@@ -2591,7 +2664,7 @@ export const utilityProcess = {
 			}
 		});
 		child.postMessage = (message, transfer) => {
-			if (message === undefined || typeof child.send !== "function") {
+			if (typeof child.send !== "function") {
 				return false;
 			}
 			if (Array.isArray(transfer) && transfer.length > 0) {
@@ -2602,6 +2675,13 @@ export const utilityProcess = {
 					__vscodeParentPortMessage: true,
 					data: serializeIpcArgForRenderer(message),
 					transferIds,
+				});
+			}
+			if (message === undefined) {
+				return child.send({
+					__vscodeParentPortMessage: true,
+					data: undefined,
+					transferIds: [],
 				});
 			}
 			return child.send(message);
