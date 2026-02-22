@@ -249,6 +249,44 @@ class IpcRendererShim {
     private readonly resolveWindowId: () => Promise<number>
   ) {
     this.channelRegistry = createDesktopChannelRegistry(host);
+    this.installMenubarBridge();
+  }
+
+  private installMenubarBridge(): void {
+    void this.channelRegistry.listen('menubar', 'runAction', null, payload => {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+
+      const candidate = payload as { id?: unknown; from?: unknown; args?: unknown };
+      if (typeof candidate.id !== 'string' || candidate.id.length === 0) {
+        return;
+      }
+
+      this.emit('vscode:runAction', {
+        id: candidate.id,
+        from: typeof candidate.from === 'string' ? candidate.from : 'menu',
+        args: Array.isArray(candidate.args) ? candidate.args : undefined
+      });
+    });
+
+    void this.channelRegistry.listen('menubar', 'runKeybinding', null, payload => {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+
+      const candidate = payload as { userSettingsLabel?: unknown };
+      if (
+        typeof candidate.userSettingsLabel !== 'string' ||
+        candidate.userSettingsLabel.length === 0
+      ) {
+        return;
+      }
+
+      this.emit('vscode:runKeybinding', {
+        userSettingsLabel: candidate.userSettingsLabel
+      });
+    });
   }
 
   private validateChannel(channel: string): void {

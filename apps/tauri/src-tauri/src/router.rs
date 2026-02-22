@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::Emitter;
 
 #[derive(Clone)]
@@ -35,6 +36,7 @@ pub struct CapabilityRouter {
     next_local_file_handle: Arc<AtomicU64>,
     watcher_state: Arc<Mutex<WatcherRuntimeState>>,
     next_watcher_watch_id: Arc<AtomicU64>,
+    menubar_state: Arc<Mutex<MenubarRuntimeState>>,
     fallback: NodeFallbackClient,
 }
 
@@ -46,6 +48,20 @@ struct WatcherRuntimeState {
 
 struct WatcherWatchRequestState {
     correlation_id: Option<i64>,
+}
+
+#[derive(Default)]
+struct MenubarRuntimeState {
+    action_by_menu_item_id: HashMap<String, MenubarAction>,
+    next_generated_menu_item_id: u64,
+}
+
+#[derive(Clone)]
+enum MenubarAction {
+    RunAction {
+        command_id: String,
+        args: Vec<Value>,
+    },
 }
 
 impl CapabilityRouter {
@@ -65,6 +81,7 @@ impl CapabilityRouter {
             next_local_file_handle: Arc::new(AtomicU64::new(1)),
             watcher_state: Arc::new(Mutex::new(WatcherRuntimeState::default())),
             next_watcher_watch_id: Arc::new(AtomicU64::new(1)),
+            menubar_state: Arc::new(Mutex::new(MenubarRuntimeState::default())),
             fallback: NodeFallbackClient::new(fallback_script, metrics),
         }
     }
@@ -1258,7 +1275,7 @@ impl CapabilityRouter {
                 _ => Ok(None),
             },
             "menubar" => match method {
-                "updateMenubar" => Ok(Some(Value::Null)),
+                "updateMenubar" => self.handle_menubar_update(args).map(|_| Some(Value::Null)),
                 _ => Ok(None),
             },
             "extensionhostdebugservice" => match method {
@@ -1361,6 +1378,59 @@ impl CapabilityRouter {
     pub fn fallback_counts(&self) -> std::collections::BTreeMap<String, u64> {
         self.fallback.metrics().snapshot()
     }
+
+    pub fn menubar_action_payload(&self, menu_item_id: &str) -> Option<Value> {
+        let state = self.menubar_state.lock().ok()?;
+        let action = state.action_by_menu_item_id.get(menu_item_id)?.clone();
+        match action {
+            MenubarAction::RunAction { command_id, args } => {
+                let mut request = json!({
+                    "id": command_id,
+                    "from": "menu"
+                });
+                if !args.is_empty() {
+                    request["args"] = Value::Array(args);
+                }
+                Some(request)
+            }
+        }
+    }
+
+    fn handle_menubar_update(&self, args: &Value) -> Result<(), String> {
+        let menubar_data = nth_arg(args, 1)
+            .or_else(|| nth_arg(args, 0))
+            .ok_or_else(|| "menubar.updateMenubar expected menubar data argument".to_string())?;
+        let menus = menubar_data
+            .get("menus")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "menubar.updateMenubar missing menus object".to_string())?;
+        let keybindings = menubar_data.get("keybindings").and_then(Value::as_object);
+        let app_handle = crate::capabilities::window::app_handle()
+            .ok_or_else(|| "tauri app handle not initialized".to_string())?;
+
+        let mut runtime_state = MenubarRuntimeState::default();
+
+        #[cfg(target_os = "macos")]
+        {
+            let menu =
+                build_macos_native_menu(&app_handle, menus, keybindings, &mut runtime_state)?;
+            menu.set_as_app_menu().map_err(|error| {
+                format!("menubar.updateMenubar failed to set app menu: {error}")
+            })?;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (&app_handle, menus, keybindings);
+        }
+
+        let mut state = self
+            .menubar_state
+            .lock()
+            .map_err(|_| "menubar state lock poisoned".to_string())?;
+        *state = runtime_state;
+        Ok(())
+    }
 }
 
 fn dispatch_channel_rust_default(channel: &str, method: &str, _args: &Value) -> Option<Value> {
@@ -1415,6 +1485,401 @@ fn default_by_method_name(method: &str) -> Value {
         return Value::Null;
     }
     Value::Null
+}
+
+#[cfg(target_os = "macos")]
+const MENUBAR_TOP_LEVEL_ORDER: [&str; 9] = [
+    "File",
+    "Edit",
+    "Selection",
+    "View",
+    "Go",
+    "Run",
+    "Terminal",
+    "Window",
+    "Help",
+];
+
+#[cfg(target_os = "macos")]
+fn build_macos_native_menu<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    menus: &serde_json::Map<String, Value>,
+    keybindings: Option<&serde_json::Map<String, Value>>,
+    runtime_state: &mut MenubarRuntimeState,
+) -> Result<Menu<R>, String> {
+    let menu = Menu::new(app_handle)
+        .map_err(|error| format!("menubar.updateMenubar failed to create root menu: {error}"))?;
+
+    let app_name = app_handle.package_info().name.clone();
+    let app_submenu = Submenu::new(app_handle, app_name, true)
+        .map_err(|error| format!("menubar.updateMenubar failed to create app submenu: {error}"))?;
+    app_submenu
+        .append(
+            &PredefinedMenuItem::about(app_handle, None, None).map_err(|error| {
+                format!("menubar.updateMenubar failed to create About menu item: {error}")
+            })?,
+        )
+        .map_err(|error| {
+            format!("menubar.updateMenubar failed to append About menu item: {error}")
+        })?;
+    app_submenu
+        .append(&PredefinedMenuItem::separator(app_handle).map_err(|error| {
+            format!("menubar.updateMenubar failed to create separator: {error}")
+        })?)
+        .map_err(|error| format!("menubar.updateMenubar failed to append separator: {error}"))?;
+
+    if let Some(preferences_menu) = menus.get("Preferences") {
+        append_top_level_menu_entries(
+            app_handle,
+            &app_submenu,
+            preferences_menu,
+            keybindings,
+            runtime_state,
+        )?;
+        app_submenu
+            .append(&PredefinedMenuItem::separator(app_handle).map_err(|error| {
+                format!("menubar.updateMenubar failed to create separator: {error}")
+            })?)
+            .map_err(|error| {
+                format!("menubar.updateMenubar failed to append separator: {error}")
+            })?;
+    }
+
+    app_submenu
+        .append(
+            &PredefinedMenuItem::services(app_handle, None).map_err(|error| {
+                format!("menubar.updateMenubar failed to create Services menu item: {error}")
+            })?,
+        )
+        .map_err(|error| {
+            format!("menubar.updateMenubar failed to append Services menu item: {error}")
+        })?;
+    app_submenu
+        .append(&PredefinedMenuItem::separator(app_handle).map_err(|error| {
+            format!("menubar.updateMenubar failed to create separator: {error}")
+        })?)
+        .map_err(|error| format!("menubar.updateMenubar failed to append separator: {error}"))?;
+    app_submenu
+        .append(
+            &PredefinedMenuItem::hide(app_handle, None).map_err(|error| {
+                format!("menubar.updateMenubar failed to create Hide menu item: {error}")
+            })?,
+        )
+        .map_err(|error| {
+            format!("menubar.updateMenubar failed to append Hide menu item: {error}")
+        })?;
+    app_submenu
+        .append(
+            &PredefinedMenuItem::hide_others(app_handle, None).map_err(|error| {
+                format!("menubar.updateMenubar failed to create Hide Others menu item: {error}")
+            })?,
+        )
+        .map_err(|error| {
+            format!("menubar.updateMenubar failed to append Hide Others menu item: {error}")
+        })?;
+    app_submenu
+        .append(
+            &PredefinedMenuItem::show_all(app_handle, None).map_err(|error| {
+                format!("menubar.updateMenubar failed to create Show All menu item: {error}")
+            })?,
+        )
+        .map_err(|error| {
+            format!("menubar.updateMenubar failed to append Show All menu item: {error}")
+        })?;
+    app_submenu
+        .append(&PredefinedMenuItem::separator(app_handle).map_err(|error| {
+            format!("menubar.updateMenubar failed to create separator: {error}")
+        })?)
+        .map_err(|error| format!("menubar.updateMenubar failed to append separator: {error}"))?;
+    app_submenu
+        .append(
+            &PredefinedMenuItem::quit(app_handle, None).map_err(|error| {
+                format!("menubar.updateMenubar failed to create Quit menu item: {error}")
+            })?,
+        )
+        .map_err(|error| {
+            format!("menubar.updateMenubar failed to append Quit menu item: {error}")
+        })?;
+
+    menu.append(&app_submenu)
+        .map_err(|error| format!("menubar.updateMenubar failed to append app submenu: {error}"))?;
+
+    let mut consumed_top_level = std::collections::HashSet::new();
+    consumed_top_level.insert("Preferences".to_string());
+
+    for top_level in MENUBAR_TOP_LEVEL_ORDER {
+        let Some(menu_value) = menus.get(top_level) else {
+            continue;
+        };
+        append_named_top_level_menu(
+            app_handle,
+            &menu,
+            top_level,
+            menu_value,
+            keybindings,
+            runtime_state,
+        )?;
+        consumed_top_level.insert(top_level.to_string());
+    }
+
+    for (top_level, menu_value) in menus {
+        if consumed_top_level.contains(top_level) {
+            continue;
+        }
+        append_named_top_level_menu(
+            app_handle,
+            &menu,
+            top_level,
+            menu_value,
+            keybindings,
+            runtime_state,
+        )?;
+    }
+
+    Ok(menu)
+}
+
+#[cfg(target_os = "macos")]
+fn append_named_top_level_menu<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    menu: &Menu<R>,
+    top_level_label: &str,
+    menu_value: &Value,
+    keybindings: Option<&serde_json::Map<String, Value>>,
+    runtime_state: &mut MenubarRuntimeState,
+) -> Result<(), String> {
+    let submenu = Submenu::new(app_handle, strip_menu_mnemonics(top_level_label), true).map_err(
+        |error| {
+            format!(
+                "menubar.updateMenubar failed to create top-level submenu '{top_level_label}': {error}"
+            )
+        },
+    )?;
+
+    append_top_level_menu_entries(app_handle, &submenu, menu_value, keybindings, runtime_state)?;
+
+    if submenu
+        .items()
+        .map_err(|error| {
+            format!(
+                "menubar.updateMenubar failed to inspect top-level submenu '{top_level_label}': {error}"
+            )
+        })?
+        .is_empty()
+    {
+        return Ok(());
+    }
+
+    menu.append(&submenu).map_err(|error| {
+        format!(
+            "menubar.updateMenubar failed to append top-level submenu '{top_level_label}': {error}"
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn append_top_level_menu_entries<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    submenu: &Submenu<R>,
+    menu_value: &Value,
+    keybindings: Option<&serde_json::Map<String, Value>>,
+    runtime_state: &mut MenubarRuntimeState,
+) -> Result<(), String> {
+    let items = menu_value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "menubar.updateMenubar expected menu.items array".to_string())?;
+
+    for item in items {
+        let Some(item_object) = item.as_object() else {
+            continue;
+        };
+
+        if item_object.get("id").and_then(Value::as_str) == Some("vscode.menubar.separator") {
+            submenu
+                .append(&PredefinedMenuItem::separator(app_handle).map_err(|error| {
+                    format!("menubar.updateMenubar failed to create separator: {error}")
+                })?)
+                .map_err(|error| {
+                    format!("menubar.updateMenubar failed to append separator: {error}")
+                })?;
+            continue;
+        }
+
+        if let Some(nested_menu) = item_object.get("submenu") {
+            let label = item_object
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("Submenu");
+            let nested =
+                Submenu::new(app_handle, strip_menu_mnemonics(label), true).map_err(|error| {
+                    format!("menubar.updateMenubar failed to create nested submenu: {error}")
+                })?;
+
+            append_top_level_menu_entries(
+                app_handle,
+                &nested,
+                nested_menu,
+                keybindings,
+                runtime_state,
+            )?;
+
+            if !nested
+                .items()
+                .map_err(|error| {
+                    format!("menubar.updateMenubar failed to inspect nested submenu: {error}")
+                })?
+                .is_empty()
+            {
+                submenu.append(&nested).map_err(|error| {
+                    format!("menubar.updateMenubar failed to append nested submenu: {error}")
+                })?;
+            }
+            continue;
+        }
+
+        let command_id = match item_object.get("id").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => id,
+            _ => continue,
+        };
+
+        let enabled = item_object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let checked = item_object
+            .get("checked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let base_label = item_object
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or(command_id);
+        let display_label = append_non_native_keybinding_label(
+            strip_menu_mnemonics(base_label),
+            command_id,
+            keybindings,
+        );
+        let accelerator = resolve_native_keybinding(command_id, keybindings);
+
+        let menu_item_id = next_menubar_item_id(runtime_state, command_id);
+
+        if checked {
+            let menu_item = CheckMenuItem::with_id(
+                app_handle,
+                menu_item_id.clone(),
+                display_label,
+                enabled,
+                checked,
+                accelerator.as_deref(),
+            )
+            .map_err(|error| {
+                format!("menubar.updateMenubar failed to create check item: {error}")
+            })?;
+            submenu.append(&menu_item).map_err(|error| {
+                format!("menubar.updateMenubar failed to append check item: {error}")
+            })?;
+        } else {
+            let menu_item = MenuItem::with_id(
+                app_handle,
+                menu_item_id.clone(),
+                display_label,
+                enabled,
+                accelerator.as_deref(),
+            )
+            .map_err(|error| {
+                format!("menubar.updateMenubar failed to create menu item: {error}")
+            })?;
+            submenu.append(&menu_item).map_err(|error| {
+                format!("menubar.updateMenubar failed to append menu item: {error}")
+            })?;
+        }
+
+        runtime_state.action_by_menu_item_id.insert(
+            menu_item_id,
+            MenubarAction::RunAction {
+                command_id: command_id.to_string(),
+                args: vec![],
+            },
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn next_menubar_item_id(runtime_state: &mut MenubarRuntimeState, command_id: &str) -> String {
+    runtime_state.next_generated_menu_item_id += 1;
+    format!(
+        "vscode-menubar::{command_id}::{}",
+        runtime_state.next_generated_menu_item_id
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_native_keybinding(
+    command_id: &str,
+    keybindings: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
+    let binding = keybindings
+        .and_then(|bindings| bindings.get(command_id))
+        .and_then(Value::as_object)?;
+    let label = binding.get("label").and_then(Value::as_str)?;
+    if label.trim().is_empty() {
+        return None;
+    }
+    if binding.get("isNative").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    Some(label.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn append_non_native_keybinding_label(
+    label: String,
+    command_id: &str,
+    keybindings: Option<&serde_json::Map<String, Value>>,
+) -> String {
+    let binding = match keybindings
+        .and_then(|bindings| bindings.get(command_id))
+        .and_then(Value::as_object)
+    {
+        Some(binding) => binding,
+        None => return label,
+    };
+    if binding.get("isNative").and_then(Value::as_bool) != Some(false) {
+        return label;
+    }
+    let binding_label = match binding.get("label").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => value.trim(),
+        _ => return label,
+    };
+
+    if label.contains('[') {
+        label
+    } else {
+        format!("{label} [{binding_label}]")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn strip_menu_mnemonics(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut chars = label.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '&' {
+            out.push(ch);
+            continue;
+        }
+
+        if matches!(chars.peek(), Some('&')) {
+            out.push('&');
+            chars.next();
+        }
+    }
+
+    out
 }
 
 fn first_arg(args: &Value) -> Option<&Value> {

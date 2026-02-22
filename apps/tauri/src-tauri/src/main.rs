@@ -406,6 +406,14 @@ impl AppState {
 
         Ok(())
     }
+
+    fn handle_menubar_event(&self, menu_item_id: &str) -> Result<(), String> {
+        let Some(payload) = self.router.menubar_action_payload(menu_item_id) else {
+            return Ok(());
+        };
+
+        self.emit_to_subscriptions("menubar", "runAction", payload, |_| true)
+    }
 }
 
 #[tauri::command]
@@ -762,7 +770,9 @@ fn io_error_name_and_code(error: &io::Error) -> (&'static str, &'static str) {
         io::ErrorKind::PermissionDenied => ("NoPermissions (FileSystemError)", "NoPermissions"),
         io::ErrorKind::AlreadyExists => ("EntryExists (FileSystemError)", "EntryExists"),
         io::ErrorKind::IsADirectory => ("EntryIsADirectory (FileSystemError)", "EntryIsADirectory"),
-        io::ErrorKind::NotADirectory => ("EntryNotADirectory (FileSystemError)", "EntryNotADirectory"),
+        io::ErrorKind::NotADirectory => {
+            ("EntryNotADirectory (FileSystemError)", "EntryNotADirectory")
+        }
         _ => ("Unknown (FileSystemError)", "Unknown"),
     }
 }
@@ -1185,6 +1195,7 @@ fn main() {
             capabilities::window::set_app_handle(app.handle().clone());
             let app_handle = app.handle().clone();
             let listener_handle = app_handle.clone();
+            let menu_listener_handle = app_handle.clone();
             app_handle.listen("filesystem_changed", move |event| {
                 let payload = event.payload();
                 if payload.is_empty() {
@@ -1194,6 +1205,13 @@ fn main() {
                 let state = listener_handle.state::<AppState>();
                 if let Err(error) = state.handle_filesystem_changed(payload) {
                     eprintln!("[desktop.fs.bridge.error] {error}");
+                }
+            });
+            app_handle.on_menu_event(move |_app, event| {
+                let menu_item_id = event.id().0.clone();
+                let state = menu_listener_handle.state::<AppState>();
+                if let Err(error) = state.handle_menubar_event(&menu_item_id) {
+                    eprintln!("[desktop.menubar.bridge.error] {error}");
                 }
             });
             if let Some(window) = app.get_webview_window("main") {
