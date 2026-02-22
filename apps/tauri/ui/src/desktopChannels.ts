@@ -1,14 +1,34 @@
 import { HostClient } from './hostClient';
 
-const ENABLE_CHANNEL_TRACE =
-  new URLSearchParams(window.location.search).get('hostDebug') === '1' ||
-  (() => {
-    try {
-      return window.localStorage?.getItem('tauriHostDebug') === '1';
-    } catch {
+function readDebugFlag(
+  queryKey: string,
+  storageKey: string
+): boolean | undefined {
+  const queryValue = new URLSearchParams(window.location.search).get(queryKey);
+  if (queryValue === '1') {
+    return true;
+  }
+  if (queryValue === '0') {
+    return false;
+  }
+
+  try {
+    const stored = window.localStorage?.getItem(storageKey);
+    if (stored === '1') {
+      return true;
+    }
+    if (stored === '0') {
       return false;
     }
-  })();
+  } catch {
+    // ignore storage access failures
+  }
+
+  return undefined;
+}
+
+const ENABLE_CHANNEL_TRACE = readDebugFlag('hostDebug', 'tauriHostDebug') === true;
+const ENABLE_FS_TRACE = readDebugFlag('fsDebug', 'tauriFsDebug') ?? ENABLE_CHANNEL_TRACE;
 
 export interface DesktopChannelRegistry {
   readonly channels: readonly string[];
@@ -864,7 +884,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
     },
     async call(channel, method, args) {
       const normalized = normalizeArgs(args);
-      if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+      if (ENABLE_FS_TRACE && channel === 'localFilesystem') {
         const target = asRecord(normalized[0]);
         const path =
           (typeof target.fsPath === 'string' ? target.fsPath : undefined) ??
@@ -894,7 +914,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
         }
 
         const normalizedResult = normalizeResult ? normalizeResult(result, normalized) : result;
-        if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+        if (ENABLE_FS_TRACE && channel === 'localFilesystem') {
           if (method === 'readFile') {
             const byteLength =
               normalizedResult instanceof Uint8Array
@@ -911,7 +931,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
         return normalizedResult;
       } catch (error) {
         if (channel === 'localFilesystem') {
-          if (ENABLE_CHANNEL_TRACE) {
+          if (ENABLE_FS_TRACE) {
             const target = asRecord(normalized[0]);
             const path =
               (typeof target.fsPath === 'string' ? target.fsPath : undefined) ??
@@ -948,7 +968,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
       }
     },
     async listen(channel, event, arg, onEvent) {
-      if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+      if (ENABLE_FS_TRACE && channel === 'localFilesystem') {
         console.debug('[desktop.fs.listen]', { event });
       }
       if (channel === 'localFilesystem' && event === 'readFileStream') {
@@ -968,7 +988,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           }
           streamChunkCount += 1;
           streamTotalBytes += bytes.byteLength;
-          if (ENABLE_CHANNEL_TRACE) {
+          if (ENABLE_FS_TRACE) {
             console.debug('[desktop.fs.stream.chunk]', {
               bytes: bytes.byteLength,
               chunks: streamChunkCount,
@@ -983,7 +1003,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
             return;
           }
           streamClosed = true;
-          if (ENABLE_CHANNEL_TRACE) {
+          if (ENABLE_FS_TRACE) {
             console.debug('[desktop.fs.stream.end]', {
               chunks: streamChunkCount,
               totalBytes: streamTotalBytes
@@ -1028,7 +1048,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
             .catch(error => {
               if (!streamClosed) {
                 streamClosed = true;
-                if (ENABLE_CHANNEL_TRACE) {
+                if (ENABLE_FS_TRACE) {
                   console.error('[desktop.fs.stream.fallback.error]', {
                     errorMessage: normalizeErrorMessage(error)
                   });
@@ -1053,7 +1073,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
             }
 
             if (payload instanceof Error) {
-              if (ENABLE_CHANNEL_TRACE) {
+              if (ENABLE_FS_TRACE) {
                 console.error('[desktop.fs.stream.error]', {
                   errorMessage: payload.message
                 });
@@ -1096,7 +1116,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
               };
               if (!streamClosed) {
                 streamClosed = true;
-                if (ENABLE_CHANNEL_TRACE) {
+                if (ENABLE_FS_TRACE) {
                   console.error('[desktop.fs.stream.error]', {
                     errorMessage: message,
                     errorName: streamError.name,
@@ -1110,7 +1130,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
 
             if (!streamClosed) {
               streamClosed = true;
-              if (ENABLE_CHANNEL_TRACE) {
+              if (ENABLE_FS_TRACE) {
                 console.error('[desktop.fs.stream.error]', {
                   errorMessage: 'Invalid readFileStream payload from host'
                 });
@@ -1185,7 +1205,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           await stop();
         };
       } catch (error) {
-        if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+        if (ENABLE_FS_TRACE && channel === 'localFilesystem') {
           const errorMessage = normalizeErrorMessage(error);
           console.error('[desktop.fs.listen.error]', { event, errorMessage });
         }

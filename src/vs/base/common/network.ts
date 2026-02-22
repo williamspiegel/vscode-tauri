@@ -272,6 +272,19 @@ export const nodeModulesAsarUnpackedPath: AppResourcePath = 'vs/../../node_modul
 
 export const VSCODE_AUTHORITY = 'vscode-app';
 
+type IGlobalWithDesktopRuntime = typeof globalThis & {
+	vscode?: {
+		process?: {
+			env?: {
+				VSCODE_DESKTOP_RUNTIME?: string;
+			};
+		};
+	};
+	location?: {
+		origin?: string;
+	};
+};
+
 class FileAccessImpl {
 
 	private static readonly FALLBACK_AUTHORITY = VSCODE_AUTHORITY;
@@ -299,6 +312,13 @@ class FileAccessImpl {
 			return RemoteAuthorities.rewrite(uri);
 		}
 
+		// In Electrobun/Tauri, `vscode-file://` has no browser protocol handler.
+		// Route local file resources through Vite's `@fs` path instead.
+		const tauriBrowserUri = this.toElectrobunBrowserUri(uri);
+		if (tauriBrowserUri) {
+			return tauriBrowserUri;
+		}
+
 		// Convert to `vscode-file` resource..
 		if (
 			// ...only ever for `file` resources
@@ -323,6 +343,27 @@ class FileAccessImpl {
 		}
 
 		return uri;
+	}
+
+	private toElectrobunBrowserUri(uri: URI): URI | undefined {
+		const globalWithDesktopRuntime = globalThis as IGlobalWithDesktopRuntime;
+		const runtime = globalWithDesktopRuntime.vscode?.process?.env?.VSCODE_DESKTOP_RUNTIME;
+		const origin = globalWithDesktopRuntime.location?.origin;
+		if (runtime !== 'electrobun' || typeof origin !== 'string' || origin.length === 0) {
+			return undefined;
+		}
+
+		const fileUri = uri.scheme === Schemas.vscodeFileResource ? this.uriToFileUri(uri) : uri;
+		if (fileUri.scheme !== Schemas.file) {
+			return undefined;
+		}
+
+		const filePath = fileUri.path.startsWith('/') ? fileUri.path : `/${fileUri.path}`;
+		try {
+			return URI.parse(new URL(`/@fs${filePath}`, origin).toString(), true);
+		} catch {
+			return undefined;
+		}
 	}
 
 	/**

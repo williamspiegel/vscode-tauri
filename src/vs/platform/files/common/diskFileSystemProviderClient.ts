@@ -123,7 +123,29 @@ function normalizeReadFileBytes(value: unknown): Uint8Array | undefined {
 
 function isTauriFsDebugEnabled(): boolean {
 	try {
+		const search = (globalThis as { location?: { search?: string } }).location?.search;
+		if (typeof search === 'string' && search.length > 0) {
+			const queryValue = new URLSearchParams(search).get('fsDebug');
+			if (queryValue === '1') {
+				return true;
+			}
+			if (queryValue === '0') {
+				return false;
+			}
+		}
+	} catch {
+		// ignore URL parsing issues
+	}
+
+	try {
 		const storage = (globalThis as { localStorage?: { getItem?: (key: string) => string | null } }).localStorage;
+		const fsStored = storage?.getItem?.('tauriFsDebug');
+		if (fsStored === '1') {
+			return true;
+		}
+		if (fsStored === '0') {
+			return false;
+		}
 		return storage?.getItem?.('tauriHostDebug') === '1';
 	} catch {
 		return false;
