@@ -217,7 +217,15 @@ export abstract class AbstractWatcherClient extends Disposable {
 		// Wire in event handlers
 		disposables.add(this.watcher.onDidChangeFile(changes => this.onFileChanges(changes)));
 		disposables.add(this.watcher.onDidLogMessage(msg => this.onLogMessage(msg)));
-		disposables.add(this.watcher.onDidError(e => this.onError(e.error, e.request)));
+		disposables.add(this.watcher.onDidError(e => {
+			const error = typeof e?.error === 'string' ? e.error : undefined;
+			if (!error) {
+				this.trace('dropping malformed watcher error payload');
+				return;
+			}
+
+			this.onError(error, e?.request);
+		}));
 	}
 
 	protected onError(error: string, failedRequest?: IUniversalWatchRequest): void {
@@ -243,6 +251,10 @@ export abstract class AbstractWatcherClient extends Disposable {
 			return false; // disabled by options
 		}
 
+		if (typeof error !== 'string') {
+			return true;
+		}
+
 		if (failedRequest) {
 			// do not treat a failing request as a reason to restart the entire
 			// watcher. it is possible that from a large amount of watch requests
@@ -252,6 +264,8 @@ export abstract class AbstractWatcherClient extends Disposable {
 		}
 
 		if (
+			error === 'unknown watcher error' ||
+			error === 'watcher error' ||
 			error.indexOf('No space left on device') !== -1 ||
 			error.indexOf('EMFILE') !== -1
 		) {

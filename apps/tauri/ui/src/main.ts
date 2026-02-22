@@ -111,10 +111,6 @@ function formatErrorDetails(error: unknown): string {
   }
 }
 
-async function installVsCodeUnexpectedErrorHook(): Promise<void> {
-  return;
-}
-
 async function installVsCodeUnexpectedErrorHookForPath(modulePath: string): Promise<void> {
   try {
     const errorsModule = (await import(
@@ -148,20 +144,39 @@ async function installVsCodeUnexpectedErrorHookForPath(modulePath: string): Prom
 }
 
 async function attachDebugHostListeners(host: HostClient): Promise<void> {
-  const debugEnabled = new URLSearchParams(window.location.search).get('hostDebug') === '1';
+  const debugEnabled =
+    new URLSearchParams(window.location.search).get('hostDebug') === '1' ||
+    (() => {
+      try {
+        return window.localStorage?.getItem('tauriHostDebug') === '1';
+      } catch {
+        return false;
+      }
+    })();
   if (!debugEnabled) {
     return;
   }
 
-  await host.listenEvent('host.lifecycle', payload => {
+  const tryListen = async <E extends Parameters<HostClient['listenEvent']>[0]>(
+    eventName: E,
+    handler: Parameters<HostClient['listenEvent']>[1]
+  ): Promise<void> => {
+    try {
+      await host.listenEvent(eventName, handler as never);
+    } catch (error) {
+      console.warn('[tauri.logs] failed to attach debug listener', { eventName, error });
+    }
+  };
+
+  await tryListen('host.lifecycle', payload => {
     console.debug('[host.lifecycle]', payload);
   });
 
-  await host.listenEvent('filesystem.changed', payload => {
+  await tryListen('filesystem.changed', payload => {
     console.debug('[filesystem.changed]', payload);
   });
 
-  await host.listenEvent('terminal.data', payload => {
+  await tryListen('terminal.data', payload => {
     console.debug('[terminal.data]', {
       id: payload.id,
       stream: payload.stream,
@@ -169,11 +184,11 @@ async function attachDebugHostListeners(host: HostClient): Promise<void> {
     });
   });
 
-  await host.listenEvent('process.exit', payload => {
+  await tryListen('process.exit', payload => {
     console.debug('[process.exit]', payload);
   });
 
-  await host.listenEvent('process.data', payload => {
+  await tryListen('process.data', payload => {
     console.debug('[process.data]', {
       pid: payload.pid,
       stream: payload.stream,
@@ -181,152 +196,16 @@ async function attachDebugHostListeners(host: HostClient): Promise<void> {
     });
   });
 
-  await host.listenEvent('fallback.used', payload => {
+  await tryListen('fallback.used', payload => {
     console.debug('[fallback.used]', payload);
   });
 
-  await host.listenEvent('desktop.channelEvent', payload => {
+  await tryListen('desktop.channelEvent', payload => {
     console.debug('[desktop.channelEvent]', payload);
   });
 }
 
-function normalizeReadFileBytes(value: unknown): Uint8Array | undefined {
-  if (value instanceof Uint8Array) {
-    return value;
-  }
-
-  if (value instanceof ArrayBuffer) {
-    return new Uint8Array(value);
-  }
-
-  if (ArrayBuffer.isView(value)) {
-    const view = value as ArrayBufferView;
-    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-  }
-
-  if (Array.isArray(value)) {
-    return Uint8Array.from(value.map(item => Number(item) & 0xff));
-  }
-
-  if (!value || typeof value !== 'object') {
-    return undefined;
-  }
-
-  const objectValue = value as Record<string, unknown>;
-
-  if (typeof objectValue.type === 'string' && objectValue.type === 'Buffer' && Array.isArray(objectValue.data)) {
-    return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
-  }
-
-  if (Array.isArray(objectValue.data)) {
-    return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
-  }
-
-  if (typeof objectValue.base64 === 'string' && objectValue.base64.length > 0) {
-    try {
-      const binary = atob(objectValue.base64);
-      const out = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        out[i] = binary.charCodeAt(i) & 0xff;
-      }
-      return out;
-    } catch {
-      // ignore and continue with other representations
-    }
-  }
-
-  if (objectValue.buffer !== undefined) {
-    const nested = normalizeReadFileBytes(objectValue.buffer);
-    if (nested) {
-      const requestedLength =
-        typeof objectValue.byteLength === 'number' && Number.isFinite(objectValue.byteLength)
-          ? Math.max(0, Math.floor(objectValue.byteLength))
-          : undefined;
-      return typeof requestedLength === 'number' ? nested.slice(0, requestedLength) : nested;
-    }
-  }
-
-  const hasNumericKeys = Object.keys(objectValue).some(key => /^\d+$/.test(key));
-  if (
-    hasNumericKeys &&
-    typeof objectValue.length === 'number' &&
-    Number.isFinite(objectValue.length) &&
-    objectValue.length >= 0
-  ) {
-    const length = Math.floor(objectValue.length);
-    const bytes = Array.from({ length }, (_, index) => {
-      const candidate = objectValue[String(index)];
-      if (typeof candidate !== 'number') {
-        return 0;
-      }
-      return Number(candidate) & 0xff;
-    });
-    return Uint8Array.from(bytes);
-  }
-
-  return undefined;
-}
-
-function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
-  if (chunks.length === 0) {
-    return new Uint8Array(0);
-  }
-
-  if (chunks.length === 1) {
-    return chunks[0];
-  }
-
-  let total = 0;
-  for (const chunk of chunks) {
-    total += chunk.byteLength;
-  }
-
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return out;
-}
-
-function disposeMaybe(value: unknown): void {
-  if (!value) {
-    return;
-  }
-
-  if (typeof value === 'function') {
-    try {
-      value();
-    } catch {
-      // ignore cleanup errors
-    }
-    return;
-  }
-
-  if (typeof value === 'object' && typeof (value as { dispose?: () => void }).dispose === 'function') {
-    try {
-      (value as { dispose: () => void }).dispose();
-    } catch {
-      // ignore cleanup errors
-    }
-  }
-}
-
 const DISK_FS_PATCH_MARKER = '__tauriDiskFsPatched';
-const OPEN_READ_STATE_BY_CLIENT = new WeakMap<object, { nextFd: number; files: Map<number, Uint8Array> }>();
-
-function getOpenReadState(client: object): { nextFd: number; files: Map<number, Uint8Array> } {
-  const existing = OPEN_READ_STATE_BY_CLIENT.get(client);
-  if (existing) {
-    return existing;
-  }
-
-  const created = { nextFd: 1, files: new Map<number, Uint8Array>() };
-  OPEN_READ_STATE_BY_CLIENT.set(client, created);
-  return created;
-}
 
 type GlobalWithVscodeFileRoot = typeof globalThis & {
   _VSCODE_FILE_ROOT?: unknown;
@@ -357,39 +236,6 @@ function installFileRootCompatibilityPatch(): void {
 }
 
 async function installFilesystemCompatibilityPatch(appRoot: string): Promise<void> {
-  let newWriteableStream:
-    | ((reducer: (data: Uint8Array[]) => Uint8Array) => {
-        write(data: Uint8Array): void;
-        error(error: Error): void;
-        end(result?: Uint8Array): void;
-      })
-    | undefined;
-  const streamModuleCandidates = [
-    '/out/vs/base/common/stream.js',
-    appRoot ? `/@fs${appRoot}/out/vs/base/common/stream.js` : ''
-  ].filter(Boolean);
-  for (const streamModulePath of streamModuleCandidates) {
-    try {
-      const streamModule = (await import(
-        /* @vite-ignore */ streamModulePath
-      )) as {
-        newWriteableStream?: (
-          reducer: (data: Uint8Array[]) => Uint8Array
-        ) => {
-          write(data: Uint8Array): void;
-          error(error: Error): void;
-          end(result?: Uint8Array): void;
-        };
-      };
-      if (typeof streamModule.newWriteableStream === 'function') {
-        newWriteableStream = streamModule.newWriteableStream;
-        break;
-      }
-    } catch {
-      // continue trying alternate module locations
-    }
-  }
-
   const candidatePaths = new Set<string>([
     '/out/vs/platform/files/common/diskFileSystemProviderClient.js'
   ]);
@@ -441,188 +287,8 @@ async function installFilesystemCompatibilityPatch(appRoot: string): Promise<voi
         });
       }
 
-      const readFileImpl = prototype.readFile;
-      if (typeof readFileImpl === 'function') {
-        prototype.readFile = async function patchedReadFile(this: unknown, resource: unknown, opts: unknown): Promise<Uint8Array> {
-          const self = this as {
-            channel?: {
-              call?: (command: string, arg?: unknown) => Promise<unknown>;
-            };
-          };
-
-          let raw: unknown;
-          if (self.channel && typeof self.channel.call === 'function') {
-            try {
-              raw = await self.channel.call('readFile', [resource, opts]);
-            } catch {
-              // Fall back to the original implementation if direct channel call fails.
-              raw = await (readFileImpl as (resource: unknown, opts: unknown) => Promise<unknown>).call(this, resource, opts);
-            }
-          } else {
-            raw = await (readFileImpl as (resource: unknown, opts: unknown) => Promise<unknown>).call(this, resource, opts);
-          }
-
-          const normalized =
-            normalizeReadFileBytes(raw) ??
-            (raw && typeof raw === 'object' ? normalizeReadFileBytes((raw as Record<string, unknown>).buffer) : undefined);
-
-          const path = (resource && typeof resource === 'object' && typeof (resource as Record<string, unknown>).path === 'string')
-            ? ((resource as Record<string, unknown>).path as string)
-            : '<unknown>';
-
-          if (!normalized) {
-            throw new Error(
-              `[tauri.compat] Unable to normalize DiskFileSystemProviderClient.readFile payload for ${path} ` +
-                `(raw keys: ${
-                  raw && typeof raw === 'object' ? Object.keys(raw as Record<string, unknown>).join(',') : '<non-object>'
-                })`
-            );
-          }
-
-          return normalized;
-        };
-      }
-
-      const readFileStreamImpl = prototype.readFileStream;
-      if (typeof readFileStreamImpl === 'function' && typeof newWriteableStream === 'function') {
-        prototype.readFileStream = function patchedReadFileStream(
-          this: unknown,
-          resource: unknown,
-          opts: unknown,
-          token: unknown
-        ) {
-          const stream = newWriteableStream!(concatUint8Arrays);
-          const self = this as Record<string, unknown>;
-          let cancellationListener: unknown;
-          if (token && typeof token === 'object') {
-            const cancellationToken = token as {
-              isCancellationRequested?: boolean;
-              onCancellationRequested?: (callback: () => void) => unknown;
-            };
-            if (cancellationToken.isCancellationRequested === true) {
-              stream.error(new Error('Canceled'));
-              stream.end();
-              return stream;
-            }
-            if (typeof cancellationToken.onCancellationRequested === 'function') {
-              cancellationListener = cancellationToken.onCancellationRequested(() => {
-                stream.error(new Error('Canceled'));
-                stream.end();
-              });
-            }
-          }
-
-          void (async () => {
-            try {
-              const readFileCandidate = self.readFile;
-              let bytes: Uint8Array;
-              if (typeof readFileCandidate === 'function') {
-                bytes = await (
-                  readFileCandidate as (resource: unknown, opts: unknown) => Promise<Uint8Array>
-                ).call(this, resource, opts);
-              } else if (typeof readFileImpl === 'function') {
-                bytes = await (
-                  readFileImpl as (resource: unknown, opts: unknown) => Promise<Uint8Array>
-                ).call(this, resource, opts);
-              } else {
-                throw new Error('readFile is unavailable');
-              }
-
-              stream.write(bytes);
-              stream.end();
-            } catch (error) {
-              stream.error(error instanceof Error ? error : new Error(String(error)));
-              stream.end();
-            } finally {
-              disposeMaybe(cancellationListener);
-            }
-          })();
-
-          return stream;
-        };
-      }
-
-      const openImpl = prototype.open;
-      const readImpl = prototype.read;
-      const closeImpl = prototype.close;
-      if (typeof openImpl === 'function' && typeof readImpl === 'function' && typeof closeImpl === 'function') {
-        prototype.open = async function patchedOpen(this: unknown, resource: unknown, opts: unknown): Promise<number> {
-          const optionRecord = opts && typeof opts === 'object' ? (opts as Record<string, unknown>) : undefined;
-          if (
-            optionRecord?.create === true ||
-            optionRecord?.unlock === true ||
-            optionRecord?.write === true
-          ) {
-            return (openImpl as (resource: unknown, opts: unknown) => Promise<number>).call(this, resource, opts);
-          }
-
-          const self = this as Record<string, unknown>;
-          const readFileCandidate = self.readFile;
-          if (typeof readFileCandidate !== 'function' || !this || typeof this !== 'object') {
-            return (openImpl as (resource: unknown, opts: unknown) => Promise<number>).call(this, resource, opts);
-          }
-
-          const bytes = await (
-            readFileCandidate as (resource: unknown, opts: unknown) => Promise<Uint8Array>
-          ).call(this, resource, opts);
-          const state = getOpenReadState(this as object);
-          const fd = state.nextFd++;
-          state.files.set(fd, bytes);
-          return fd;
-        };
-
-        prototype.read = async function patchedRead(
-          this: unknown,
-          fd: number,
-          pos: number,
-          data: Uint8Array,
-          offset: number,
-          length: number
-        ): Promise<number> {
-          if (!this || typeof this !== 'object') {
-            return (readImpl as (fd: number, pos: number, data: Uint8Array, offset: number, length: number) => Promise<number>).call(
-              this,
-              fd,
-              pos,
-              data,
-              offset,
-              length
-            );
-          }
-
-          const state = getOpenReadState(this as object);
-          const bytes = state.files.get(fd);
-          if (!bytes) {
-            return (readImpl as (fd: number, pos: number, data: Uint8Array, offset: number, length: number) => Promise<number>).call(
-              this,
-              fd,
-              pos,
-              data,
-              offset,
-              length
-            );
-          }
-
-          const safePos = Math.max(0, Math.floor(pos));
-          const safeOffset = Math.max(0, Math.floor(offset));
-          const safeLength = Math.max(0, Math.floor(length));
-          const end = Math.min(bytes.byteLength, safePos + safeLength);
-          const chunk = bytes.subarray(safePos, end);
-          data.set(chunk, safeOffset);
-          return chunk.byteLength;
-        };
-
-        prototype.close = async function patchedClose(this: unknown, fd: number): Promise<void> {
-          if (this && typeof this === 'object') {
-            const state = getOpenReadState(this as object);
-            if (state.files.delete(fd)) {
-              return;
-            }
-          }
-          return (closeImpl as (fd: number) => Promise<void>).call(this, fd);
-        };
-      }
-
+      // Disable legacy read/open monkey-patch path; it is fragile in the
+      // Tauri runtime and can throw during startup with unexpected call contexts.
       prototype[DISK_FS_PATCH_MARKER] = true;
     } catch (error) {
       console.warn('[tauri.compat] failed to apply filesystem compatibility patch', { modulePath, error });
@@ -635,9 +301,18 @@ async function main(): Promise<void> {
   setStatus('Launching Tauri host...');
   const host = new HostClient();
 
-  setStatus('Handshake with Tauri host...');
-  const handshake = await host.handshake();
-  const windowConfig = await host.resolveWindowConfig();
+  const step = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
+    setStatus(label);
+    try {
+      return await run();
+    } catch (error) {
+      const detail = formatErrorDetails(error);
+      throw new Error(`${label} failed:\n${detail}`);
+    }
+  };
+
+  const handshake = await step('Handshake with Tauri host...', () => host.handshake());
+  const windowConfig = await step('Resolving window config...', () => host.resolveWindowConfig());
   const appRoot =
     typeof windowConfig.appRoot === 'string' ? windowConfig.appRoot : '';
   const errorModuleCandidates = [
@@ -648,19 +323,22 @@ async function main(): Promise<void> {
     await installVsCodeUnexpectedErrorHookForPath(modulePath);
   }
 
-  await attachDebugHostListeners(host);
+  try {
+    await attachDebugHostListeners(host);
+  } catch (error) {
+    console.warn('[startup] failed to attach debug listeners', error);
+  }
   setStatus(
     `Host: ${handshake.serverName} ${handshake.serverVersion} | Protocol ${handshake.protocolVersion}`
   );
 
-  setStatus('Installing desktop sandbox...');
-  await installDesktopSandbox(host);
+  await step('Installing desktop sandbox...', () => installDesktopSandbox(host));
   installFileRootCompatibilityPatch();
-  await installFilesystemCompatibilityPatch(appRoot);
+  await step('Installing filesystem compatibility patch...', () => installFilesystemCompatibilityPatch(appRoot));
 
   setStatus('Loading desktop workbench runtime...');
   const desktopWorkbenchPath = '/out/vs/code/electron-browser/workbench/workbench.js';
-  await import(/* @vite-ignore */ desktopWorkbenchPath);
+  await step('Loading desktop workbench runtime...', () => import(/* @vite-ignore */ desktopWorkbenchPath).then(() => undefined));
 
   for (const modulePath of errorModuleCandidates) {
     await installVsCodeUnexpectedErrorHookForPath(modulePath);

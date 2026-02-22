@@ -10,6 +10,7 @@ use crate::capabilities::window::{RustPrimaryWindowCapability, WindowCapability}
 use crate::node_fallback::NodeFallbackClient;
 use crate::protocol::CapabilityDomain;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -32,7 +33,19 @@ pub struct CapabilityRouter {
     update: Arc<dyn UpdateCapability>,
     local_file_handles: Arc<Mutex<HashMap<u64, File>>>,
     next_local_file_handle: Arc<AtomicU64>,
+    watcher_state: Arc<Mutex<WatcherRuntimeState>>,
+    next_watcher_watch_id: Arc<AtomicU64>,
     fallback: NodeFallbackClient,
+}
+
+#[derive(Default)]
+struct WatcherRuntimeState {
+    verbose_logging: bool,
+    watch_requests: HashMap<String, WatcherWatchRequestState>,
+}
+
+struct WatcherWatchRequestState {
+    correlation_id: Option<i64>,
 }
 
 impl CapabilityRouter {
@@ -50,6 +63,8 @@ impl CapabilityRouter {
             update: Arc::new(RustPrimaryUpdateCapability::new()),
             local_file_handles: Arc::new(Mutex::new(HashMap::new())),
             next_local_file_handle: Arc::new(AtomicU64::new(1)),
+            watcher_state: Arc::new(Mutex::new(WatcherRuntimeState::default())),
+            next_watcher_watch_id: Arc::new(AtomicU64::new(1)),
             fallback: NodeFallbackClient::new(fallback_script, metrics),
         }
     }
@@ -88,7 +103,7 @@ impl CapabilityRouter {
             .unwrap_or(0);
         if let Some(app_handle) = crate::capabilities::window::app_handle() {
             let _ = app_handle.emit(
-                "fallback.used",
+                "fallback_used",
                 json!({
                     "domain": domain.as_str(),
                     "method": method,
@@ -128,7 +143,7 @@ impl CapabilityRouter {
             .unwrap_or(0);
         if let Some(app_handle) = crate::capabilities::window::app_handle() {
             let _ = app_handle.emit(
-                "fallback.used",
+                "fallback_used",
                 json!({
                     "domain": format!("channel:{channel}"),
                     "method": method,
@@ -138,6 +153,244 @@ impl CapabilityRouter {
         }
 
         Ok(fallback_result)
+    }
+
+    pub fn watcher_verbose_logging(&self) -> bool {
+        self.watcher_state
+            .lock()
+            .map(|state| state.verbose_logging)
+            .unwrap_or(false)
+    }
+
+    pub fn watcher_changes_from_filesystem_event(
+        &self,
+        watch_id: &str,
+        path: &str,
+        kind: &str,
+    ) -> Option<Value> {
+        let correlation_id = self.watcher_state.lock().ok().and_then(|state| {
+            state
+                .watch_requests
+                .get(watch_id)
+                .map(|value| value.correlation_id)
+        })?;
+        let resource = file_uri_value_from_path(&PathBuf::from(path));
+        let change_type = file_change_type_from_kind(kind);
+
+        if let Some(correlation_id) = correlation_id {
+            return Some(json!([{
+                "resource": resource,
+                "type": change_type,
+                "cId": correlation_id
+            }]));
+        }
+
+        Some(json!([{
+            "resource": resource,
+            "type": change_type
+        }]))
+    }
+
+    async fn handle_local_filesystem_watch(&self, args: &Value) -> Result<(), String> {
+        let session_id = parse_watch_id_arg(
+            nth_arg(args, 0),
+            "localFilesystem.watch expected sessionId argument",
+        )?;
+        let req_id = parse_watch_id_arg(
+            nth_arg(args, 1),
+            "localFilesystem.watch expected requestId argument",
+        )?;
+        let resource = nth_arg(args, 2)
+            .ok_or_else(|| "localFilesystem.watch expected resource argument".to_string())?;
+        let path = extract_fs_path(resource)
+            .ok_or_else(|| "localFilesystem.watch expected file URI/path argument".to_string())?;
+        let options = nth_arg(args, 3).and_then(Value::as_object);
+        let recursive = options
+            .and_then(|opts| opts.get("recursive"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let force_polling = options
+            .and_then(|opts| opts.get("forcePolling"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let poll_interval_ms = options
+            .and_then(|opts| opts.get("pollInterval"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                options
+                    .and_then(|opts| opts.get("pollIntervalMs"))
+                    .and_then(Value::as_u64)
+            });
+        let watch_id = local_filesystem_watch_id(&session_id, &req_id);
+
+        let _ = self
+            .invoke_filesystem_watch(
+                path,
+                recursive,
+                force_polling,
+                poll_interval_ms,
+                Some(watch_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn handle_local_filesystem_unwatch(&self, args: &Value) -> Result<(), String> {
+        let session_id = parse_watch_id_arg(
+            nth_arg(args, 0),
+            "localFilesystem.unwatch expected sessionId argument",
+        )?;
+        let req_id = parse_watch_id_arg(
+            nth_arg(args, 1),
+            "localFilesystem.unwatch expected requestId argument",
+        )?;
+        let watch_id = local_filesystem_watch_id(&session_id, &req_id);
+        self.invoke_filesystem_unwatch(&watch_id).await?;
+        Ok(())
+    }
+
+    async fn handle_watcher_watch(&self, args: &Value) -> Result<(), String> {
+        let requests = nth_arg(args, 0)
+            .and_then(Value::as_array)
+            .ok_or_else(|| "watcher.watch expected requests array argument".to_string())?;
+        self.unwatch_all_watcher_requests().await?;
+
+        let mut watch_requests = HashMap::new();
+        let mut first_error: Option<String> = None;
+        for request in requests {
+            let request_object = match request.as_object() {
+                Some(request) => request,
+                None => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some("watcher.watch received an invalid request payload".to_string());
+                    }
+                    continue;
+                }
+            };
+
+            let path = match request_object.get("path").and_then(Value::as_str) {
+                Some(path) => PathBuf::from(path),
+                None => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some("watcher.watch request missing string `path`".to_string());
+                    }
+                    continue;
+                }
+            };
+            let recursive = request_object
+                .get("recursive")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let polling_interval_ms = request_object
+                .get("pollingInterval")
+                .and_then(Value::as_u64);
+            let force_polling = polling_interval_ms.is_some();
+            let correlation_id = request_object.get("correlationId").and_then(Value::as_i64);
+            let watch_id = format!(
+                "watcher:{}",
+                self.next_watcher_watch_id.fetch_add(1, Ordering::Relaxed)
+            );
+
+            match self
+                .invoke_filesystem_watch(
+                    path,
+                    recursive,
+                    force_polling,
+                    polling_interval_ms,
+                    Some(watch_id.clone()),
+                )
+                .await
+            {
+                Ok(_) => {
+                    watch_requests.insert(watch_id, WatcherWatchRequestState { correlation_id });
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if watch_requests.is_empty() {
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+
+        let mut state = self
+            .watcher_state
+            .lock()
+            .map_err(|_| "watcher state lock poisoned".to_string())?;
+        state.watch_requests = watch_requests;
+        Ok(())
+    }
+
+    fn handle_watcher_set_verbose_logging(&self, args: &Value) -> Result<(), String> {
+        let enabled = nth_arg(args, 0).and_then(Value::as_bool).unwrap_or(false);
+        let mut state = self
+            .watcher_state
+            .lock()
+            .map_err(|_| "watcher state lock poisoned".to_string())?;
+        state.verbose_logging = enabled;
+        Ok(())
+    }
+
+    async fn handle_watcher_stop(&self) -> Result<(), String> {
+        self.unwatch_all_watcher_requests().await
+    }
+
+    async fn unwatch_all_watcher_requests(&self) -> Result<(), String> {
+        let watch_ids = {
+            let mut state = self
+                .watcher_state
+                .lock()
+                .map_err(|_| "watcher state lock poisoned".to_string())?;
+            let ids = state.watch_requests.keys().cloned().collect::<Vec<_>>();
+            state.watch_requests.clear();
+            ids
+        };
+
+        for watch_id in watch_ids {
+            self.invoke_filesystem_unwatch(&watch_id).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn invoke_filesystem_watch(
+        &self,
+        path: PathBuf,
+        recursive: bool,
+        force_polling: bool,
+        poll_interval_ms: Option<u64>,
+        watch_id: Option<String>,
+    ) -> Result<Value, String> {
+        let mut payload = json!({
+            "path": path,
+            "recursive": recursive,
+            "forcePolling": force_polling
+        });
+        if let Some(watch_id) = watch_id {
+            payload["watchId"] = json!(watch_id);
+        }
+        if let Some(poll_interval_ms) = poll_interval_ms {
+            payload["pollIntervalMs"] = json!(poll_interval_ms);
+        }
+
+        self.filesystem
+            .invoke("filesystem.watch", &payload)
+            .await?
+            .ok_or_else(|| "filesystem.watch returned no result".to_string())
+    }
+
+    async fn invoke_filesystem_unwatch(&self, watch_id: &str) -> Result<(), String> {
+        self.filesystem
+            .invoke("filesystem.unwatch", &json!({ "watchId": watch_id }))
+            .await?;
+        Ok(())
     }
 
     async fn dispatch_channel_rust_primary(
@@ -356,8 +609,7 @@ impl CapabilityRouter {
                     })?;
 
                     Ok(Some(json!({
-                        "buffer": bytes,
-                        "base64": base64_encode_bytes(&bytes)
+                        "buffer": bytes
                     })))
                 }
                 "open" => {
@@ -670,7 +922,87 @@ impl CapabilityRouter {
                     })?;
                     Ok(Some(Value::Null))
                 }
-                "watch" | "unwatch" => Ok(Some(Value::Null)),
+                "watch" => self
+                    .handle_local_filesystem_watch(args)
+                    .await
+                    .map(|_| Some(Value::Null)),
+                "unwatch" => self
+                    .handle_local_filesystem_unwatch(args)
+                    .await
+                    .map(|_| Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "watcher" => match method {
+                "watch" => self
+                    .handle_watcher_watch(args)
+                    .await
+                    .map(|_| Some(Value::Null)),
+                "setVerboseLogging" => self
+                    .handle_watcher_set_verbose_logging(args)
+                    .map(|_| Some(Value::Null)),
+                "stop" => self.handle_watcher_stop().await.map(|_| Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "profileStorageListener" => match method {
+                "onDidChange" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "telemetryAppender" => match method {
+                "log" => {
+                    let payload = first_arg(args).unwrap_or(args);
+                    let event_name = payload
+                        .get("eventName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let data = payload.get("data").cloned().unwrap_or_else(|| json!({}));
+                    if let Some(app_handle) = crate::capabilities::window::app_handle() {
+                        let _ = app_handle.emit(
+                            "telemetry_log",
+                            json!({
+                                "eventName": event_name,
+                                "data": data
+                            }),
+                        );
+                    }
+                    Ok(Some(Value::Null))
+                }
+                "flush" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "urlHandler" => match method {
+                "handleURL" => {
+                    let target_arg = nth_arg(args, 0).or_else(|| first_arg(args));
+                    if let Some(target) = target_arg.and_then(extract_url_from_any) {
+                        let opened = self
+                            .os
+                            .invoke("os.openExternal", &json!({ "url": target }))
+                            .await?
+                            .unwrap_or_else(|| json!({ "opened": false }))
+                            .get("opened")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        return Ok(Some(json!(opened)));
+                    }
+                    Ok(Some(json!(false)))
+                }
+                _ => Ok(None),
+            },
+            "checksum" => match method {
+                "checksum" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "checksum.checksum expected resource argument".to_string()
+                    })?;
+                    let path = extract_fs_path(resource)
+                        .ok_or_else(|| "checksum.checksum expected file URI/path".to_string())?;
+                    let checksum = checksum_file_sha256_base64(&path)?;
+                    Ok(Some(json!(checksum)))
+                }
+                _ => Ok(None),
+            },
+            "browserElements" => match method {
+                "startDebugSession" | "startConsoleSession" => Ok(Some(Value::Null)),
+                "getConsoleLogs" => Ok(Some(Value::Null)),
+                "getElementData" => Ok(Some(Value::Null)),
                 _ => Ok(None),
             },
             "nativeHost" => match method {
@@ -1114,6 +1446,25 @@ fn parse_usize_arg(value: Option<&Value>, message: &str) -> Result<usize, String
     usize::try_from(parsed).map_err(|_| message.to_string())
 }
 
+fn parse_watch_id_arg(value: Option<&Value>, message: &str) -> Result<String, String> {
+    let value = value.ok_or_else(|| message.to_string())?;
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return Ok(number.to_string());
+    }
+    if let Some(number) = value.as_i64() {
+        return Ok(number.to_string());
+    }
+
+    Err(message.to_string())
+}
+
+fn local_filesystem_watch_id(session_id: &str, request_id: &str) -> String {
+    format!("localfs:{session_id}:{request_id}")
+}
+
 fn extract_string_arg(value: Option<&Value>) -> Option<String> {
     let Some(value) = value else {
         return None;
@@ -1150,6 +1501,22 @@ fn normalize_file_uri_path(raw: &str) -> PathBuf {
         return PathBuf::from(stripped);
     }
     PathBuf::from(raw)
+}
+
+fn file_uri_value_from_path(path: &Path) -> Value {
+    json!({
+        "scheme": "file",
+        "authority": "",
+        "path": to_forward_slash_path(path)
+    })
+}
+
+fn file_change_type_from_kind(kind: &str) -> u32 {
+    match kind {
+        "created" => 1,
+        "deleted" => 2,
+        _ => 0,
+    }
 }
 
 fn to_forward_slash_path(path: &Path) -> String {
@@ -1294,6 +1661,36 @@ fn base64_encode_bytes(input: &[u8]) -> String {
     output
 }
 
+fn checksum_file_sha256_base64(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| {
+        format!(
+            "checksum.checksum failed to open {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            format!(
+                "checksum.checksum failed to read {}: {error}",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let digest = hasher.finalize();
+    let mut encoded = base64_encode_bytes(&digest);
+    while encoded.ends_with('=') {
+        encoded.pop();
+    }
+    Ok(encoded)
+}
+
 fn remove_path_force(path: &Path, recursive: bool) -> std::io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(value) => value,
@@ -1409,4 +1806,33 @@ fn extract_url_from_any(value: &Value) -> Option<String> {
         url.push_str(fragment);
     }
     Some(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn checksum_sha256_base64_matches_expected() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vscode-tauri-checksum-{nonce}.txt"));
+        fs::write(&path, b"hello world").expect("write test file");
+
+        let checksum = checksum_file_sha256_base64(&path).expect("checksum should succeed");
+        fs::remove_file(&path).expect("cleanup checksum file");
+
+        assert_eq!(checksum, "uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek");
+    }
+
+    #[test]
+    fn file_change_type_mapping_is_stable() {
+        assert_eq!(file_change_type_from_kind("changed"), 0);
+        assert_eq!(file_change_type_from_kind("created"), 1);
+        assert_eq!(file_change_type_from_kind("deleted"), 2);
+        assert_eq!(file_change_type_from_kind("anything-else"), 0);
+    }
 }

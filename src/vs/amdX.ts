@@ -223,7 +223,10 @@ export async function importAMDNodeModule<T>(nodeModuleName: string, pathInsideN
 		const resourcePath: AppResourcePath = `${actualNodeModulesPath}/${nodeModulePath}`;
 		scriptSrc = FileAccess.asBrowserUri(resourcePath).toString(true);
 	}
-	const result = AMDModuleImporter.INSTANCE.load<T>(scriptSrc);
+	const result = AMDModuleImporter.INSTANCE.load<T>(scriptSrc).catch(error => {
+		console.error(`[amdX] Failed to load '${nodeModulePath}' from '${scriptSrc}'`, error);
+		throw error;
+	});
 	cache.set(nodeModulePath, result);
 	return result;
 }

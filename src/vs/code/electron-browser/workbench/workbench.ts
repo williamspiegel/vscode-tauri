@@ -299,8 +299,10 @@
 		// ESM Import
 		try {
 			let workbenchUrl: string;
-			if (!!safeProcess.env['VSCODE_DEV'] && globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
-				workbenchUrl = '../../../workbench/workbench.desktop.main.js'; // for dev purposes only
+			if (globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
+				// Explicit opt-in used by non-electron hosts (e.g. Tauri) where custom
+				// schemes such as `vscode-file://` are not importable as module scripts.
+				workbenchUrl = '../../../workbench/workbench.desktop.main.js';
 			} else {
 				workbenchUrl = new URL(`vs/workbench/workbench.desktop.main.js`, baseUrl).href;
 			}
@@ -524,12 +526,18 @@
 				// locations, we try to help the browser to
 				// initialize canvas when it is idle, right
 				// before we wait for the scripts to be loaded.
-				window.requestIdleCallback(() => {
+				const warmCanvas = () => {
 					const canvas = document.createElement('canvas');
 					const context = canvas.getContext('2d');
 					context?.clearRect(0, 0, canvas.width, canvas.height);
 					canvas.remove();
-				}, { timeout: 50 });
+				};
+
+				if (typeof window.requestIdleCallback === 'function') {
+					window.requestIdleCallback(warmCanvas, { timeout: 50 });
+				} else {
+					setTimeout(warmCanvas, 0);
+				}
 
 				// Track import() perf
 				performance.mark('code/willLoadWorkbenchMain');

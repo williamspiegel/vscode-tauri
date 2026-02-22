@@ -13,6 +13,7 @@ import { generateUuid } from '../../../../base/common/uuid.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
 import { IOnDidTerminateUtilityrocessWorkerProcess, ipcUtilityProcessWorkerChannelName, IUtilityProcessWorkerProcess, IUtilityProcessWorkerService } from '../../../../platform/utilityProcess/common/utilityProcessWorkerService.js';
 import { Barrier, timeout } from '../../../../base/common/async.js';
+import { Event } from '../../../../base/common/event.js';
 
 export const IUtilityProcessWorkerWorkbenchService = createDecorator<IUtilityProcessWorkerWorkbenchService>('utilityProcessWorkerWorkbenchService');
 
@@ -84,6 +85,15 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 	}
 
 	private readonly restoredBarrier = new Barrier();
+	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true';
+	private readonly noopChannel = {
+		listen: () => Event.None,
+		call: async () => undefined
+	};
+	private readonly noopClient: IPCClient<string> = {
+		getChannel: () => this.noopChannel,
+		registerChannel: () => undefined
+	};
 
 	constructor(
 		readonly windowId: number,
@@ -95,6 +105,30 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 
 	async createWorker(process: IUtilityProcessWorkerProcess): Promise<IUtilityProcessWorker> {
 		this.logService.trace('Renderer->UtilityProcess#createWorker');
+		if (this.disableMessagePortTransport) {
+			const reason = 'VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT';
+			const isFileWatcherWorker = process?.moduleId === 'vs/platform/files/node/watcher/watcherMain';
+			if (isFileWatcherWorker) {
+				this.logService.trace(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled (${reason}, module: ${process.moduleId}), using watcher IPC fallback channel.`);
+				const watcherChannel = this.mainProcessService.getChannel('watcher');
+				const watcherFallbackClient: IPCClient<string> = {
+					getChannel: channelName => channelName === 'watcher' ? watcherChannel : this.noopChannel,
+					registerChannel: () => undefined
+				};
+				return {
+					client: watcherFallbackClient,
+					onDidTerminate: Promise.resolve({ reason: { code: 0, signal: 'unknown' } }),
+					dispose: () => undefined
+				};
+			}
+
+			this.logService.warn(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled (${reason}, module: ${process.moduleId}), using no-op channel.`);
+			return {
+				client: this.noopClient,
+				onDidTerminate: Promise.resolve({ reason: { code: 0, signal: 'unknown' } }),
+				dispose: () => undefined
+			};
+		}
 
 		// We want to avoid heavy utility process work to happen before
 		// the window has restored. As such, make sure we await the

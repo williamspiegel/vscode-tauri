@@ -240,7 +240,7 @@ fn spawn_terminal_data_pump<R>(
 
             let chunk = String::from_utf8_lossy(&buffer[..read]).to_string();
             let _ = app_handle.emit(
-                "terminal.data",
+                "terminal_data",
                 json!({
                     "id": id,
                     "pid": pid,

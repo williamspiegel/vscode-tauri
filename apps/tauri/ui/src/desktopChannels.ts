@@ -1,6 +1,14 @@
 import { HostClient } from './hostClient';
 
-const ENABLE_CHANNEL_TRACE = new URLSearchParams(window.location.search).get('hostDebug') === '1';
+const ENABLE_CHANNEL_TRACE =
+  new URLSearchParams(window.location.search).get('hostDebug') === '1' ||
+  (() => {
+    try {
+      return window.localStorage?.getItem('tauriHostDebug') === '1';
+    } catch {
+      return false;
+    }
+  })();
 
 export interface DesktopChannelRegistry {
   readonly channels: readonly string[];
@@ -176,24 +184,6 @@ function decodeBase64ToUint8Array(value: unknown): Uint8Array | undefined {
   }
 }
 
-let vsBufferWrapPromise: Promise<((bytes: Uint8Array) => unknown) | undefined> | undefined;
-
-async function toVsBuffer(bytes: Uint8Array): Promise<unknown> {
-  if (!vsBufferWrapPromise) {
-    vsBufferWrapPromise = import(
-      /* @vite-ignore */ '/out/vs/base/common/buffer.js'
-    )
-      .then(moduleValue => {
-        const candidate = (moduleValue as { VSBuffer?: { wrap?: (input: Uint8Array) => unknown } }).VSBuffer?.wrap;
-        return typeof candidate === 'function' ? candidate : undefined;
-      })
-      .catch(() => undefined);
-  }
-
-  const wrap = await vsBufferWrapPromise;
-  return typeof wrap === 'function' ? wrap(bytes) : bytes;
-}
-
 function normalizeErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -240,6 +230,15 @@ function toFileSystemError(error: unknown): Error {
   }
 
   return fileSystemError;
+}
+
+function isEntryNotFoundError(error: unknown): boolean {
+  const message = normalizeErrorMessage(error);
+  return (
+    message.includes('ENOENT') ||
+    message.includes('No such file or directory') ||
+    message.includes('(os error 2)')
+  );
 }
 
 function inferStatTypeFromArgs(args: unknown[]): number {
@@ -697,10 +696,10 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
         (result, args) => {
           const payload = asRecord(result);
           const decoded =
-            decodeBase64ToUint8Array(payload.base64) ??
             toUint8Array(payload.buffer) ??
             toUint8Array(payload.bytes) ??
             toUint8Array(payload.data) ??
+            decodeBase64ToUint8Array(payload.base64) ??
             toUint8Array(result);
           if (!decoded) {
             const arg0 = asRecord(args[0]);
@@ -805,6 +804,48 @@ const EVENT_NORMALIZERS = new Map<string, Map<string, EventNormalizer>>([
     new Map<string, EventNormalizer>([['fileChange', payload => (Array.isArray(payload) || typeof payload === 'string' ? payload : [])]])
   ],
   [
+    'watcher',
+    new Map<string, EventNormalizer>([
+      [
+        'onDidChangeFile',
+        payload => (Array.isArray(payload) ? payload : [])
+      ],
+      [
+        'onDidLogMessage',
+        payload => {
+          const event = asRecord(payload);
+          const type = typeof event.type === 'string' ? event.type : 'trace';
+          const message =
+            typeof event.message === 'string'
+              ? event.message
+              : typeof payload === 'string'
+                ? payload
+                : '';
+          return { type, message };
+        }
+      ],
+      [
+        'onDidError',
+        payload => {
+          const event = asRecord(payload);
+          const error =
+            typeof event.error === 'string'
+              ? event.error
+              : typeof event.message === 'string'
+                ? event.message
+              : typeof payload === 'string'
+                ? payload
+                : undefined;
+          if (typeof error !== 'string' || error.length === 0) {
+            return {};
+          }
+          const request = event.request;
+          return request ? { error, request } : { error };
+        }
+      ]
+    ])
+  ],
+  [
     'extensionHostStarter',
     new Map<string, EventNormalizer>([
       ['onDynamicExit', payload => (payload && typeof payload === 'object' ? payload : { code: 0, signal: '' })]
@@ -877,7 +918,13 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
               (typeof target.path === 'string' ? target.path : undefined) ??
               undefined;
             const errorMessage = normalizeErrorMessage(error);
-            console.error('[desktop.fs.error]', { method, path, errorMessage });
+            const expectedNotFoundProbe =
+              isEntryNotFoundError(error) && (method === 'stat' || method === 'readdir');
+            if (expectedNotFoundProbe) {
+              console.debug('[desktop.fs.miss]', { method, path, errorMessage });
+            } else {
+              console.error('[desktop.fs.error]', { method, path, errorMessage });
+            }
           }
           throw toFileSystemError(error);
         }
@@ -905,43 +952,206 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
         console.debug('[desktop.fs.listen]', { event });
       }
       if (channel === 'localFilesystem' && event === 'readFileStream') {
-        const streamArgs = Array.isArray(arg) ? arg : [];
-        const resource = streamArgs[0];
-        const opts = streamArgs[1];
-        let disposed = false;
+        let stop: (() => Promise<void>) | undefined;
+        let didReceiveStreamPayload = false;
+        let fallbackActive = false;
+        let streamClosed = false;
+        let streamChunkCount = 0;
+        let streamTotalBytes = 0;
+        const streamArgs = Array.isArray(arg) ? arg : [arg];
+        const readTarget = streamArgs[0];
+        const readOptions = streamArgs.length > 1 ? streamArgs[1] : undefined;
 
-        void (async () => {
-          try {
-            const readResult = await this.call(channel, 'readFile', [resource, opts]);
-            if (disposed) {
+        const emitDecodedBytes = (bytes: Uint8Array): void => {
+          if (streamClosed) {
+            return;
+          }
+          streamChunkCount += 1;
+          streamTotalBytes += bytes.byteLength;
+          if (ENABLE_CHANNEL_TRACE) {
+            console.debug('[desktop.fs.stream.chunk]', {
+              bytes: bytes.byteLength,
+              chunks: streamChunkCount,
+              totalBytes: streamTotalBytes
+            });
+          }
+          onEvent(bytes);
+        };
+
+        const emitStreamEnd = (): void => {
+          if (streamClosed) {
+            return;
+          }
+          streamClosed = true;
+          if (ENABLE_CHANNEL_TRACE) {
+            console.debug('[desktop.fs.stream.end]', {
+              chunks: streamChunkCount,
+              totalBytes: streamTotalBytes
+            });
+          }
+          onEvent('end');
+        };
+
+        const fallbackTimer = window.setTimeout(() => {
+          if (didReceiveStreamPayload || fallbackActive || streamClosed) {
+            return;
+          }
+
+          if (typeof readTarget === 'undefined') {
+            onEvent(
+              toFileSystemError(new Error('readFileStream fallback missing resource argument'))
+            );
+            return;
+          }
+
+          fallbackActive = true;
+          void host
+            .desktopChannelCall('localFilesystem', 'readFile', [readTarget, readOptions])
+            .then(result => {
+              const payload = asRecord(result);
+              const decoded =
+                toUint8Array(payload.buffer) ??
+                toUint8Array(payload.bytes) ??
+                toUint8Array(payload.data) ??
+                decodeBase64ToUint8Array(payload.base64) ??
+                toUint8Array(result);
+              if (!decoded) {
+                onEvent(
+                  toFileSystemError(new Error('Invalid readFile fallback payload for readFileStream'))
+                );
+                return;
+              }
+
+              emitDecodedBytes(decoded);
+              emitStreamEnd();
+            })
+            .catch(error => {
+              if (!streamClosed) {
+                streamClosed = true;
+                if (ENABLE_CHANNEL_TRACE) {
+                  console.error('[desktop.fs.stream.fallback.error]', {
+                    errorMessage: normalizeErrorMessage(error)
+                  });
+                }
+                onEvent(toFileSystemError(error));
+              }
+            });
+        }, 250);
+
+        try {
+          stop = await host.desktopChannelListen(channel, event, arg, payload => {
+            if (fallbackActive) {
               return;
             }
 
-            const decoded = toUint8Array(readResult);
-            if (!decoded) {
-              throw toFileSystemError(new Error('Unable to normalize readFileStream fallback payload'));
+            didReceiveStreamPayload = true;
+            window.clearTimeout(fallbackTimer);
+
+            if (payload === 'end') {
+              emitStreamEnd();
+              return;
             }
 
-            onEvent(await toVsBuffer(decoded));
-            if (!disposed) {
-              onEvent('end');
+            if (payload instanceof Error) {
+              if (ENABLE_CHANNEL_TRACE) {
+                console.error('[desktop.fs.stream.error]', {
+                  errorMessage: payload.message
+                });
+              }
+              onEvent(payload);
+              return;
             }
 
-            if (ENABLE_CHANNEL_TRACE) {
-              console.debug('[desktop.fs.stream-fallback]', { byteLength: decoded.byteLength });
+            const payloadRecord = asRecord(payload);
+            const decoded =
+              toUint8Array(payloadRecord.buffer) ??
+              toUint8Array(payloadRecord.bytes) ??
+              toUint8Array(payloadRecord.data) ??
+              decodeBase64ToUint8Array(payloadRecord.base64) ??
+              toUint8Array(payload);
+            if (decoded) {
+              emitDecodedBytes(decoded);
+              return;
             }
-          } catch (error) {
-            if (!disposed) {
-              onEvent(toFileSystemError(error));
+
+            if (
+              typeof payloadRecord.message === 'string' ||
+              typeof payloadRecord.name === 'string' ||
+              typeof payloadRecord.code === 'string'
+            ) {
+              const message =
+                typeof payloadRecord.message === 'string'
+                  ? payloadRecord.message
+                  : 'Unknown readFileStream error';
+              const streamError = {
+                message,
+                name:
+                  typeof payloadRecord.name === 'string'
+                    ? payloadRecord.name
+                    : undefined,
+                code:
+                  typeof payloadRecord.code === 'string'
+                    ? payloadRecord.code
+                    : undefined
+              };
+              if (!streamClosed) {
+                streamClosed = true;
+                if (ENABLE_CHANNEL_TRACE) {
+                  console.error('[desktop.fs.stream.error]', {
+                    errorMessage: message,
+                    errorName: streamError.name,
+                    errorCode: streamError.code
+                  });
+                }
+                onEvent(streamError);
+              }
+              return;
             }
-            if (ENABLE_CHANNEL_TRACE) {
-              console.error('[desktop.fs.stream-fallback.error]', { errorMessage: normalizeErrorMessage(error) });
+
+            if (!streamClosed) {
+              streamClosed = true;
+              if (ENABLE_CHANNEL_TRACE) {
+                console.error('[desktop.fs.stream.error]', {
+                  errorMessage: 'Invalid readFileStream payload from host'
+                });
+              }
+              onEvent(toFileSystemError(new Error('Invalid readFileStream payload from host')));
+            }
+          });
+        } catch (error) {
+          window.clearTimeout(fallbackTimer);
+          fallbackActive = true;
+          if (typeof readTarget === 'undefined') {
+            onEvent(toFileSystemError(error));
+          } else {
+            try {
+              const result = await host.desktopChannelCall('localFilesystem', 'readFile', [readTarget, readOptions]);
+              const payload = asRecord(result);
+              const decoded =
+                toUint8Array(payload.buffer) ??
+                toUint8Array(payload.bytes) ??
+                toUint8Array(payload.data) ??
+                decodeBase64ToUint8Array(payload.base64) ??
+                toUint8Array(result);
+              if (!decoded) {
+                onEvent(toFileSystemError(new Error('Invalid readFile fallback payload for readFileStream')));
+              } else {
+                emitDecodedBytes(decoded);
+                emitStreamEnd();
+              }
+            } catch (fallbackError) {
+              onEvent(toFileSystemError(fallbackError));
             }
           }
-        })();
-
+          return async () => {
+            return;
+          };
+        }
         return async () => {
-          disposed = true;
+          fallbackActive = true;
+          streamClosed = true;
+          window.clearTimeout(fallbackTimer);
+          await stop?.();
         };
       }
 

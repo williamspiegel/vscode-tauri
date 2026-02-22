@@ -77,8 +77,10 @@
 		// ESM Import - load the sessions workbench main module
 		try {
 			let workbenchUrl: string;
-			if (!!safeProcess.env['VSCODE_DEV'] && globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
-				workbenchUrl = './sessions.desktop.main.js'; // for dev purposes only
+			if (globalThis._VSCODE_USE_RELATIVE_IMPORTS) {
+				// Explicit opt-in used by non-electron hosts (e.g. Tauri) where custom
+				// schemes such as `vscode-file://` are not importable as module scripts.
+				workbenchUrl = './sessions.desktop.main.js';
 			} else {
 				workbenchUrl = new URL(`vs/sessions/sessions.desktop.main.js`, baseUrl).href;
 			}

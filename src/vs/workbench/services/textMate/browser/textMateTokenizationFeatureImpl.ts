@@ -331,6 +331,7 @@ export class TextMateTokenizationFeature extends Disposable implements ITextMate
 				// Don't log this error message
 				return null;
 			}
+			this._logService.error('[textMate] Failed to create tokenization support', err);
 			onUnexpectedError(err);
 			return null;
 		}

@@ -667,7 +667,9 @@ export class FileService extends Disposable implements IFileService {
 	}
 
 	private restoreReadError(error: Error, resource: URI, options?: IReadFileStreamOptions): FileOperationError {
-		const message = localize('err.read', "Unable to read file '{0}' ({1})", this.resourceForError(resource), ensureFileSystemProviderError(error).toString());
+		const providerError = ensureFileSystemProviderError(error);
+		const message = localize('err.read', "Unable to read file '{0}' ({1})", this.resourceForError(resource), providerError.toString());
+		console.error('[fileService.read.error]', { resource: resource.toString(), message: providerError.toString(), options });
 
 		if (error instanceof NotModifiedSinceFileOperationError) {
 			return new NotModifiedSinceFileOperationError(message, error.stat, options);

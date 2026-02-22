@@ -177,10 +177,12 @@ impl FilesystemCapability for RustPrimaryFilesystemCapability {
                     return Ok(None);
                 };
 
-                let watch_id = format!(
-                    "watch-{}",
-                    self.next_watch_id.fetch_add(1, Ordering::Relaxed)
-                );
+                let watch_id = parse_optional_watch_id(params, "watchId").unwrap_or_else(|| {
+                    format!(
+                        "watch-{}",
+                        self.next_watch_id.fetch_add(1, Ordering::Relaxed)
+                    )
+                });
 
                 let (registration, backend_name, native_error) = if !force_polling {
                     match start_native_watch(
@@ -222,7 +224,10 @@ impl FilesystemCapability for RustPrimaryFilesystemCapability {
                     .watchers
                     .lock()
                     .map_err(|_| "filesystem watcher registry lock poisoned".to_string())?;
-                watchers.insert(watch_id.clone(), registration);
+                let previous = watchers.insert(watch_id.clone(), registration);
+                if let Some(previous) = previous {
+                    stop_watch_registration(previous);
+                }
 
                 Ok(Some(json!({
                     "watchId": watch_id,
@@ -294,6 +299,22 @@ fn parse_required_watch_id(params: &Value, key: &str) -> Result<String, String> 
         return Ok(number.to_string());
     }
     Err(format!("param '{key}' must be a string or number"))
+}
+
+fn parse_optional_watch_id(params: &Value, key: &str) -> Option<String> {
+    let object = params.as_object()?;
+    let value = object.get(key)?;
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_i64() {
+        return Some(number.to_string());
+    }
+
+    None
 }
 
 fn parse_required_string<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -426,7 +447,7 @@ fn start_native_watch(
         let kind = map_notify_event_kind(&event.kind);
         if event.paths.is_empty() {
             let _ = app_handle.emit(
-                "filesystem.changed",
+                "filesystem_changed",
                 json!({
                     "watchId": &watch_id_for_cb,
                     "path": &watch_root_text,
@@ -438,7 +459,7 @@ fn start_native_watch(
 
         for path in event.paths {
             let _ = app_handle.emit(
-                "filesystem.changed",
+                "filesystem_changed",
                 json!({
                     "watchId": &watch_id_for_cb,
                     "path": path,
@@ -534,7 +555,7 @@ fn start_watch_loop(
             let kind = detect_change_kind(&previous_snapshot, &current_snapshot);
             previous_snapshot = current_snapshot;
             let _ = app_handle.emit(
-                "filesystem.changed",
+                "filesystem_changed",
                 json!({
                     "watchId": watch_id,
                     "path": watch_path_text,

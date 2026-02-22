@@ -228,7 +228,12 @@ export abstract class AbstractDiskFileSystemProvider extends Disposable implemen
 
 	//#endregion
 
-	private onWatcherLogMessage(msg: ILogMessage): void {
+	private onWatcherLogMessage(msg: ILogMessage | null | undefined): void {
+		if (!msg || typeof msg.type !== 'string' || typeof msg.message !== 'string') {
+			this.logService.trace('[File Watcher] Dropping malformed log payload', msg);
+			return;
+		}
+
 		if (msg.type === 'error') {
 			this._onDidWatchError.fire(msg.message);
 		}

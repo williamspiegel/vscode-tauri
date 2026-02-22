@@ -34,7 +34,25 @@ interface TauriWindow extends Window {
 export class HostClient {
   private nextId = 1;
   private readonly invoke: TauriInvoke;
+  private windowConfigPromise: Promise<Record<string, unknown>> | undefined;
+  private readonly desktopChannelHandlers = new Map<string, (payload: unknown) => void>();
+  private readonly desktopChannelBufferedEvents = new Map<string, unknown[]>();
+  private desktopChannelEventStop: (() => void) | undefined;
+  private desktopChannelEventReady: Promise<void> | undefined;
   private static cachedListen: TauriListen | undefined;
+  private static readonly tauriEventNameMap: Record<string, string> = {
+    'filesystem.changed': 'filesystem_changed',
+    'desktop.channelEvent': 'desktop_channel_event'
+  };
+  private static readonly tauriEventNameInvalidPattern = /[^A-Za-z0-9_/:-]/g;
+
+  private static toTauriEventName(eventName: string): string {
+    const mapped = HostClient.tauriEventNameMap[eventName] ?? eventName;
+    const sanitized = mapped
+      .replace(/\./g, '_')
+      .replace(HostClient.tauriEventNameInvalidPattern, '_');
+    return sanitized.length > 0 ? sanitized : 'host_event';
+  }
 
   constructor() {
     this.invoke = HostClient.resolveInvoke();
@@ -74,11 +92,17 @@ export class HostClient {
           handler({ payload: eventPayload });
         });
 
-        const eventId = await invoke('plugin:event|listen', {
-          event,
-          target: { kind: 'Any' },
-          handler: callbackId
-        });
+        let eventId: unknown;
+        try {
+          eventId = await invoke('plugin:event|listen', {
+            event,
+            target: { kind: 'Any' },
+            handler: callbackId
+          });
+        } catch (error) {
+          internals.unregisterCallback?.(callbackId);
+          throw error;
+        }
 
         return async () => {
           await invoke('plugin:event|unlisten', {
@@ -120,7 +144,13 @@ export class HostClient {
       params
     };
 
-    const raw = await this.invoke('host_invoke', { request });
+    let raw: unknown;
+    try {
+      raw = await this.invoke('host_invoke', { request });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`host_invoke transport failed for ${method}: ${message}`);
+    }
     const response = raw as JsonRpcResponse<T>;
 
     if (response.jsonrpc !== '2.0' || response.id !== request.id) {
@@ -128,7 +158,7 @@ export class HostClient {
     }
 
     if (response.error) {
-      throw new Error(`Host error ${response.error.code}: ${response.error.message}`);
+      throw new Error(`Host error in ${method} (${response.error.code}): ${response.error.message}`);
     }
 
     return response.result as T;
@@ -149,7 +179,15 @@ export class HostClient {
   }
 
   async resolveWindowConfig(): Promise<Record<string, unknown>> {
-    return this.invokeMethod<Record<string, unknown>>('desktop.resolveWindowConfig', {});
+    if (!this.windowConfigPromise) {
+      this.windowConfigPromise = this.invokeMethod<Record<string, unknown>>('desktop.resolveWindowConfig', {})
+        .catch(error => {
+          this.windowConfigPromise = undefined;
+          throw error;
+        });
+    }
+
+    return this.windowConfigPromise;
   }
 
   async desktopChannelCall(
@@ -170,6 +208,15 @@ export class HostClient {
     arg: unknown,
     handler: (payload: unknown) => void
   ): Promise<() => Promise<void>> {
+    let dispatcherReady = true;
+    try {
+      await this.ensureDesktopChannelEventListener();
+    } catch {
+      // Some Tauri capability configurations disallow event.listen.
+      // Keep the channel subscription alive in no-op mode.
+      dispatcherReady = false;
+    }
+
     const response = await this.invokeMethod<{ subscriptionId: string }>('desktop.channelListen', {
       channel,
       event,
@@ -181,23 +228,60 @@ export class HostClient {
       throw new Error('desktop.channelListen returned an invalid subscription id.');
     }
 
-    let stopTauriListener: (() => void) | undefined;
-    try {
-      stopTauriListener = await this.listenEvent('desktop.channelEvent', payload => {
-        if (payload.subscriptionId === subscriptionId) {
-          handler(payload.payload);
+    if (dispatcherReady) {
+      this.desktopChannelHandlers.set(subscriptionId, handler);
+      const buffered = this.desktopChannelBufferedEvents.get(subscriptionId);
+      if (buffered && buffered.length > 0) {
+        this.desktopChannelBufferedEvents.delete(subscriptionId);
+        for (const payload of buffered) {
+          handler(payload);
         }
-      });
-    } catch {
-      // Some Tauri capability configurations disallow event.listen.
-      // Keep the channel subscription alive in no-op mode.
-      stopTauriListener = undefined;
+      }
     }
 
     return async () => {
-      stopTauriListener?.();
+      this.desktopChannelHandlers.delete(subscriptionId);
+      this.desktopChannelBufferedEvents.delete(subscriptionId);
       await this.invokeMethod('desktop.channelUnlisten', { subscriptionId });
     };
+  }
+
+  private async ensureDesktopChannelEventListener(): Promise<void> {
+    if (this.desktopChannelEventStop) {
+      return;
+    }
+
+    if (this.desktopChannelEventReady) {
+      return this.desktopChannelEventReady;
+    }
+
+    this.desktopChannelEventReady = this.listenEvent('desktop.channelEvent', payload => {
+      const subscriptionId = payload.subscriptionId;
+      if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
+        return;
+      }
+
+      const handler = this.desktopChannelHandlers.get(subscriptionId);
+      if (handler) {
+        handler(payload.payload);
+        return;
+      }
+
+      const buffered = this.desktopChannelBufferedEvents.get(subscriptionId) ?? [];
+      buffered.push(payload.payload);
+      if (buffered.length > 32) {
+        buffered.shift();
+      }
+      this.desktopChannelBufferedEvents.set(subscriptionId, buffered);
+    })
+      .then(stop => {
+        this.desktopChannelEventStop = stop;
+      })
+      .finally(() => {
+        this.desktopChannelEventReady = undefined;
+      });
+
+    return this.desktopChannelEventReady;
   }
 
   async listenEvent<E extends HostEventName>(
@@ -205,8 +289,16 @@ export class HostClient {
     handler: (payload: HostEventPayload<E>) => void
   ): Promise<() => void> {
     const listen = HostClient.resolveListen();
-    return listen<HostEventPayload<E>>(eventName, event => {
-      handler(event.payload);
-    });
+    const tauriEventName = HostClient.toTauriEventName(eventName as string);
+    try {
+      return await listen<HostEventPayload<E>>(tauriEventName, event => {
+        handler(event.payload);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Failed to listen to host event '${String(eventName)}' as '${tauriEventName}': ${message}`
+      );
+    }
   }
 }

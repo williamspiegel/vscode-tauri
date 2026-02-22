@@ -359,7 +359,7 @@ fn spawn_process_data_pump<R>(
 
             let chunk = String::from_utf8_lossy(&buffer[..read]).to_string();
             let _ = app_handle.emit(
-                "process.data",
+                "process_data",
                 json!({
                     "pid": pid,
                     "stream": stream,
@@ -419,7 +419,7 @@ fn spawn_process_exit_watcher(
 
         if let Some(handle) = app_handle {
             let _ = handle.emit(
-                "process.exit",
+                "process_exit",
                 json!({
                     "pid": pid,
                     "code": code

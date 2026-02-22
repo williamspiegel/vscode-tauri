@@ -14,28 +14,46 @@ use router::CapabilityRouter;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Listener, Manager, State};
+use tokio::io::AsyncReadExt;
 
 struct ChannelSubscription {
-    _channel: String,
-    _event: String,
-    _arg: Value,
+    channel: String,
+    event: String,
+    arg: Value,
+    runtime: SubscriptionRuntime,
+}
+
+enum SubscriptionRuntime {
+    None,
+    ReadFileStream {
+        cancel: Arc<AtomicBool>,
+        task: Option<tokio::task::JoinHandle<()>>,
+    },
+    ProfileStorageWatch {
+        watch_id: String,
+    },
+}
+
+struct ChannelRuntimeState {
+    subscriptions: HashMap<String, ChannelSubscription>,
 }
 
 struct AppState {
     router: CapabilityRouter,
     repo_root: PathBuf,
-    subscriptions: Mutex<HashMap<String, ChannelSubscription>>,
+    channel_runtime: Mutex<ChannelRuntimeState>,
     next_subscription_id: AtomicU64,
     cached_window_config: Mutex<Option<Value>>,
 }
 
 impl AppState {
-    fn register_subscription(
+    async fn register_subscription(
         &self,
         channel: String,
         event: String,
@@ -46,28 +64,42 @@ impl AppState {
             self.next_subscription_id.fetch_add(1, Ordering::Relaxed)
         );
 
+        let runtime = self
+            .build_subscription_runtime(&id, channel.as_str(), event.as_str(), &arg)
+            .await?;
         let mut guard = self
-            .subscriptions
+            .channel_runtime
             .lock()
-            .map_err(|_| "subscription state lock poisoned".to_string())?;
-        guard.insert(
+            .map_err(|_| "channel runtime lock poisoned".to_string())?;
+        guard.subscriptions.insert(
             id.clone(),
             ChannelSubscription {
-                _channel: channel,
-                _event: event,
-                _arg: arg,
+                channel,
+                event,
+                arg,
+                runtime,
             },
         );
 
         Ok(id)
     }
 
-    fn remove_subscription(&self, id: &str) -> Result<bool, String> {
-        let mut guard = self
-            .subscriptions
-            .lock()
-            .map_err(|_| "subscription state lock poisoned".to_string())?;
-        Ok(guard.remove(id).is_some())
+    async fn remove_subscription(&self, id: &str) -> Result<bool, String> {
+        let removed = {
+            self.channel_runtime
+                .lock()
+                .map_err(|_| "channel runtime lock poisoned".to_string())?
+                .subscriptions
+                .remove(id)
+        };
+
+        if let Some(subscription) = removed {
+            self.dispose_subscription_runtime(subscription.runtime)
+                .await?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn window_config(&self) -> Result<Value, String> {
@@ -88,6 +120,291 @@ impl AppState {
         *guard = Some(built.clone());
 
         Ok(built)
+    }
+
+    async fn build_subscription_runtime(
+        &self,
+        subscription_id: &str,
+        channel: &str,
+        event: &str,
+        arg: &Value,
+    ) -> Result<SubscriptionRuntime, String> {
+        if channel == "localFilesystem" && event == "readFileStream" {
+            return Self::create_read_file_stream_runtime(subscription_id, arg);
+        }
+        if channel == "profileStorageListener" && event == "onDidChange" {
+            return self
+                .create_profile_storage_listener_runtime(subscription_id)
+                .await;
+        }
+
+        Ok(SubscriptionRuntime::None)
+    }
+
+    fn create_read_file_stream_runtime(
+        subscription_id: &str,
+        arg: &Value,
+    ) -> Result<SubscriptionRuntime, String> {
+        let args = arg
+            .as_array()
+            .ok_or_else(|| "localFilesystem.readFileStream expects array argument".to_string())?;
+        let resource = args.first().ok_or_else(|| {
+            "localFilesystem.readFileStream missing resource argument".to_string()
+        })?;
+        let path = extract_fs_path(resource).ok_or_else(|| {
+            "localFilesystem.readFileStream expects file URI/path resource".to_string()
+        })?;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stream_cancel = cancel.clone();
+        let stream_subscription_id = subscription_id.to_string();
+        let task = tokio::spawn(async move {
+            AppState::stream_read_file(stream_subscription_id, path, stream_cancel).await;
+        });
+
+        Ok(SubscriptionRuntime::ReadFileStream {
+            cancel,
+            task: Some(task),
+        })
+    }
+
+    async fn stream_read_file(subscription_id: String, path: PathBuf, cancel: Arc<AtomicBool>) {
+        const READ_CHUNK_SIZE: usize = 64 * 1024;
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error) => {
+                let (name, code) = io_error_name_and_code(&error);
+                AppState::emit_channel_event(
+                    &subscription_id,
+                    "localFilesystem",
+                    "readFileStream",
+                    json!({
+                        "name": name,
+                        "code": code,
+                        "message": format!("Unable to read file '{}': {error}", path.display())
+                    }),
+                );
+                return;
+            }
+        };
+
+        let mut buffer = vec![0u8; READ_CHUNK_SIZE];
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            match file.read(&mut buffer).await {
+                Ok(0) => {
+                    AppState::emit_channel_event(
+                        &subscription_id,
+                        "localFilesystem",
+                        "readFileStream",
+                        Value::String("end".to_string()),
+                    );
+                    return;
+                }
+                Ok(bytes_read) => {
+                    let chunk = &buffer[..bytes_read];
+                    AppState::emit_channel_event(
+                        &subscription_id,
+                        "localFilesystem",
+                        "readFileStream",
+                        json!({
+                            "buffer": chunk
+                        }),
+                    );
+                }
+                Err(error) => {
+                    let (name, code) = io_error_name_and_code(&error);
+                    AppState::emit_channel_event(
+                        &subscription_id,
+                        "localFilesystem",
+                        "readFileStream",
+                        json!({
+                            "name": name,
+                            "code": code,
+                            "message": format!("Unable to read file '{}': {error}", path.display())
+                        }),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn create_profile_storage_listener_runtime(
+        &self,
+        subscription_id: &str,
+    ) -> Result<SubscriptionRuntime, String> {
+        let watch_root = self
+            .repo_root
+            .join(".vscode-tauri")
+            .join("user-data")
+            .join("User");
+        fs::create_dir_all(&watch_root).map_err(|error| {
+            format!(
+                "profileStorageListener failed to create watch root {}: {error}",
+                watch_root.display()
+            )
+        })?;
+
+        let watch_id = format!("profileStorage:{subscription_id}");
+        self.router
+            .dispatch(
+                "filesystem.watch",
+                &json!({
+                    "path": watch_root.to_string_lossy(),
+                    "recursive": true,
+                    "watchId": watch_id
+                }),
+            )
+            .await
+            .map_err(|error| format!("profileStorageListener watch failed: {error}"))?;
+
+        Ok(SubscriptionRuntime::ProfileStorageWatch { watch_id })
+    }
+
+    async fn dispose_subscription_runtime(
+        &self,
+        runtime: SubscriptionRuntime,
+    ) -> Result<(), String> {
+        match runtime {
+            SubscriptionRuntime::None => {}
+            SubscriptionRuntime::ReadFileStream { cancel, task } => {
+                cancel.store(true, Ordering::Relaxed);
+                if let Some(task) = task {
+                    task.abort();
+                }
+            }
+            SubscriptionRuntime::ProfileStorageWatch { watch_id } => {
+                self.router
+                    .dispatch(
+                        "filesystem.unwatch",
+                        &json!({
+                            "watchId": watch_id
+                        }),
+                    )
+                    .await
+                    .map_err(|error| format!("profileStorageListener unwatch failed: {error}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_channel_event(subscription_id: &str, channel: &str, event: &str, payload: Value) {
+        if let Some(app_handle) = capabilities::window::app_handle() {
+            let _ = app_handle.emit(
+                "desktop_channel_event",
+                json!({
+                    "subscriptionId": subscription_id,
+                    "channel": channel,
+                    "event": event,
+                    "payload": payload
+                }),
+            );
+        }
+    }
+
+    fn emit_to_subscriptions<F>(
+        &self,
+        channel: &str,
+        event: &str,
+        payload: Value,
+        predicate: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(&ChannelSubscription) -> bool,
+    {
+        let subscriptions = self
+            .channel_runtime
+            .lock()
+            .map_err(|_| "channel runtime lock poisoned".to_string())?
+            .subscriptions
+            .iter()
+            .filter_map(|(id, subscription)| {
+                if subscription.channel == channel
+                    && subscription.event == event
+                    && predicate(subscription)
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for subscription_id in subscriptions {
+            Self::emit_channel_event(&subscription_id, channel, event, payload.clone());
+        }
+
+        Ok(())
+    }
+
+    fn handle_filesystem_changed(&self, payload_json: &str) -> Result<(), String> {
+        let payload: Value = serde_json::from_str(payload_json)
+            .map_err(|error| format!("Invalid filesystem.changed payload: {error}"))?;
+        let watch_id = payload
+            .get("watchId")
+            .and_then(value_to_watch_id)
+            .ok_or_else(|| "filesystem.changed payload missing watchId".to_string())?;
+        let path = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "filesystem.changed payload missing path".to_string())?;
+        let kind = payload
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("changed");
+
+        if let Some(session_id) = watch_id_to_localfs_session_id(&watch_id) {
+            let change = json!([{
+                "type": file_change_type_from_kind(kind),
+                "resource": file_uri_components(Path::new(path))
+            }]);
+
+            return self.emit_to_subscriptions(
+                "localFilesystem",
+                "fileChange",
+                change,
+                |subscription| {
+                    local_filesystem_subscription_matches_session(subscription, session_id)
+                },
+            );
+        }
+
+        if let Some(changes) = self
+            .router
+            .watcher_changes_from_filesystem_event(&watch_id, path, kind)
+        {
+            self.emit_to_subscriptions("watcher", "onDidChangeFile", changes, |_| true)?;
+            if self.router.watcher_verbose_logging() {
+                let _ = self.emit_to_subscriptions(
+                    "watcher",
+                    "onDidLogMessage",
+                    json!({
+                        "type": "trace",
+                        "message": format!("watcher event: {kind} {path}")
+                    }),
+                    |_| true,
+                );
+            }
+        }
+
+        if watch_id.starts_with("profileStorage:") {
+            if let Some(payload) =
+                profile_storage_change_payload(Path::new(path), kind, &self.repo_root)
+            {
+                self.emit_to_subscriptions(
+                    "profileStorageListener",
+                    "onDidChange",
+                    payload,
+                    |_| true,
+                )?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -230,7 +547,7 @@ async fn host_invoke(
         };
         let arg = object.get("arg").cloned().unwrap_or(Value::Null);
 
-        return match state.register_subscription(channel, event, arg) {
+        return match state.register_subscription(channel, event, arg).await {
             Ok(subscription_id) => Ok(ok_response(
                 request.id,
                 json!({ "subscriptionId": subscription_id }),
@@ -255,7 +572,7 @@ async fn host_invoke(
             Err(error) => return Ok(error_response(request.id, -32602, error)),
         };
 
-        return match state.remove_subscription(&subscription_id) {
+        return match state.remove_subscription(&subscription_id).await {
             Ok(removed) => Ok(ok_response(request.id, json!({ "removed": removed }))),
             Err(error) => Ok(error_response(request.id, -32603, error)),
         };
@@ -410,12 +727,226 @@ fn file_uri_components(path: &Path) -> Value {
     })
 }
 
+fn extract_fs_path(value: &Value) -> Option<PathBuf> {
+    if let Some(text) = value.as_str() {
+        return Some(normalize_file_uri_path(text));
+    }
+
+    let object = value.as_object()?;
+    if let Some(fs_path) = object.get("fsPath").and_then(Value::as_str) {
+        return Some(PathBuf::from(fs_path));
+    }
+    if let Some(path) = object.get("path").and_then(Value::as_str) {
+        return Some(normalize_file_uri_path(path));
+    }
+
+    None
+}
+
+fn normalize_file_uri_path(raw: &str) -> PathBuf {
+    if let Some(stripped) = raw.strip_prefix("file://") {
+        if let Some(without_localhost) = stripped.strip_prefix("localhost/") {
+            return PathBuf::from(format!("/{without_localhost}"));
+        }
+        if stripped.starts_with('/') {
+            return PathBuf::from(stripped);
+        }
+        return PathBuf::from(format!("/{stripped}"));
+    }
+    PathBuf::from(raw)
+}
+
+fn io_error_name_and_code(error: &io::Error) -> (&'static str, &'static str) {
+    match error.kind() {
+        io::ErrorKind::NotFound => ("EntryNotFound (FileSystemError)", "EntryNotFound"),
+        io::ErrorKind::PermissionDenied => ("NoPermissions (FileSystemError)", "NoPermissions"),
+        io::ErrorKind::AlreadyExists => ("EntryExists (FileSystemError)", "EntryExists"),
+        io::ErrorKind::IsADirectory => ("EntryIsADirectory (FileSystemError)", "EntryIsADirectory"),
+        io::ErrorKind::NotADirectory => ("EntryNotADirectory (FileSystemError)", "EntryNotADirectory"),
+        _ => ("Unknown (FileSystemError)", "Unknown"),
+    }
+}
+
+fn value_to_watch_id(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_i64() {
+        return Some(number.to_string());
+    }
+
+    None
+}
+
+fn watch_id_to_localfs_session_id(watch_id: &str) -> Option<&str> {
+    let remainder = watch_id.strip_prefix("localfs:")?;
+    let (session_id, _request_id) = remainder.split_once(':')?;
+    Some(session_id)
+}
+
+fn file_change_type_from_kind(kind: &str) -> u32 {
+    match kind {
+        "created" => 1,
+        "deleted" => 2,
+        _ => 0,
+    }
+}
+
+fn local_filesystem_subscription_matches_session(
+    subscription: &ChannelSubscription,
+    session_id: &str,
+) -> bool {
+    if let Some(arg_session_id) = subscription.arg.as_str() {
+        return arg_session_id == session_id;
+    }
+
+    if let Some(args) = subscription.arg.as_array() {
+        return args
+            .first()
+            .and_then(Value::as_str)
+            .map(|value| value == session_id)
+            .unwrap_or(false);
+    }
+
+    if let Some(object) = subscription.arg.as_object() {
+        return object
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(|value| value == session_id)
+            .unwrap_or(false);
+    }
+
+    false
+}
+
+fn profile_storage_change_payload(path: &Path, kind: &str, repo_root: &Path) -> Option<Value> {
+    let user_root = repo_root
+        .join(".vscode-tauri")
+        .join("user-data")
+        .join("User");
+    if !path.starts_with(&user_root) {
+        return None;
+    }
+
+    let profiles_root = user_root.join("profiles");
+    let (profile_id, key) = if path.starts_with(&profiles_root) {
+        let relative = path.strip_prefix(&profiles_root).ok()?;
+        let mut components = relative.components();
+        let profile_id = components.next()?.as_os_str().to_string_lossy().to_string();
+        if profile_id.is_empty() {
+            return None;
+        }
+        let profile_root = profiles_root.join(&profile_id);
+        let key = profile_storage_key(path.strip_prefix(&profile_root).ok());
+        (profile_id, key)
+    } else {
+        (
+            "default".to_string(),
+            profile_storage_key(path.strip_prefix(&user_root).ok()),
+        )
+    };
+
+    let profile = profile_descriptor(repo_root, &profile_id);
+    let target = if kind == "deleted" {
+        Value::Null
+    } else {
+        json!(0)
+    };
+
+    Some(json!({
+        "targetChanges": [profile.clone()],
+        "valueChanges": [{
+            "profile": profile,
+            "changes": [{
+                "key": key,
+                "scope": 0,
+                "target": target
+            }]
+        }]
+    }))
+}
+
+fn profile_storage_key(relative: Option<&Path>) -> String {
+    let Some(relative) = relative else {
+        return "*".to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        return "*".to_string();
+    }
+    let mut key = relative.to_string_lossy().replace('\\', "/");
+    while key.starts_with('/') {
+        key.remove(0);
+    }
+    if key.is_empty() {
+        "*".to_string()
+    } else {
+        key
+    }
+}
+
+fn profile_descriptor(repo_root: &Path, profile_id: &str) -> Value {
+    let user_root = repo_root
+        .join(".vscode-tauri")
+        .join("user-data")
+        .join("User");
+    let profile_root = user_root.join("profiles").join(profile_id);
+    let cache_home = repo_root
+        .join(".vscode-tauri")
+        .join("user-data")
+        .join("CachedProfilesData")
+        .join(profile_id);
+
+    let profile_name = if profile_id == "default" {
+        "Default".to_string()
+    } else {
+        profile_id.to_string()
+    };
+
+    json!({
+        "id": profile_id,
+        "isDefault": profile_id == "default",
+        "name": profile_name,
+        "location": file_uri_components(&profile_root),
+        "globalStorageHome": file_uri_components(&profile_root.join("globalStorage")),
+        "settingsResource": file_uri_components(&profile_root.join("settings.json")),
+        "keybindingsResource": file_uri_components(&profile_root.join("keybindings.json")),
+        "tasksResource": file_uri_components(&profile_root.join("tasks.json")),
+        "snippetsHome": file_uri_components(&profile_root.join("snippets")),
+        "promptsHome": file_uri_components(&profile_root.join("prompts")),
+        "extensionsResource": file_uri_components(&profile_root.join("extensions.json")),
+        "mcpResource": file_uri_components(&profile_root.join("mcp.json")),
+        "cacheHome": file_uri_components(&cache_home)
+    })
+}
+
 fn read_nls_messages(repo_root: &Path) -> Result<Vec<String>, String> {
     let path = repo_root.join("out/nls.messages.json");
-    let bytes =
-        fs::read(&path).map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
-    serde_json::from_slice::<Vec<String>>(&bytes)
-        .map_err(|error| format!("Failed to parse {}: {error}", path.display()))
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // Tauri dev mode can run with a transpiled `out` tree that does not
+            // include NLS artifacts. Falling back to an empty message table keeps
+            // startup alive; UI strings can still render from default literals.
+            eprintln!(
+                "warning: missing NLS messages at {}: {error}; using empty messages",
+                path.display()
+            );
+            return Ok(Vec::new());
+        }
+    };
+    match serde_json::from_slice::<Vec<String>>(&bytes) {
+        Ok(messages) => Ok(messages),
+        Err(error) => {
+            eprintln!(
+                "warning: failed to parse NLS messages at {}: {error}; using empty messages",
+                path.display()
+            );
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn read_json_file(path: &Path) -> Result<Value, String> {
@@ -573,6 +1104,56 @@ fn is_stale_manifest(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_change_type_mapping_is_stable() {
+        assert_eq!(file_change_type_from_kind("changed"), 0);
+        assert_eq!(file_change_type_from_kind("created"), 1);
+        assert_eq!(file_change_type_from_kind("deleted"), 2);
+        assert_eq!(file_change_type_from_kind("unknown"), 0);
+    }
+
+    #[test]
+    fn localfs_watch_id_extracts_session() {
+        assert_eq!(
+            watch_id_to_localfs_session_id("localfs:abc123:req1"),
+            Some("abc123")
+        );
+        assert_eq!(watch_id_to_localfs_session_id("watcher:abc123:req1"), None);
+        assert_eq!(watch_id_to_localfs_session_id("localfs:onlyonepart"), None);
+    }
+
+    #[test]
+    fn profile_storage_payload_contains_profile_change() {
+        let repo_root = PathBuf::from("/tmp/vscode-tauri-tests");
+        let path = repo_root
+            .join(".vscode-tauri")
+            .join("user-data")
+            .join("User")
+            .join("profiles")
+            .join("default")
+            .join("settings.json");
+
+        let payload = profile_storage_change_payload(&path, "changed", &repo_root)
+            .expect("profile storage payload should be generated");
+        let target_changes = payload
+            .get("targetChanges")
+            .and_then(Value::as_array)
+            .expect("targetChanges should be an array");
+        assert_eq!(target_changes.len(), 1);
+        assert_eq!(
+            target_changes
+                .first()
+                .and_then(|profile| profile.get("id"))
+                .and_then(Value::as_str),
+            Some("default")
+        );
+    }
+}
+
 fn main() {
     let fallback_script = PathBuf::from("../node/fallback.mjs");
     let manifest_dir =
@@ -585,12 +1166,15 @@ fn main() {
     let app_state = AppState {
         router: CapabilityRouter::new(fallback_script),
         repo_root,
-        subscriptions: Mutex::new(HashMap::new()),
+        channel_runtime: Mutex::new(ChannelRuntimeState {
+            subscriptions: HashMap::new(),
+        }),
         next_subscription_id: AtomicU64::new(1),
         cached_window_config: Mutex::new(None),
     };
 
     tauri::Builder::default()
+        .manage(app_state)
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
@@ -599,12 +1183,24 @@ fn main() {
         }))
         .setup(|app| {
             capabilities::window::set_app_handle(app.handle().clone());
+            let app_handle = app.handle().clone();
+            let listener_handle = app_handle.clone();
+            app_handle.listen("filesystem_changed", move |event| {
+                let payload = event.payload();
+                if payload.is_empty() {
+                    return;
+                }
+
+                let state = listener_handle.state::<AppState>();
+                if let Err(error) = state.handle_filesystem_changed(payload) {
+                    eprintln!("[desktop.fs.bridge.error] {error}");
+                }
+            });
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.emit("host.lifecycle", json!({ "event": "setup" }));
+                let _ = window.emit("host_lifecycle", json!({ "event": "setup" }));
             }
             Ok(())
         })
-        .manage(app_state)
         .invoke_handler(tauri::generate_handler![host_invoke])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
