@@ -8,7 +8,11 @@ export default defineConfig({
     emptyOutDir: true
   },
   server: {
-    port: 4173,
-    strictPort: true
+    host: '127.0.0.1',
+    port: 5173,
+    strictPort: true,
+    fs: {
+      allow: ['..', '../../..', '../../../..']
+    }
   }
 });

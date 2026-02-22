@@ -47,6 +47,12 @@
     { "code": 1003, "name": "fallback_unavailable", "description": "Rust handler is missing and Node fallback could not execute." }
   ],
   "capabilities": {
+    "host": {
+      "methods": [
+        "host.fallbackCounts",
+        "host.cssModules"
+      ]
+    },
     "window": {
       "methods": [
         "window.open",
@@ -91,7 +97,9 @@
       "methods": [
         "process.spawn",
         "process.kill",
-        "process.env"
+        "process.env",
+        "process.wait",
+        "process.list"
       ]
     },
     "power": {
@@ -121,6 +129,8 @@
       "paramsRef": "#/handshake/client",
       "resultRef": "#/handshake/server"
     },
+    "host.fallbackCounts": { "params": { "type": "object" } },
+    "host.cssModules": { "params": { "type": "object" } },
     "window.open": { "params": { "type": "object", "required": ["target"] } },
     "window.close": { "params": { "type": "object" } },
     "window.focus": { "params": { "type": "object" } },
@@ -149,6 +159,8 @@
     "process.spawn": { "params": { "type": "object", "required": ["command"] } },
     "process.kill": { "params": { "type": "object", "required": ["pid"] } },
     "process.env": { "params": { "type": "object" } },
+    "process.wait": { "params": { "type": "object", "required": ["pid"] } },
+    "process.list": { "params": { "type": "object" } },
 
     "power.preventSleep": { "params": { "type": "object", "required": ["reason"] } },
     "power.allowSleep": { "params": { "type": "object", "required": ["id"] } },
@@ -163,6 +175,12 @@
     "update.install": { "params": { "type": "object" } }
   },
   "events": {
+    "host.lifecycle": {
+      "payload": {
+        "type": "object",
+        "required": ["event"]
+      }
+    },
     "window.stateChanged": {
       "payload": {
         "type": "object",
@@ -185,6 +203,12 @@
       "payload": {
         "type": "object",
         "required": ["pid", "code"]
+      }
+    },
+    "process.data": {
+      "payload": {
+        "type": "object",
+        "required": ["pid", "stream", "data"]
       }
     },
     "fallback.used": {

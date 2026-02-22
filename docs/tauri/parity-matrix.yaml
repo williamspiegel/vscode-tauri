@@ -4,42 +4,46 @@ platform_focus: macos
 protocol_version: 1.0.0
 
 capabilities:
+  host:
+    status: in-progress
+    backend: rust
+    notes: Rust host now serves protocol-level utility methods for fallback metrics and CSS module discovery used by the web workbench bootstrap. Fallback counters are persisted to disk for trend reporting.
   window:
     status: in-progress
     backend: rust
-    notes: Rust serves getState; remaining methods currently route to node fallback.
+    notes: Rust now handles open/close/focus/setFullscreen/getState for the main window. Non-main window targets still route to node fallback.
   filesystem:
     status: in-progress
-    backend: node-fallback
-    notes: Rust scaffold exists; read/write/watch semantics pending.
+    backend: rust
+    notes: Rust now handles readFile/writeFile/stat/watch/unwatch with native watcher backend (notify) and automatic polling fallback when native watcher setup fails.
   terminal:
     status: in-progress
-    backend: node-fallback
-    notes: PTY lifecycle path not yet Rust-native.
+    backend: rust
+    notes: Rust now handles create/resize/write/kill session APIs and emits terminal.data chunks from stdout/stderr. PTY-backed resize semantics are still pending.
   clipboard:
     status: in-progress
-    backend: node-fallback
-    notes: Host API contract is in place.
+    backend: rust
+    notes: Rust now handles readText/writeText using platform clipboard shell commands with fallback on unsupported hosts.
   dialogs:
     status: in-progress
-    backend: node-fallback
-    notes: Open/save/message dialogs pending Rust implementation.
+    backend: rust
+    notes: Rust now handles showMessage/openFile/openFolder/saveFile on macOS via AppleScript. Non-macOS still uses node fallback.
   process:
     status: in-progress
-    backend: node-fallback
-    notes: Spawn/kill/env delegated while parity behavior is defined.
+    backend: rust
+    notes: Rust now handles env/spawn/kill/wait/list with optional `background: true` managed processes and emits process.exit/process.data events. Full lifecycle parity details and advanced stream semantics are still pending.
   power:
     status: in-progress
-    backend: node-fallback
-    notes: Idle and sleep blocker support pending.
+    backend: rust
+    notes: Rust now handles preventSleep/allowSleep/idleState on macOS via caffeinate and ioreg. Non-macOS remains on node fallback.
   os:
     status: in-progress
     backend: rust
-    notes: Rust serves systemInfo; external open/path operations currently fallback.
+    notes: Rust now handles systemInfo/openExternal/showItemInFolder using platform shell commands.
   update:
     status: in-progress
-    backend: node-fallback
-    notes: Update channel workflow pending.
+    backend: rust
+    notes: Rust now handles update.check/download/install with stateful, non-destructive placeholder responses. Native feed resolution, artifact download, and installer execution are still pending.
 
 test_coverage:
   contract:
@@ -54,3 +58,8 @@ test_coverage:
   tauri_e2e:
     status: planned
     artifact: build/tauri
+  fallback_telemetry_report:
+    status: implemented
+    artifact: build/tauri/fallback-telemetry-report.mjs
+
+# Note: keep this file plain-text and small enough for quick diffing in precommit checks.

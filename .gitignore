@@ -34,3 +34,7 @@ test/componentFixtures/.screenshots/*
 /apps/tauri/src-tauri/gen/
 /apps/tauri/ui/dist/*
 !/apps/tauri/ui/dist/.gitkeep
+/apps/tauri/ui/out
+/apps/tauri/logs/
+/tauri-fallback-telemetry.md
+/tauri-upstream-sync-report.md

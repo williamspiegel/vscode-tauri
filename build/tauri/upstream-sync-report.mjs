@@ -5,6 +5,7 @@
 
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 
 function listConflictFiles() {
 	try {
@@ -16,6 +17,29 @@ function listConflictFiles() {
 }
 
 const conflicts = listConflictFiles();
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
+const metricsPath = process.env.VSCODE_TAURI_FALLBACK_METRICS_PATH
+	? path.resolve(process.env.VSCODE_TAURI_FALLBACK_METRICS_PATH)
+	: path.join(repoRoot, 'apps/tauri/logs/fallback-metrics.json');
+
+function topFallbackMethods(filePath, limit = 5) {
+	if (!fs.existsSync(filePath)) {
+		return [];
+	}
+
+	try {
+		const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+		const counts = Object.entries(raw?.counts ?? {})
+			.filter(([, value]) => typeof value === 'number')
+			.map(([method, count]) => ({ method, count }))
+			.sort((a, b) => b.count - a.count || a.method.localeCompare(b.method));
+		return counts.slice(0, limit);
+	} catch {
+		return [];
+	}
+}
+
+const topFallback = topFallbackMethods(metricsPath);
 const lines = [
 	'# Upstream Sync Report',
 	'',
@@ -32,6 +56,17 @@ if (conflicts.length > 0) {
 	}
 } else {
 	lines.push('No merge conflicts detected.');
+}
+
+lines.push('', '## Fallback Telemetry', '');
+if (topFallback.length === 0) {
+	lines.push('No persisted fallback telemetry available.');
+} else {
+	lines.push('| Method | Count |');
+	lines.push('| --- | ---: |');
+	for (const entry of topFallback) {
+		lines.push(`| ${entry.method} | ${entry.count} |`);
+	}
 }
 
 fs.writeFileSync('tauri-upstream-sync-report.md', `${lines.join('\n')}\n`);

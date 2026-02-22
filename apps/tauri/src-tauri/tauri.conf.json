@@ -4,19 +4,26 @@
   "version": "0.1.0",
   "identifier": "dev.vscode.tauri",
   "build": {
-    "beforeDevCommand": "cd ../ui && npm run dev",
+    "beforeDevCommand": "cd ../ui && npm run dev -- --host 127.0.0.1 --port 5173",
     "beforeBuildCommand": "cd ../ui && npm run build",
-    "devUrl": "http://localhost:4173",
+    "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../ui/dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Code Tauri",
         "width": 1400,
         "height": 900,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 18
+        }
       }
     ],
     "security": {

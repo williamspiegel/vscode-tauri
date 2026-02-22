@@ -1,4 +1,6 @@
 import {
+  HostEventName,
+  HostEventPayload,
   hostProtocol,
   isKnownMethod,
   JsonRpcRequest,
@@ -9,6 +11,8 @@ import {
 } from './hostProtocol';
 
 type TauriInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+type TauriEventListener<T> = (event: { payload: T }) => void;
+type TauriListen = <T>(event: string, handler: TauriEventListener<T>) => Promise<() => void>;
 
 interface TauriWindow extends Window {
   __TAURI__?: {
@@ -16,9 +20,15 @@ interface TauriWindow extends Window {
       invoke?: TauriInvoke;
     };
     event?: {
-      listen?: (event: string, handler: (payload: unknown) => void) => Promise<() => void>;
+      listen?: TauriListen;
     };
   };
+  __TAURI_INTERNALS__?: {
+    invoke?: (command: string, args?: Record<string, unknown>, options?: unknown) => Promise<unknown>;
+    transformCallback?: (callback: (payload: unknown) => void, once?: boolean) => number;
+    unregisterCallback?: (id: number) => void;
+  };
+  __TAURI_INVOKE__?: TauriInvoke;
 }
 
 export class HostClient {
@@ -30,12 +40,51 @@ export class HostClient {
   }
 
   private static resolveInvoke(): TauriInvoke {
-    const candidate = (window as TauriWindow).__TAURI__?.core?.invoke;
+    const tauriWindow = window as TauriWindow;
+    const candidate =
+      tauriWindow.__TAURI__?.core?.invoke ??
+      tauriWindow.__TAURI_INTERNALS__?.invoke ??
+      tauriWindow.__TAURI_INVOKE__;
     if (!candidate) {
       throw new Error('Tauri invoke API is unavailable. Run this UI inside the Tauri host.');
     }
 
-    return candidate;
+    return (command: string, args?: Record<string, unknown>) => candidate(command, args);
+  }
+
+  private static resolveListen(): TauriListen {
+    const tauriWindow = window as TauriWindow;
+    const globalListen = tauriWindow.__TAURI__?.event?.listen;
+    if (globalListen) {
+      return globalListen;
+    }
+
+    const internals = tauriWindow.__TAURI_INTERNALS__;
+    if (internals?.invoke && internals.transformCallback && internals.unregisterCallback) {
+      const invoke = internals.invoke;
+      return async <T>(event: string, handler: TauriEventListener<T>) => {
+        const callbackId = internals.transformCallback!(payload => {
+          const eventPayload = (payload as { payload?: T })?.payload ?? (payload as T);
+          handler({ payload: eventPayload });
+        });
+
+        const eventId = await invoke('plugin:event|listen', {
+          event,
+          target: { kind: 'Any' },
+          handler: callbackId
+        });
+
+        return async () => {
+          await invoke('plugin:event|unlisten', {
+            event,
+            eventId
+          });
+          internals.unregisterCallback?.(callbackId);
+        };
+      };
+    }
+
+    throw new Error('Tauri event API is unavailable. Run this UI inside the Tauri host.');
   }
 
   async handshake(): Promise<ProtocolHandshakeResponse> {
@@ -78,7 +127,26 @@ export class HostClient {
   }
 
   async getFallbackCounts(): Promise<Record<string, number>> {
-    const counts = await this.invoke('fallback_counts');
-    return counts as Record<string, number>;
+    return this.invokeMethod<Record<string, number>>('host.fallbackCounts', {});
+  }
+
+  async getWorkbenchCssModules(): Promise<string[]> {
+    const result = await this.invokeMethod<{ modules: string[] }>('host.cssModules', {});
+    const modules = result.modules;
+    if (!Array.isArray(modules) || modules.some(module => typeof module !== 'string')) {
+      throw new Error('Host returned an invalid workbench CSS module payload.');
+    }
+
+    return modules;
+  }
+
+  async listenEvent<E extends HostEventName>(
+    eventName: E,
+    handler: (payload: HostEventPayload<E>) => void
+  ): Promise<() => void> {
+    const listen = HostClient.resolveListen();
+    return listen<HostEventPayload<E>>(eventName, event => {
+      handler(event.payload);
+    });
   }
 }

@@ -5,9 +5,42 @@ Generated from these upstream touchpoints:
 - `src/vs/code/electron-main/app.ts`
 - `src/vs/workbench/workbench.desktop.main.ts`
 
-Generated at: 2026-02-22T01:52:12.826Z
+Generated from these Tauri touchpoints:
+- `apps/tauri/protocol/host-v1.json`
+- `apps/tauri/src-tauri/src/main.rs`
+- `apps/tauri/src-tauri/src/capabilities/*.rs`
+
+Generated at: 2026-02-22T03:29:07.283Z
+
+## Protocol Coverage Snapshot
+
+- Protocol methods: 37
+- Rust primary methods with handler entrypoints: 34
+- Methods missing Rust entrypoints (Node fallback required): 0
+- Host/protocol core methods: 3
+- Note: methods counted as Rust primary can still route to Node fallback at runtime based on platform or partial implementation.
+
+### By Domain
+
+| Domain | Total | Rust Primary Entry | Missing Rust Entry | Host Core |
+| --- | ---: | ---: | ---: | ---: |
+| clipboard | 2 | 2 | 0 | 0 |
+| dialogs | 4 | 4 | 0 | 0 |
+| filesystem | 5 | 5 | 0 | 0 |
+| host | 2 | 0 | 0 | 2 |
+| os | 3 | 3 | 0 | 0 |
+| power | 3 | 3 | 0 | 0 |
+| process | 5 | 5 | 0 | 0 |
+| protocol | 1 | 0 | 0 | 1 |
+| terminal | 4 | 4 | 0 | 0 |
+| update | 3 | 3 | 0 | 0 |
+| window | 5 | 5 | 0 | 0 |
+
+### Methods Missing Rust Entry
+
 
 ## Native Host Methods
+Count: 97
 
 - clearToast
 - clearToasts
@@ -30,7 +63,6 @@ Generated at: 2026-02-22T01:52:12.826Z
 - getSystemIdleState
 - getSystemIdleTime
 - getWindowCount
-- getWindows
 - getWindows
 - hasClipboard
 - hasWSLFeatureInstalled
@@ -61,7 +93,6 @@ Generated at: 2026-02-22T01:52:12.826Z
 - openExternal
 - openGPUInfoWindow
 - openSessionsWindow
-- openWindow
 - openWindow
 - pickFileAndOpen
 - pickFileFolderAndOpen
@@ -110,8 +141,8 @@ Generated at: 2026-02-22T01:52:12.826Z
 - writeElevated
 
 ## Electron Main IPC Channels
+Count: 21
 
-- browserElements
 - browserElements
 - diagnostics
 - encryption
@@ -120,26 +151,22 @@ Generated at: 2026-02-22T01:52:12.826Z
 - keyboardLayout
 - launch
 - logger
-- logger
 - menubar
 - nativeHost
-- nativeHost
-- policy
 - policy
 - process
 - profileStorageListener
 - sign
 - storage
-- storage
 - update
 - url
-- userDataProfiles
 - userDataProfiles
 - webContentExtractor
 - webview
 - workspaces
 
 ## Desktop Service Imports
+Count: 51
 
 - accessibility/electron-browser/accessibilityService.js
 - auxiliaryWindow/electron-browser/auxiliaryWindowService.js

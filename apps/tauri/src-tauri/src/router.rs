@@ -9,9 +9,10 @@ use crate::capabilities::update::{RustPrimaryUpdateCapability, UpdateCapability}
 use crate::capabilities::window::{RustPrimaryWindowCapability, WindowCapability};
 use crate::node_fallback::NodeFallbackClient;
 use crate::protocol::CapabilityDomain;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Emitter;
 
 #[derive(Clone)]
 pub struct CapabilityRouter {
@@ -32,14 +33,14 @@ impl CapabilityRouter {
         let metrics = crate::metrics::FallbackMetrics::default();
         Self {
             window: Arc::new(RustPrimaryWindowCapability),
-            filesystem: Arc::new(RustPrimaryFilesystemCapability),
-            terminal: Arc::new(RustPrimaryTerminalCapability),
+            filesystem: Arc::new(RustPrimaryFilesystemCapability::new()),
+            terminal: Arc::new(RustPrimaryTerminalCapability::new()),
             clipboard: Arc::new(RustPrimaryClipboardCapability),
             dialogs: Arc::new(RustPrimaryDialogsCapability),
-            process: Arc::new(RustPrimaryProcessCapability),
-            power: Arc::new(RustPrimaryPowerCapability),
+            process: Arc::new(RustPrimaryProcessCapability::new()),
+            power: Arc::new(RustPrimaryPowerCapability::new()),
             os: Arc::new(RustPrimaryOsCapability),
-            update: Arc::new(RustPrimaryUpdateCapability),
+            update: Arc::new(RustPrimaryUpdateCapability::new()),
             fallback: NodeFallbackClient::new(fallback_script, metrics),
         }
     }
@@ -64,7 +65,27 @@ impl CapabilityRouter {
             return Ok(value);
         }
 
-        self.fallback.invoke(domain, method, params).await
+        let fallback_result = self.fallback.invoke(domain, method, params).await?;
+        let metric_key = format!("{}:{method}", domain.as_str());
+        let fallback_count = self
+            .fallback
+            .metrics()
+            .snapshot()
+            .get(&metric_key)
+            .copied()
+            .unwrap_or(0);
+        if let Some(app_handle) = crate::capabilities::window::app_handle() {
+            let _ = app_handle.emit(
+                "fallback.used",
+                json!({
+                    "domain": domain.as_str(),
+                    "method": method,
+                    "count": fallback_count
+                }),
+            );
+        }
+
+        Ok(fallback_result)
     }
 
     pub fn fallback_counts(&self) -> std::collections::BTreeMap<String, u64> {

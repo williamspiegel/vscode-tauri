@@ -33,6 +33,46 @@ export interface ProtocolHandshakeResponse {
 }
 
 export type HostProtocolSpec = typeof protocol;
+export type HostEventName = keyof HostProtocolSpec['events'];
+
+export interface HostEventPayloadMap {
+  'host.lifecycle': {
+    event: string;
+  };
+  'window.stateChanged': {
+    focused: boolean;
+    fullscreen: boolean;
+  };
+  'filesystem.changed': {
+    watchId: string | number;
+    path: string;
+    kind: string;
+  };
+  'terminal.data': {
+    id: number;
+    data: string;
+    stream?: string;
+    pid?: number;
+  };
+  'process.exit': {
+    pid: number;
+    code: number;
+  };
+  'process.data': {
+    pid: number;
+    stream: string;
+    data: string;
+  };
+  'fallback.used': {
+    domain: string;
+    method: string;
+    count: number;
+  };
+}
+
+export type HostEventPayload<E extends HostEventName> = E extends keyof HostEventPayloadMap
+  ? HostEventPayloadMap[E]
+  : unknown;
 
 export const hostProtocol: HostProtocolSpec = protocol;
 

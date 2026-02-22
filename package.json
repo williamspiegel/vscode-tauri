@@ -64,6 +64,7 @@
     "tauri:smoke": "node build/tauri/smoke.mjs",
     "tauri:contract-test": "node build/tauri/contract-test.mjs",
     "tauri:inventory": "node build/tauri/generate-capability-inventory.mjs",
+    "tauri:fallback-report": "node build/tauri/fallback-telemetry-report.mjs",
     "tauri:touchpoint-gate": "node build/tauri/touchpoint-gate.mjs",
     "eslint": "node build/eslint.ts",
     "stylelint": "node build/stylelint.ts",

@@ -24,6 +24,7 @@ if (protocol.jsonrpc !== '2.0') {
 }
 
 const requiredDomains = [
+	'host',
 	'window',
 	'filesystem',
 	'terminal',
