@@ -40,6 +40,8 @@ function topFallbackMethods(filePath, limit = 5) {
 }
 
 const topFallback = topFallbackMethods(metricsPath);
+const topCapabilityFallback = topFallback.filter(entry => entry.method.startsWith('capability:')).slice(0, 5);
+const topChannelFallback = topFallback.filter(entry => entry.method.startsWith('channel:')).slice(0, 5);
 const lines = [
 	'# Upstream Sync Report',
 	'',
@@ -62,9 +64,23 @@ lines.push('', '## Fallback Telemetry', '');
 if (topFallback.length === 0) {
 	lines.push('No persisted fallback telemetry available.');
 } else {
-	lines.push('| Method | Count |');
+	lines.push('| Key | Count |');
 	lines.push('| --- | ---: |');
 	for (const entry of topFallback) {
+		lines.push(`| ${entry.method} | ${entry.count} |`);
+	}
+}
+
+if (topCapabilityFallback.length > 0) {
+	lines.push('', '### Top Capability Fallback Keys', '', '| Key | Count |', '| --- | ---: |');
+	for (const entry of topCapabilityFallback) {
+		lines.push(`| ${entry.method} | ${entry.count} |`);
+	}
+}
+
+if (topChannelFallback.length > 0) {
+	lines.push('', '### Top Channel Fallback Keys', '', '| Key | Count |', '| --- | ---: |');
+	for (const entry of topChannelFallback) {
 		lines.push(`| ${entry.method} | ${entry.count} |`);
 	}
 }

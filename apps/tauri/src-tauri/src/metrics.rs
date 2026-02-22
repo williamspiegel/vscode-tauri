@@ -27,6 +27,8 @@ struct PersistedMetrics {
 #[derive(Debug, Serialize)]
 struct PersistedEvent<'a> {
     at_ms: u64,
+    key: &'a str,
+    class: &'a str,
     domain: &'a str,
     method: &'a str,
     count: u64,
@@ -47,17 +49,33 @@ impl Default for FallbackMetrics {
 }
 
 impl FallbackMetrics {
-    pub fn increment(&self, domain: &str, method: &str) -> u64 {
-        let key = format!("{domain}:{method}");
+    pub fn increment_capability(&self, domain: &str, method: &str) -> u64 {
+        let key = format!("capability:{domain}:{method}");
+        self.increment_with_key(key, "capability", domain, method)
+    }
+
+    pub fn increment_channel(&self, channel: &str, method: &str) -> u64 {
+        let key = format!("channel:{channel}:{method}");
+        self.increment_with_key(key, "channel", channel, method)
+    }
+
+    fn increment_with_key(&self, key: String, class: &str, domain: &str, method: &str) -> u64 {
         let mut guard = self.inner.lock().expect("fallback metric mutex poisoned");
-        let entry = guard.counts.entry(key).or_insert(0);
+        let entry = guard.counts.entry(key.clone()).or_insert(0);
         *entry += 1;
 
         let next_count = *entry;
         if let Err(error) = persist_counts(&guard.metrics_path, &guard.counts) {
             eprintln!("Failed to persist fallback metrics: {error}");
         }
-        if let Err(error) = append_event(&guard.events_path, domain, method, next_count) {
+        if let Err(error) = append_event(
+            &guard.events_path,
+            &key,
+            class,
+            domain,
+            method,
+            next_count,
+        ) {
             eprintln!("Failed to append fallback event: {error}");
         }
 
@@ -133,6 +151,8 @@ fn persist_counts(metrics_path: &PathBuf, counts: &BTreeMap<String, u64>) -> Res
 
 fn append_event(
     events_path: &PathBuf,
+    key: &str,
+    class: &str,
     domain: &str,
     method: &str,
     count: u64,
@@ -148,6 +168,8 @@ fn append_event(
 
     let event = PersistedEvent {
         at_ms: epoch_millis(),
+        key,
+        class,
         domain,
         method,
         count,

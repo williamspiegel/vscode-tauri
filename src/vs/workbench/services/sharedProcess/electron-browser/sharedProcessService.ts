@@ -5,6 +5,7 @@
 
 import { Client as MessagePortClient } from '../../../../base/parts/ipc/common/ipc.mp.js';
 import { IChannel, IServerChannel, getDelayedChannel } from '../../../../base/parts/ipc/common/ipc.js';
+import { Client as ElectronIPCClient } from '../../../../base/parts/ipc/electron-browser/ipc.electron.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { ISharedProcessService } from '../../../../platform/ipc/electron-browser/services.js';
@@ -13,13 +14,24 @@ import { mark } from '../../../../base/common/performance.js';
 import { Barrier, timeout } from '../../../../base/common/async.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
 
+interface ISharedProcessConnectionLike {
+	getChannel(channelName: string): IChannel;
+	registerChannel(channelName: string, channel: IServerChannel<string>): void;
+}
+
+const noopSharedProcessConnection: ISharedProcessConnectionLike = {
+	getChannel: () => ({ listen: () => Event.None, call: async () => undefined }),
+	registerChannel: () => undefined
+};
+
 export class SharedProcessService extends Disposable implements ISharedProcessService {
 
 	declare readonly _serviceBrand: undefined;
 
-	private readonly withSharedProcessConnection: Promise<MessagePortClient>;
+	private readonly withSharedProcessConnection: Promise<ISharedProcessConnectionLike>;
 
 	private readonly restoredBarrier = new Barrier();
+	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true';
 
 	constructor(
 		readonly windowId: number,
@@ -30,8 +42,13 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 		this.withSharedProcessConnection = this.connect();
 	}
 
-	private async connect(): Promise<MessagePortClient> {
+	private async connect(): Promise<ISharedProcessConnectionLike> {
 		this.logService.trace('Renderer->SharedProcess#connect');
+		if (this.disableMessagePortTransport) {
+			const reason = 'VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT';
+			this.logService.warn(`Renderer->SharedProcess#connect: MessagePort transport disabled (${reason}), using main-process IPC fallback connection.`);
+			return this._register(new ElectronIPCClient(`shared-process-fallback-window:${this.windowId}`));
+		}
 
 		// Our performance tests show that a connection to the shared
 		// process can have significant overhead to the startup time
@@ -45,8 +62,15 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 		// Acquire a message port connected to the shared process
 		mark('code/willConnectSharedProcess');
 		this.logService.trace('Renderer->SharedProcess#connect: before acquirePort');
-		const port = await acquirePort(SharedProcessChannelConnection.request, SharedProcessChannelConnection.response);
+		const port = await Promise.race([
+			acquirePort(SharedProcessChannelConnection.request, SharedProcessChannelConnection.response).catch(() => undefined),
+			timeout(4000).then(() => undefined)
+		]);
 		mark('code/didConnectSharedProcess');
+		if (!port) {
+			this.logService.warn('Renderer->SharedProcess#connect: timed out waiting for MessagePort, using no-op shared process connection.');
+			return noopSharedProcessConnection;
+		}
 		this.logService.trace('Renderer->SharedProcess#connect: connection established');
 
 		return this._register(new MessagePortClient(port, `window:${this.windowId}`));
@@ -67,13 +91,25 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 	}
 
 	async createRawConnection(): Promise<MessagePort> {
+		if (this.disableMessagePortTransport) {
+			const fallbackChannel = new MessageChannel();
+			return fallbackChannel.port1;
+		}
 
 		// Await initialization of the shared process
 		await this.withSharedProcessConnection;
 
 		// Create a new port to the shared process
 		this.logService.trace('Renderer->SharedProcess#createRawConnection: before acquirePort');
-		const port = await acquirePort(SharedProcessRawConnection.request, SharedProcessRawConnection.response);
+		const port = await Promise.race([
+			acquirePort(SharedProcessRawConnection.request, SharedProcessRawConnection.response).catch(() => undefined),
+			timeout(4000).then(() => undefined)
+		]);
+		if (!port) {
+			this.logService.warn('Renderer->SharedProcess#createRawConnection: timed out waiting for MessagePort, returning local fallback port.');
+			const fallbackChannel = new MessageChannel();
+			return fallbackChannel.port1;
+		}
 		this.logService.trace('Renderer->SharedProcess#createRawConnection: connection established');
 
 		return port;

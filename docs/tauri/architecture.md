@@ -6,27 +6,41 @@
 - Keep merge conflicts with upstream `microsoft/vscode` minimal.
 - Preserve behavior parity while Rust handlers replace temporary Node fallback adapters.
 
-## Runtime Model
+## Runtime Model (Desktop Hard Switch)
 
-- UI Runtime: VS Code web workbench loaded in Tauri WebView.
-- Host Control Plane: Rust/Tauri app controls lifecycle and capability routing.
-- Data Plane: Capability dispatch prefers Rust handlers and transparently falls back to Node adapters when needed.
+- UI Runtime: VS Code desktop workbench bootstrap loaded from `/out/vs/code/electron-browser/workbench/workbench.js`.
+- Sandbox Globals: `window.vscode` shim is installed from `apps/tauri/ui/src/desktopSandbox.ts` before desktop bootstrap import.
+- Renderer IPC Bridge: Electron-style channel calls are proxied through renderer-side channel adapters in `apps/tauri/ui/src/desktopChannels.ts`.
+- Host Control Plane: Rust/Tauri app controls lifecycle and protocol routing.
+- Data Plane: Rust capability handlers execute first, then Node fallback handles missing capability/channel methods.
 
-## Capability Flow
+## Protocol Shape
 
-1. UI sends JSON-RPC request to Rust host via `host_invoke`.
-2. Router maps method prefix (`window.*`, `filesystem.*`, etc.) to a capability domain.
-3. Rust primary handler runs first.
-4. If Rust returns `None`, Node fallback adapter executes.
-5. Fallback metrics are incremented and persisted for migration burn-down tracking.
+- JSON-RPC protocol version: `1.0.0`
+- Desktop methods:
+  - `desktop.resolveWindowConfig`
+  - `desktop.channelCall`
+  - `desktop.channelListen`
+  - `desktop.channelUnlisten`
+- Desktop event envelope:
+  - `desktop.channelEvent`
+
+## Desktop Config Source
+
+`desktop.resolveWindowConfig` returns an `INativeWindowConfiguration`-compatible payload sourced from:
+
+- `product.json`
+- `out/nls.messages.json`
+- repo-local user data paths under `.vscode-tauri/user-data`
+- explicit defaults for `windowId`, `profiles`, `os`, `logLevel`, and `colorScheme`
 
 ## Fallback Telemetry
 
-- Counters persist across runs in `apps/tauri/logs/fallback-metrics.json` during repo-based development.
-- Event history is appended in `apps/tauri/logs/fallback-metrics.events.jsonl`.
-- Override paths with:
-  - `VSCODE_TAURI_FALLBACK_METRICS_PATH`
-  - `VSCODE_TAURI_FALLBACK_EVENTS_PATH`
+- Counters persist in `apps/tauri/logs/fallback-metrics.json`.
+- Event history persists in `apps/tauri/logs/fallback-metrics.events.jsonl`.
+- Fallback keys are classed as:
+  - `capability:<domain>:<method>`
+  - `channel:<channel>:<method>`
 
 ## Merge-Surface Rules
 

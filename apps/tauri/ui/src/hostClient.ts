@@ -34,6 +34,7 @@ interface TauriWindow extends Window {
 export class HostClient {
   private nextId = 1;
   private readonly invoke: TauriInvoke;
+  private static cachedListen: TauriListen | undefined;
 
   constructor() {
     this.invoke = HostClient.resolveInvoke();
@@ -53,16 +54,21 @@ export class HostClient {
   }
 
   private static resolveListen(): TauriListen {
+    if (HostClient.cachedListen) {
+      return HostClient.cachedListen;
+    }
+
     const tauriWindow = window as TauriWindow;
     const globalListen = tauriWindow.__TAURI__?.event?.listen;
     if (globalListen) {
+      HostClient.cachedListen = globalListen;
       return globalListen;
     }
 
     const internals = tauriWindow.__TAURI_INTERNALS__;
     if (internals?.invoke && internals.transformCallback && internals.unregisterCallback) {
       const invoke = internals.invoke;
-      return async <T>(event: string, handler: TauriEventListener<T>) => {
+      const listen = async <T>(event: string, handler: TauriEventListener<T>) => {
         const callbackId = internals.transformCallback!(payload => {
           const eventPayload = (payload as { payload?: T })?.payload ?? (payload as T);
           handler({ payload: eventPayload });
@@ -82,6 +88,8 @@ export class HostClient {
           internals.unregisterCallback?.(callbackId);
         };
       };
+      HostClient.cachedListen = listen;
+      return listen;
     }
 
     throw new Error('Tauri event API is unavailable. Run this UI inside the Tauri host.');
@@ -138,6 +146,51 @@ export class HostClient {
     }
 
     return modules;
+  }
+
+  async resolveWindowConfig(): Promise<Record<string, unknown>> {
+    return this.invokeMethod<Record<string, unknown>>('desktop.resolveWindowConfig', {});
+  }
+
+  async desktopChannelCall(
+    channel: string,
+    method: string,
+    args: unknown[] = []
+  ): Promise<unknown> {
+    return this.invokeMethod<unknown>('desktop.channelCall', {
+      channel,
+      method,
+      args
+    });
+  }
+
+  async desktopChannelListen(
+    channel: string,
+    event: string,
+    arg: unknown,
+    handler: (payload: unknown) => void
+  ): Promise<() => Promise<void>> {
+    const response = await this.invokeMethod<{ subscriptionId: string }>('desktop.channelListen', {
+      channel,
+      event,
+      arg
+    });
+
+    const subscriptionId = response.subscriptionId;
+    if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
+      throw new Error('desktop.channelListen returned an invalid subscription id.');
+    }
+
+    const stopTauriListener = await this.listenEvent('desktop.channelEvent', payload => {
+      if (payload.subscriptionId === subscriptionId) {
+        handler(payload.payload);
+      }
+    });
+
+    return async () => {
+      stopTauriListener();
+      await this.invokeMethod('desktop.channelUnlisten', { subscriptionId });
+    };
   }
 
   async listenEvent<E extends HostEventName>(

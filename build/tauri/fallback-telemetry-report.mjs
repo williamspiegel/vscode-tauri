@@ -63,6 +63,16 @@ function readEvents(eventsPath) {
 	return events;
 }
 
+function classifyMetricKey(key) {
+	if (key.startsWith('capability:')) {
+		return 'capability';
+	}
+	if (key.startsWith('channel:')) {
+		return 'channel';
+	}
+	return 'legacy';
+}
+
 const metricsPath = metricsPathFromEnvOrDefault();
 const eventsPath = eventsPathFromEnvOrDefault(metricsPath);
 const reportPath = path.join(repoRoot, 'tauri-fallback-telemetry.md');
@@ -88,10 +98,15 @@ if (!metrics || typeof metrics !== 'object' || typeof metrics.counts !== 'object
 
 const counts = Object.entries(metrics.counts)
 	.filter(([, value]) => typeof value === 'number')
-	.map(([method, count]) => ({ method, count }))
-	.sort((a, b) => b.count - a.count || a.method.localeCompare(b.method));
+	.map(([key, count]) => ({ key, count, class: classifyMetricKey(key) }))
+	.sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 
 const totalInvocations = counts.reduce((total, entry) => total + entry.count, 0);
+const totalsByClass = new Map();
+for (const entry of counts) {
+	totalsByClass.set(entry.class, (totalsByClass.get(entry.class) ?? 0) + entry.count);
+}
+
 const now = Date.now();
 const oneDayAgo = now - 24 * 60 * 60 * 1000;
 const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
@@ -100,19 +115,29 @@ const last24h = events.filter(event => event.at_ms >= oneDayAgo).length;
 const last7d = events.filter(event => event.at_ms >= sevenDaysAgo).length;
 
 lines.push(`Total fallback invocations (lifetime): ${totalInvocations}`);
+lines.push(`Capability fallback invocations: ${totalsByClass.get('capability') ?? 0}`);
+lines.push(`Channel fallback invocations: ${totalsByClass.get('channel') ?? 0}`);
+if ((totalsByClass.get('legacy') ?? 0) > 0) {
+	lines.push(`Legacy-format fallback keys: ${totalsByClass.get('legacy') ?? 0}`);
+}
 lines.push(`Events observed in last 24h: ${last24h}`);
 lines.push(`Events observed in last 7d: ${last7d}`);
 lines.push('');
-lines.push('## Top Fallback Methods');
-lines.push('');
-if (counts.length === 0) {
-	lines.push('No fallback methods recorded.');
-} else {
-	lines.push('| Method | Count |');
-	lines.push('| --- | ---: |');
-	for (const entry of counts.slice(0, 20)) {
-		lines.push(`| ${entry.method} | ${entry.count} |`);
+
+for (const className of ['capability', 'channel', 'legacy']) {
+	const classCounts = counts.filter(entry => entry.class === className);
+	if (classCounts.length === 0) {
+		continue;
 	}
+
+	lines.push(`## Top ${className[0].toUpperCase()}${className.slice(1)} Fallback Keys`);
+	lines.push('');
+	lines.push('| Key | Count |');
+	lines.push('| --- | ---: |');
+	for (const entry of classCounts.slice(0, 20)) {
+		lines.push(`| ${entry.key} | ${entry.count} |`);
+	}
+	lines.push('');
 }
 
 const dailyTotals = new Map();
@@ -125,7 +150,6 @@ for (const event of events) {
 	dailyTotals.set(day, (dailyTotals.get(day) ?? 0) + 1);
 }
 
-lines.push('');
 lines.push('## Daily Events (Last 7 Days)');
 lines.push('');
 if (dailyTotals.size === 0) {

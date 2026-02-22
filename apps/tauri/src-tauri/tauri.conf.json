@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.vscode.tauri",
   "build": {
-    "beforeDevCommand": "cd ../ui && npm run dev -- --host 127.0.0.1 --port 5173",
-    "beforeBuildCommand": "cd ../ui && npm run build",
+    "beforeDevCommand": "cd ./ui && npm run dev -- --host 127.0.0.1 --port 5173",
+    "beforeBuildCommand": "cd ./ui && npm run build",
     "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../ui/dist"
   },

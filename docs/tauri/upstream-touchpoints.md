@@ -17,7 +17,7 @@ This ledger tracks edits outside the preferred fork-only directories.
 | `scripts/code-tauri.bat` | Added Windows launcher for Tauri host runtime. |
 | `.github/workflows/tauri-upstream-sync.yml` | Added daily upstream sync automation and report publishing. |
 | `.github/workflows/tauri-touchpoint-gate.yml` | Added CI guard to enforce low conflict-surface policy. |
-| `.gitignore` | Ignored Tauri runtime artifacts (`apps/tauri/logs/`, `apps/tauri/ui/out`) and generated report markdown files. |
+| `.gitignore` | Ignored Tauri runtime artifacts (`apps/tauri/logs/`, `apps/tauri/ui/out`, `apps/tauri/ui/.cache/`) and generated report markdown files. |
 
 ## Update Rule
 

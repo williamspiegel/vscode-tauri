@@ -21,21 +21,47 @@ impl NodeFallbackClient {
         }
     }
 
-    pub async fn invoke(
+    pub async fn invoke_capability(
         &self,
         domain: CapabilityDomain,
         method: &str,
         params: &Value,
     ) -> Result<Value, String> {
-        let fallback_count = self.metrics.increment(domain.as_str(), method);
+        let fallback_count = self.metrics.increment_capability(domain.as_str(), method);
+        self.run_fallback(
+            json!({
+                "kind": "capability",
+                "domain": domain.as_str(),
+                "method": method,
+                "params": params,
+                "fallbackCount": fallback_count
+            }),
+            method,
+        )
+        .await
+    }
 
-        let request = json!({
-            "domain": domain.as_str(),
-            "method": method,
-            "params": params,
-            "fallbackCount": fallback_count
-        });
+    pub async fn invoke_channel(
+        &self,
+        channel: &str,
+        method: &str,
+        args: &Value,
+    ) -> Result<Value, String> {
+        let fallback_count = self.metrics.increment_channel(channel, method);
+        self.run_fallback(
+            json!({
+                "kind": "channel",
+                "channel": channel,
+                "method": method,
+                "args": args,
+                "fallbackCount": fallback_count
+            }),
+            method,
+        )
+        .await
+    }
 
+    async fn run_fallback(&self, request: Value, method: &str) -> Result<Value, String> {
         let mut child = Command::new(&self.node_exec)
             .arg(&self.fallback_script)
             .stdin(std::process::Stdio::piped())

@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 
 const mode = process.argv[2] ?? 'dev';
@@ -14,20 +14,105 @@ if (!['dev', 'build'].includes(mode)) {
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 
-function run(command, args, options = {}) {
-	const result = spawnSync(command, args, {
-		cwd: repoRoot,
-		stdio: 'inherit',
-		shell: process.platform === 'win32',
-		...options
-	});
+const SOURCEMAP_WARNING_PATTERN = /Sourcemap for ".*" points to missing source files/;
+const DYNAMIC_IMPORT_WARNING_PATTERN = /dynamic import cannot be analyzed by Vite|vite:import-analysis|dynamic-import-vars#limitations/;
 
-	if (typeof result.status === 'number' && result.status !== 0) {
-		process.exit(result.status);
-	}
+function shouldSuppressOutput(line) {
+	return SOURCEMAP_WARNING_PATTERN.test(line) || DYNAMIC_IMPORT_WARNING_PATTERN.test(line);
 }
 
-run('node', ['build/tauri/contract-test.mjs']);
-run('node', ['build/tauri/smoke.mjs']);
-run('npm', ['--prefix', 'apps/tauri/ui', 'run', 'build']);
-run('cargo', ['tauri', mode], { cwd: path.join(repoRoot, 'apps/tauri/src-tauri') });
+function pipeFiltered(stream, sink) {
+	if (!stream) {
+		return;
+	}
+
+	stream.setEncoding('utf8');
+	let pending = '';
+	let warningBlock = '';
+	let bufferingWarningBlock = false;
+
+	const flushWarningBlock = () => {
+		if (!warningBlock) {
+			return;
+		}
+
+		if (!shouldSuppressOutput(warningBlock)) {
+			sink.write(warningBlock);
+		}
+
+		warningBlock = '';
+		bufferingWarningBlock = false;
+	};
+
+	stream.on('data', chunk => {
+		pending += chunk;
+		let lineEnd = pending.indexOf('\n');
+		while (lineEnd !== -1) {
+			const line = pending.slice(0, lineEnd + 1);
+			pending = pending.slice(lineEnd + 1);
+
+			if (bufferingWarningBlock) {
+				warningBlock += line;
+				if (line.trim().length === 0) {
+					flushWarningBlock();
+				}
+				lineEnd = pending.indexOf('\n');
+				continue;
+			}
+
+			if (line.includes('[vite] (client) warning:')) {
+				bufferingWarningBlock = true;
+				warningBlock = line;
+				lineEnd = pending.indexOf('\n');
+				continue;
+			}
+
+			if (!shouldSuppressOutput(line)) {
+				sink.write(line);
+			}
+
+			lineEnd = pending.indexOf('\n');
+		}
+	});
+
+	stream.on('end', () => {
+		if (pending.length > 0 && !shouldSuppressOutput(pending)) {
+			sink.write(pending);
+		}
+		flushWarningBlock();
+	});
+}
+
+function run(command, args, options = {}) {
+	return new Promise((resolve, reject) => {
+		const child = spawn(command, args, {
+			cwd: repoRoot,
+			shell: process.platform === 'win32',
+			stdio: ['inherit', 'pipe', 'pipe'],
+			...options
+		});
+
+		pipeFiltered(child.stdout, process.stdout);
+		pipeFiltered(child.stderr, process.stderr);
+
+		child.on('error', reject);
+		child.on('exit', (code, signal) => {
+			if (signal) {
+				process.kill(process.pid, signal);
+				return;
+			}
+
+			if (typeof code === 'number' && code !== 0) {
+				process.exit(code);
+				return;
+			}
+
+			resolve();
+		});
+	});
+}
+
+await run('node', ['build/tauri/contract-test.mjs']);
+await run('node', ['build/tauri/smoke.mjs']);
+await run('npm', ['--prefix', 'apps/tauri/ui', 'run', 'build']);
+await run('cargo', ['tauri', mode], { cwd: path.join(repoRoot, 'apps/tauri/src-tauri') });

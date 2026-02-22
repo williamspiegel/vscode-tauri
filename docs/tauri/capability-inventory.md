@@ -10,12 +10,12 @@ Generated from these Tauri touchpoints:
 - `apps/tauri/src-tauri/src/main.rs`
 - `apps/tauri/src-tauri/src/capabilities/*.rs`
 
-Generated at: 2026-02-22T03:29:07.283Z
+Generated at: 2026-02-22T04:41:03.984Z
 
 ## Protocol Coverage Snapshot
 
-- Protocol methods: 37
-- Rust primary methods with handler entrypoints: 34
+- Protocol methods: 41
+- Rust primary methods with handler entrypoints: 38
 - Methods missing Rust entrypoints (Node fallback required): 0
 - Host/protocol core methods: 3
 - Note: methods counted as Rust primary can still route to Node fallback at runtime based on platform or partial implementation.
@@ -25,6 +25,7 @@ Generated at: 2026-02-22T03:29:07.283Z
 | Domain | Total | Rust Primary Entry | Missing Rust Entry | Host Core |
 | --- | ---: | ---: | ---: | ---: |
 | clipboard | 2 | 2 | 0 | 0 |
+| desktop | 4 | 4 | 0 | 0 |
 | dialogs | 4 | 4 | 0 | 0 |
 | filesystem | 5 | 5 | 0 | 0 |
 | host | 2 | 0 | 0 | 2 |

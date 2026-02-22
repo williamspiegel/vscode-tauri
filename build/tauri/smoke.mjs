@@ -13,6 +13,8 @@ const required = [
 	'apps/tauri/src-tauri/Cargo.toml',
 	'apps/tauri/src-tauri/src/main.rs',
 	'apps/tauri/ui/src/main.ts',
+	'apps/tauri/ui/src/desktopSandbox.ts',
+	'apps/tauri/ui/src/desktopChannels.ts',
 	'docs/tauri/parity-matrix.yaml',
 	'docs/tauri/upstream-touchpoints.md'
 ];
@@ -31,6 +33,26 @@ const matrix = fs.readFileSync(matrixPath, 'utf8');
 if (!matrix.includes('capabilities:')) {
 	console.error('Tauri smoke check failed: parity matrix has no capabilities section.');
 	process.exit(1);
+}
+
+const uiMainPath = path.join(repoRoot, 'apps/tauri/ui/src/main.ts');
+const uiMain = fs.readFileSync(uiMainPath, 'utf8');
+if (!uiMain.includes('/out/vs/code/electron-browser/workbench/workbench.js')) {
+	console.error('Tauri smoke check failed: ui main entry is not loading desktop workbench bootstrap.');
+	process.exit(1);
+}
+if (!uiMain.includes('installDesktopSandbox')) {
+	console.error('Tauri smoke check failed: ui main entry does not install desktop sandbox globals.');
+	process.exit(1);
+}
+
+const desktopChannelsPath = path.join(repoRoot, 'apps/tauri/ui/src/desktopChannels.ts');
+const desktopChannels = fs.readFileSync(desktopChannelsPath, 'utf8');
+for (const requiredChannel of ['nativeHost', 'storage', 'logger', 'policy', 'sign', 'userDataProfiles', 'url', 'workspaces', 'keyboardLayout']) {
+	if (!desktopChannels.includes(`'${requiredChannel}'`)) {
+		console.error(`Tauri smoke check failed: missing boot-critical channel adapter '${requiredChannel}'.`);
+		process.exit(1);
+	}
 }
 
 console.log('Tauri smoke check passed.');

@@ -23,8 +23,14 @@ interface FontData {
 
 export const getFonts = async (): Promise<string[]> => {
 	try {
-		// @ts-ignore
-		const fonts = await mainWindow.queryLocalFonts() as FontData[];
+		const queryLocalFonts = (mainWindow as typeof mainWindow & {
+			queryLocalFonts?: () => Promise<FontData[]>;
+		}).queryLocalFonts;
+		if (typeof queryLocalFonts !== 'function') {
+			return [];
+		}
+
+		const fonts = await queryLocalFonts();
 		const fontsArray = [...fonts];
 		const families = fontsArray.map(font => font.family);
 		return families;

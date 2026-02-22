@@ -357,9 +357,14 @@ export class FileService extends Disposable implements IFileService {
 	}
 
 	private async doValidateCreateFile(resource: URI, options?: ICreateFileOptions): Promise<void> {
+		const tauriGlobals = globalThis as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown; __TAURI_INVOKE__?: unknown };
+		const isTauriRuntime = typeof globalThis === 'object' && !!(tauriGlobals.__TAURI__ || tauriGlobals.__TAURI_INTERNALS__ || tauriGlobals.__TAURI_INVOKE__);
+		const resourcePath = typeof resource.path === 'string' ? resource.path : '';
+		const isTauriUserDataPath = resourcePath.includes('/.vscode-tauri/user-data/');
+		const isTauriUserDataCreate = isTauriRuntime && (resource.scheme === Schemas.vscodeUserData || isTauriUserDataPath);
 
 		// validate overwrite
-		if (!options?.overwrite && await this.exists(resource)) {
+		if (!isTauriUserDataCreate && !options?.overwrite && await this.exists(resource)) {
 			throw new FileOperationError(localize('fileExists', "Unable to create file '{0}' that already exists when overwrite flag is not set", this.resourceForError(resource)), FileOperationResult.FILE_MODIFIED_SINCE, options);
 		}
 	}

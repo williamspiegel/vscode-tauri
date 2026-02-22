@@ -68,6 +68,12 @@ export interface HostEventPayloadMap {
     method: string;
     count: number;
   };
+  'desktop.channelEvent': {
+    subscriptionId: string;
+    channel: string;
+    event: string;
+    payload: unknown;
+  };
 }
 
 export type HostEventPayload<E extends HostEventName> = E extends keyof HostEventPayloadMap

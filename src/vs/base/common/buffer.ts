@@ -40,7 +40,13 @@ export class VSBuffer {
 	 * the returned `VSBuffer` instance might use a nodejs Buffer allocated from node's Buffer pool,
 	 * which is not transferrable.
 	 */
-	static wrap(actual: Uint8Array): VSBuffer {
+	static wrap(actual: Uint8Array | ArrayBuffer | ArrayBufferView): VSBuffer {
+		if (actual instanceof ArrayBuffer) {
+			actual = new Uint8Array(actual);
+		} else if (!(actual instanceof Uint8Array) && ArrayBuffer.isView(actual)) {
+			actual = new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength);
+		}
+
 		if (hasBuffer && !(Buffer.isBuffer(actual))) {
 			// https://nodejs.org/dist/latest-v10.x/docs/api/buffer.html#buffer_class_method_buffer_from_arraybuffer_byteoffset_length
 			// Create a zero-copy Buffer wrapper around the ArrayBuffer pointed to by the Uint8Array

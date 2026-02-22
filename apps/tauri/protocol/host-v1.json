@@ -53,6 +53,14 @@
         "host.cssModules"
       ]
     },
+    "desktop": {
+      "methods": [
+        "desktop.resolveWindowConfig",
+        "desktop.channelCall",
+        "desktop.channelListen",
+        "desktop.channelUnlisten"
+      ]
+    },
     "window": {
       "methods": [
         "window.open",
@@ -131,6 +139,10 @@
     },
     "host.fallbackCounts": { "params": { "type": "object" } },
     "host.cssModules": { "params": { "type": "object" } },
+    "desktop.resolveWindowConfig": { "params": { "type": "object" } },
+    "desktop.channelCall": { "params": { "type": "object", "required": ["channel", "method"] } },
+    "desktop.channelListen": { "params": { "type": "object", "required": ["channel", "event"] } },
+    "desktop.channelUnlisten": { "params": { "type": "object", "required": ["subscriptionId"] } },
     "window.open": { "params": { "type": "object", "required": ["target"] } },
     "window.close": { "params": { "type": "object" } },
     "window.focus": { "params": { "type": "object" } },
@@ -215,6 +227,12 @@
       "payload": {
         "type": "object",
         "required": ["domain", "method", "count"]
+      }
+    },
+    "desktop.channelEvent": {
+      "payload": {
+        "type": "object",
+        "required": ["subscriptionId", "channel", "event", "payload"]
       }
     }
   }

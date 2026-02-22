@@ -7,43 +7,76 @@ capabilities:
   host:
     status: in-progress
     backend: rust
-    notes: Rust host now serves protocol-level utility methods for fallback metrics and CSS module discovery used by the web workbench bootstrap. Fallback counters are persisted to disk for trend reporting.
+    notes: Handshake, fallback metrics, and temporary cssModules endpoint remain available.
+  desktop:
+    status: in-progress
+    backend: rust
+    notes: Desktop bootstrap path is now default with desktop.resolveWindowConfig and channelCall/listen/unlisten support.
   window:
     status: in-progress
     backend: rust
-    notes: Rust now handles open/close/focus/setFullscreen/getState for the main window. Non-main window targets still route to node fallback.
+    notes: Main window focus/fullscreen/state routes through Rust.
   filesystem:
     status: in-progress
     backend: rust
-    notes: Rust now handles readFile/writeFile/stat/watch/unwatch with native watcher backend (notify) and automatic polling fallback when native watcher setup fails.
+    notes: read/write/stat/watch/unwatch are Rust-primary.
   terminal:
     status: in-progress
     backend: rust
-    notes: Rust now handles create/resize/write/kill session APIs and emits terminal.data chunks from stdout/stderr. PTY-backed resize semantics are still pending.
+    notes: create/resize/write/kill are Rust-primary with fallback remaining for parity gaps.
   clipboard:
     status: in-progress
     backend: rust
-    notes: Rust now handles readText/writeText using platform clipboard shell commands with fallback on unsupported hosts.
+    notes: read/write text is Rust-primary.
   dialogs:
     status: in-progress
     backend: rust
-    notes: Rust now handles showMessage/openFile/openFolder/saveFile on macOS via AppleScript. Non-macOS still uses node fallback.
+    notes: open/save/message flows are Rust-primary on macOS.
   process:
     status: in-progress
     backend: rust
-    notes: Rust now handles env/spawn/kill/wait/list with optional `background: true` managed processes and emits process.exit/process.data events. Full lifecycle parity details and advanced stream semantics are still pending.
+    notes: spawn/kill/env/wait/list are Rust-primary.
   power:
     status: in-progress
     backend: rust
-    notes: Rust now handles preventSleep/allowSleep/idleState on macOS via caffeinate and ioreg. Non-macOS remains on node fallback.
+    notes: sleep blocker and idle state are Rust-primary on macOS.
   os:
     status: in-progress
     backend: rust
-    notes: Rust now handles systemInfo/openExternal/showItemInFolder using platform shell commands.
+    notes: openExternal/showItemInFolder/systemInfo are Rust-primary.
   update:
     status: in-progress
     backend: rust
-    notes: Rust now handles update.check/download/install with stateful, non-destructive placeholder responses. Native feed resolution, artifact download, and installer execution are still pending.
+    notes: placeholder update pipeline remains Rust-primary while real updater integration is pending.
+
+channel_adapters:
+  nativeHost:
+    status: in-progress
+    backend: rust+node-fallback
+  storage:
+    status: in-progress
+    backend: node-fallback
+  logger:
+    status: in-progress
+    backend: node-fallback
+  policy:
+    status: in-progress
+    backend: node-fallback
+  sign:
+    status: in-progress
+    backend: node-fallback
+  userDataProfiles:
+    status: in-progress
+    backend: node-fallback
+  url:
+    status: in-progress
+    backend: rust+node-fallback
+  workspaces:
+    status: in-progress
+    backend: node-fallback
+  keyboardLayout:
+    status: in-progress
+    backend: node-fallback
 
 test_coverage:
   contract:
@@ -61,5 +94,3 @@ test_coverage:
   fallback_telemetry_report:
     status: implemented
     artifact: build/tauri/fallback-telemetry-report.mjs
-
-# Note: keep this file plain-text and small enough for quick diffing in precommit checks.

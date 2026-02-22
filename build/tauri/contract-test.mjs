@@ -25,6 +25,7 @@ if (protocol.jsonrpc !== '2.0') {
 
 const requiredDomains = [
 	'host',
+	'desktop',
 	'window',
 	'filesystem',
 	'terminal',
@@ -55,6 +56,23 @@ for (const domain of requiredDomains) {
 
 if (!Array.isArray(protocol.errors) || protocol.errors.length < 3) {
 	fail('error catalog is incomplete');
+}
+
+const requiredDesktopMethods = [
+	'desktop.resolveWindowConfig',
+	'desktop.channelCall',
+	'desktop.channelListen',
+	'desktop.channelUnlisten'
+];
+
+for (const method of requiredDesktopMethods) {
+	if (!protocol.methods?.[method]) {
+		fail(`missing desktop method spec ${method}`);
+	}
+}
+
+if (!protocol.events?.['desktop.channelEvent']) {
+	fail('missing desktop.channelEvent in protocol events');
 }
 
 console.log('Protocol contract test passed.');
