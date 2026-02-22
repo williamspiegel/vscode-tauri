@@ -181,14 +181,21 @@ export class HostClient {
       throw new Error('desktop.channelListen returned an invalid subscription id.');
     }
 
-    const stopTauriListener = await this.listenEvent('desktop.channelEvent', payload => {
-      if (payload.subscriptionId === subscriptionId) {
-        handler(payload.payload);
-      }
-    });
+    let stopTauriListener: (() => void) | undefined;
+    try {
+      stopTauriListener = await this.listenEvent('desktop.channelEvent', payload => {
+        if (payload.subscriptionId === subscriptionId) {
+          handler(payload.payload);
+        }
+      });
+    } catch {
+      // Some Tauri capability configurations disallow event.listen.
+      // Keep the channel subscription alive in no-op mode.
+      stopTauriListener = undefined;
+    }
 
     return async () => {
-      stopTauriListener();
+      stopTauriListener?.();
       await this.invokeMethod('desktop.channelUnlisten', { subscriptionId });
     };
   }

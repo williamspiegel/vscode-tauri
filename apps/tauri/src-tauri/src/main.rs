@@ -282,6 +282,9 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     let user_data_dir = repo_root.join(".vscode-tauri").join("user-data");
     let _ = fs::create_dir_all(&user_data_dir);
     let _ = fs::create_dir_all(user_data_dir.join("User/profiles/default"));
+    let builtin_extensions_dir = repo_root.join("extensions");
+    let user_extensions_dir = user_data_dir.join("extensions");
+    let _ = fs::create_dir_all(&user_extensions_dir);
 
     let profile_home = user_data_dir.join("User/profiles");
     let profile_location = profile_home.join("default");
@@ -327,6 +330,8 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         },
         "cssModules": css_modules,
         "_": [],
+        "builtin-extensions-dir": builtin_extensions_dir.to_string_lossy(),
+        "extensions-dir": user_extensions_dir.to_string_lossy(),
 
         "mainPid": std::process::id(),
         "machineId": "tauri-machine-id",

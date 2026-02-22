@@ -18,6 +18,123 @@ interface WindowWithVscode extends Window {
   _VSCODE_DISABLE_CSS_IMPORT_MAP?: boolean;
 }
 
+interface UriComponents {
+  scheme: string;
+  authority?: string;
+  path?: string;
+  query?: string;
+  fragment?: string;
+}
+
+interface SingleFolderWorkspaceIdentifier {
+  id: string;
+  uri: UriComponents;
+}
+
+interface MultiRootWorkspaceIdentifier {
+  id: string;
+  configPath: UriComponents;
+}
+
+type WorkspaceIdentifier = SingleFolderWorkspaceIdentifier | MultiRootWorkspaceIdentifier;
+
+function numberHash(value: number, hashValue: number): number {
+  return (((hashValue << 5) - hashValue) + value) | 0;
+}
+
+function stringHash(value: string, hashValue = 0): number {
+  hashValue = numberHash(149417, hashValue);
+  for (let index = 0; index < value.length; index++) {
+    hashValue = numberHash(value.charCodeAt(index), hashValue);
+  }
+  return hashValue;
+}
+
+function getWorkspaceId(value: string): string {
+  return stringHash(value).toString(16);
+}
+
+function toFileUriComponents(path: string): UriComponents {
+  const normalized = path.replace(/\\/g, '/');
+  return {
+    scheme: 'file',
+    authority: '',
+    path: normalized.startsWith('/') ? normalized : `/${normalized}`
+  };
+}
+
+function tryParseUriComponents(value: string): UriComponents | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  if (value.startsWith('/')) {
+    return toFileUriComponents(value);
+  }
+
+  try {
+    const parsed = new URL(value);
+    return {
+      scheme: parsed.protocol.replace(/:$/, ''),
+      authority: parsed.host,
+      path: decodeURIComponent(parsed.pathname),
+      query: parsed.search ? parsed.search.slice(1) : undefined,
+      fragment: parsed.hash ? parsed.hash.slice(1) : undefined
+    };
+  } catch {
+    return toFileUriComponents(value);
+  }
+}
+
+function workspaceIdentifierFromLocation(): WorkspaceIdentifier | null | undefined {
+  const query = new URLSearchParams(window.location.search);
+
+  if (query.has('ew')) {
+    return null;
+  }
+
+  const workspacePath = query.get('workspace');
+  if (workspacePath) {
+    const workspaceUri = tryParseUriComponents(workspacePath);
+    if (workspaceUri) {
+      return {
+        id: getWorkspaceId(workspacePath),
+        configPath: workspaceUri
+      };
+    }
+  }
+
+  const folderPath = query.get('folder');
+  if (!folderPath) {
+    return undefined;
+  }
+
+  const folderUri = tryParseUriComponents(folderPath);
+  if (!folderUri) {
+    return undefined;
+  }
+
+  return {
+    id: getWorkspaceId(folderPath),
+    uri: folderUri
+  };
+}
+
+function applyWorkspaceFromLocation(configuration: Record<string, unknown>): void {
+  const workspace = workspaceIdentifierFromLocation();
+
+  if (workspace === undefined) {
+    return;
+  }
+
+  if (workspace === null) {
+    delete configuration.workspace;
+    return;
+  }
+
+  configuration.workspace = workspace;
+}
+
 class RendererChannelServer {
   private channelServer: {
     registerChannel(name: string, channel: unknown): void;
@@ -426,12 +543,13 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
   let zoomLevel = 0;
   let cachedConfiguration: Record<string, unknown> | undefined;
 
-	const resolveConfiguration = async (): Promise<Record<string, unknown>> => {
+  const resolveConfiguration = async (): Promise<Record<string, unknown>> => {
 		if (cachedConfiguration) {
 			return cachedConfiguration;
 		}
 
 		const config = await resolveWindowConfig();
+    applyWorkspaceFromLocation(config);
 		cachedConfiguration = config;
 		return config;
 	};
@@ -518,8 +636,14 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
         if (responseChannel === 'vscode:startExtensionHostMessagePortResult') {
           const channel = new MessageChannel();
           channel.port2.postMessage(Uint8Array.of(2));
+          let sentInitialized = false;
           channel.port2.onmessage = () => {
+            if (sentInitialized) {
+              return;
+            }
+            sentInitialized = true;
             channel.port2.postMessage(Uint8Array.of(1));
+            channel.port2.onmessage = null;
           };
           channel.port2.start();
           window.postMessage(nonce, '*', [channel.port1]);

@@ -89,31 +89,31 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
       {
         id: 'workbench.action.files.openFolder',
         handler: async (options?: PickFolderAndOpenOptions) => {
-          await openFolderViaWorkbenchPicker(webApi, options);
+          await openFolderViaWorkbenchPicker(host, workspaceProvider, options);
         }
       },
       {
         id: 'workbench.action.files.openFolderInNewWindow',
         handler: async (options?: PickFolderAndOpenOptions) => {
-          await openFolderViaWorkbenchPicker(webApi, { forceNewWindow: true, ...options });
+          await openFolderViaWorkbenchPicker(host, workspaceProvider, { forceNewWindow: true, ...options });
         }
       },
       {
         id: 'workbench.action.files.openFolderViaWorkspace',
         handler: async (options?: PickFolderAndOpenOptions) => {
-          await openFolderViaWorkbenchPicker(webApi, { forceReuseWindow: true, ...options });
+          await openFolderViaWorkbenchPicker(host, workspaceProvider, { forceReuseWindow: true, ...options });
         }
       },
       {
         id: 'workbench.action.files.openFileFolder',
         handler: async (options?: PickFolderAndOpenOptions) => {
-          await openFolderViaWorkbenchPicker(webApi, { forceReuseWindow: true, ...options });
+          await openFolderViaWorkbenchPicker(host, workspaceProvider, { forceReuseWindow: true, ...options });
         }
       },
       {
         id: '_files.pickFolderAndOpen',
         handler: async (options?: PickFolderAndOpenOptions) => {
-          await openFolderViaWorkbenchPicker(webApi, options);
+          await openFolderViaWorkbenchPicker(host, workspaceProvider, options);
         }
       },
       {
@@ -131,20 +131,38 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
 }
 
 async function openFolderViaWorkbenchPicker(
-  webApi: WorkbenchWebApi,
+  host: HostClient,
+  workspaceProvider: WorkspaceProvider,
   options?: PickFolderAndOpenOptions
 ): Promise<boolean> {
-  const executeCommand = webApi.commands?.executeCommand;
-  if (!executeCommand) {
+  try {
+    const result = await host.desktopChannelCall('nativeHost', 'showOpenDialog', [
+      {
+        title: 'Open Folder',
+        properties: ['openDirectory', 'createDirectory']
+      }
+    ]);
+
+    const payload = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
+    const canceled = payload.canceled === true;
+    const filePaths = Array.isArray(payload.filePaths)
+      ? payload.filePaths.filter((value): value is string => typeof value === 'string')
+      : [];
+
+    if (canceled || filePaths.length === 0) {
+      return false;
+    }
+
+    const folderPath = filePaths[0];
+    const reuseWindow = options?.forceNewWindow ? false : true;
+    const opened = await workspaceProvider.open(
+      { folderUri: parseWorkspaceUri(folderPath) },
+      { reuse: options?.forceReuseWindow ? true : reuseWindow }
+    );
+    return opened;
+  } catch {
     return false;
   }
-
-  const commandOptions = {
-    forceNewWindow: options?.forceNewWindow,
-    forceReuseWindow: options?.forceReuseWindow
-  };
-  await executeCommand('setRootFolder', commandOptions);
-  return true;
 }
 
 function createWorkspaceProvider(): WorkspaceProvider {

@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { VSBuffer } from '../../../base/common/buffer.js';
+import { decodeBase64, VSBuffer } from '../../../base/common/buffer.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { toErrorMessage } from '../../../base/common/errorMessage.js';
 import { canceled } from '../../../base/common/errors.js';
@@ -17,6 +17,110 @@ import { createFileSystemProviderError, FileSystemProviderCapabilities, FileSyst
 import { reviveFileChanges } from './watcher.js';
 
 export const LOCAL_FILE_SYSTEM_CHANNEL_NAME = 'localFilesystem';
+
+function decodeBase64ToBytes(value: string): Uint8Array | undefined {
+	try {
+		return decodeBase64(value);
+	} catch {
+		return undefined;
+	}
+}
+
+function normalizeReadFileBytes(value: unknown): Uint8Array | undefined {
+	if (value instanceof Uint8Array) {
+		return value;
+	}
+
+	if (value instanceof ArrayBuffer) {
+		return new Uint8Array(value);
+	}
+
+	if (ArrayBuffer.isView(value)) {
+		const view = value as ArrayBufferView;
+		return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+	}
+
+	if (value instanceof VSBuffer) {
+		return value.buffer;
+	}
+
+	if (Array.isArray(value)) {
+		return Uint8Array.from(value.map(item => Number(item) & 0xff));
+	}
+
+	if (value && typeof value === 'object') {
+		const objectValue = value as Record<string, unknown>;
+
+		if (typeof objectValue.type === 'string' && objectValue.type === 'Buffer' && Array.isArray(objectValue.data)) {
+			return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
+		}
+
+		if (Array.isArray(objectValue.data)) {
+			return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
+		}
+
+		if (typeof objectValue.base64 === 'string' && objectValue.base64.length > 0) {
+			const decoded = decodeBase64ToBytes(objectValue.base64);
+			if (decoded) {
+				return decoded;
+			}
+		}
+
+		if (objectValue.buffer !== undefined) {
+			const nested = normalizeReadFileBytes(objectValue.buffer);
+			if (nested) {
+				const requestedLength =
+					typeof objectValue.byteLength === 'number' && Number.isFinite(objectValue.byteLength)
+						? Math.max(0, Math.floor(objectValue.byteLength))
+						: undefined;
+				return typeof requestedLength === 'number' ? nested.slice(0, requestedLength) : nested;
+			}
+		}
+
+		const numericEntries: [number, number][] = [];
+		for (const key of Object.keys(objectValue)) {
+			if (!/^\d+$/.test(key)) {
+				continue;
+			}
+
+			const parsedIndex = Number(key);
+			if (!Number.isInteger(parsedIndex) || parsedIndex < 0) {
+				continue;
+			}
+
+			const candidate = objectValue[key];
+			let parsedValue: number | undefined;
+			if (typeof candidate === 'number') {
+				parsedValue = candidate;
+			} else if (typeof candidate === 'string' && candidate.length > 0) {
+				const numeric = Number(candidate);
+				if (Number.isFinite(numeric)) {
+					parsedValue = numeric;
+				}
+			}
+
+			if (typeof parsedValue === 'number' && Number.isFinite(parsedValue)) {
+				numericEntries.push([parsedIndex, parsedValue & 0xff]);
+			}
+		}
+
+		if (numericEntries.length > 0) {
+			const maxIndexedLength = Math.max(...numericEntries.map(([index]) => index)) + 1;
+			const declaredLength =
+				typeof objectValue.length === 'number' && Number.isFinite(objectValue.length) && objectValue.length >= 0
+					? Math.floor(objectValue.length)
+					: maxIndexedLength;
+			const length = Math.max(maxIndexedLength, declaredLength);
+			const bytes = new Uint8Array(length);
+			for (const [index, byte] of numericEntries) {
+				bytes[index] = byte;
+			}
+			return bytes;
+		}
+	}
+
+	return undefined;
+}
 
 /**
  * An implementation of a local disk file system provider
@@ -93,9 +197,16 @@ export class DiskFileSystemProviderClient extends Disposable implements
 	//#region File Reading/Writing
 
 	async readFile(resource: URI, opts?: IFileAtomicReadOptions): Promise<Uint8Array> {
-		const { buffer } = await this.channel.call('readFile', [resource, opts]) as VSBuffer;
+		const result = await this.channel.call('readFile', [resource, opts]) as unknown;
+		const normalized = normalizeReadFileBytes(result);
+		if (normalized) {
+			return normalized;
+		}
 
-		return buffer;
+		throw createFileSystemProviderError(
+			`Invalid readFile payload for ${resource.toString()}`,
+			FileSystemProviderErrorCode.Unknown
+		);
 	}
 
 	readFileStream(resource: URI, opts: IFileReadStreamOptions, token: CancellationToken): ReadableStreamEvents<Uint8Array> {

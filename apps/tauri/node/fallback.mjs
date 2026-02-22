@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import { stdin, stdout, stderr, env, pid, platform, arch } from 'node:process';
+import path from 'node:path';
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -80,6 +82,172 @@ function parseUrl(value) {
   return undefined;
 }
 
+function toFsPath(value) {
+  if (typeof value === 'string') {
+    if (value.startsWith('file://')) {
+      try {
+        return decodeURIComponent(new URL(value).pathname);
+      } catch {
+        return value.replace(/^file:\/\//, '');
+      }
+    }
+    return value;
+  }
+
+  if (value && typeof value === 'object') {
+    if (typeof value.fsPath === 'string' && value.fsPath.length > 0) {
+      return value.fsPath;
+    }
+    if (typeof value.path === 'string' && value.path.length > 0) {
+      return value.path;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeFsPath(fsPath) {
+  if (!fsPath) {
+    return fsPath;
+  }
+
+  if (platform === 'win32' && /^\/[a-zA-Z]:/.test(fsPath)) {
+    return fsPath.slice(1);
+  }
+
+  return fsPath;
+}
+
+function fileTypeFromStats(stats) {
+  const isDirectory = typeof stats.isDirectory === 'function' && stats.isDirectory();
+  const isSymbolicLink = typeof stats.isSymbolicLink === 'function' && stats.isSymbolicLink();
+  const base = isDirectory ? 2 : 1;
+  return isSymbolicLink ? (base | 64) : base;
+}
+
+function decodeByteArray(candidate) {
+  if (candidate instanceof Uint8Array) {
+    return candidate;
+  }
+
+  if (Array.isArray(candidate)) {
+    return Uint8Array.from(candidate.map(value => Number(value) & 0xff));
+  }
+
+  if (candidate && typeof candidate === 'object') {
+    if (Array.isArray(candidate.data)) {
+      return Uint8Array.from(candidate.data.map(value => Number(value) & 0xff));
+    }
+    if (candidate.buffer) {
+      return decodeByteArray(candidate.buffer);
+    }
+  }
+
+  return undefined;
+}
+
+function ensureFsPath(value, method) {
+  const fsPath = normalizeFsPath(toFsPath(value));
+  if (!fsPath) {
+    throw new Error(`${method} expected file URI/path argument`);
+  }
+  return fsPath;
+}
+
+async function localFilesystemFallback(method, args) {
+  switch (method) {
+    case 'stat': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.stat');
+      const stats = await fs.lstat(fsPath);
+      return {
+        type: fileTypeFromStats(stats),
+        ctime: Math.floor(stats.ctimeMs || 0),
+        mtime: Math.floor(stats.mtimeMs || 0),
+        size: Number(stats.size || 0)
+      };
+    }
+    case 'realpath': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.realpath');
+      const resolved = await fs.realpath(fsPath);
+      return {
+        scheme: 'file',
+        authority: '',
+        path: resolved.replace(/\\/g, '/')
+      };
+    }
+    case 'readdir': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.readdir');
+      const entries = await fs.readdir(fsPath, { withFileTypes: true });
+      return entries.map(entry => {
+        const baseType = entry.isDirectory() ? 2 : 1;
+        const fileType = entry.isSymbolicLink() ? (baseType | 64) : baseType;
+        return [entry.name, fileType];
+      });
+    }
+    case 'readFile': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.readFile');
+      const bytes = await fs.readFile(fsPath);
+      return { buffer: Array.from(bytes) };
+    }
+    case 'writeFile': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.writeFile');
+      const rawContent = args[1];
+      const content = decodeByteArray(rawContent);
+      if (!content) {
+        throw new Error('localFilesystem.writeFile expected byte content');
+      }
+
+      await fs.mkdir(path.dirname(fsPath), { recursive: true });
+      await fs.writeFile(fsPath, content);
+      return null;
+    }
+    case 'mkdir': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.mkdir');
+      await fs.mkdir(fsPath, { recursive: true });
+      return null;
+    }
+    case 'delete': {
+      const fsPath = ensureFsPath(args[0], 'localFilesystem.delete');
+      const opts = args[1] && typeof args[1] === 'object' ? args[1] : {};
+      const recursive = opts.recursive === true;
+      await fs.rm(fsPath, { recursive, force: true });
+      return null;
+    }
+    case 'rename': {
+      const source = ensureFsPath(args[0], 'localFilesystem.rename');
+      const target = ensureFsPath(args[1], 'localFilesystem.rename');
+      const opts = args[2] && typeof args[2] === 'object' ? args[2] : {};
+      const overwrite = opts.overwrite === true;
+
+      if (overwrite) {
+        await fs.rm(target, { recursive: true, force: true });
+      }
+
+      await fs.rename(source, target);
+      return null;
+    }
+    case 'copy': {
+      const source = ensureFsPath(args[0], 'localFilesystem.copy');
+      const target = ensureFsPath(args[1], 'localFilesystem.copy');
+      const opts = args[2] && typeof args[2] === 'object' ? args[2] : {};
+      const overwrite = opts.overwrite === true;
+      await fs.cp(source, target, { recursive: true, force: overwrite, errorOnExist: !overwrite });
+      return null;
+    }
+    case 'cloneFile': {
+      const source = ensureFsPath(args[0], 'localFilesystem.cloneFile');
+      const target = ensureFsPath(args[1], 'localFilesystem.cloneFile');
+      await fs.copyFile(source, target);
+      return null;
+    }
+    case 'watch':
+    case 'unwatch':
+      return null;
+    default:
+      return null;
+  }
+}
+
 function defaultByMethodName(method) {
   if (method.startsWith('is') || method.startsWith('has')) {
     return false;
@@ -102,7 +270,7 @@ function capabilityFallback(domain, method, params) {
   };
 }
 
-function channelFallback(channel, method, args) {
+async function channelFallback(channel, method, args) {
   switch (channel) {
     case 'logger':
       if (method === 'getRegisteredLoggers') {
@@ -264,6 +432,9 @@ function channelFallback(channel, method, args) {
       }
     }
 
+    case 'localFilesystem':
+      return localFilesystemFallback(method, args);
+
     default:
       return defaultByMethodName(method);
   }
@@ -277,7 +448,7 @@ async function main() {
 
     const result =
       request.kind === 'channel'
-        ? channelFallback(request.channel, request.method, request.args)
+        ? await channelFallback(request.channel, request.method, request.args)
         : capabilityFallback(request.domain, request.method, request.params);
 
     writeJson({ ok: true, result });

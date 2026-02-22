@@ -37,5 +37,6 @@ test/componentFixtures/.screenshots/*
 /apps/tauri/ui/out
 /apps/tauri/ui/.cache/
 /apps/tauri/logs/
+/.vscode-tauri/
 /tauri-fallback-telemetry.md
 /tauri-upstream-sync-report.md

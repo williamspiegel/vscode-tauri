@@ -10,8 +10,10 @@ use crate::capabilities::window::{RustPrimaryWindowCapability, WindowCapability}
 use crate::node_fallback::NodeFallbackClient;
 use crate::protocol::CapabilityDomain;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 use tauri::Emitter;
 
 #[derive(Clone)]
@@ -65,7 +67,10 @@ impl CapabilityRouter {
             return Ok(value);
         }
 
-        let fallback_result = self.fallback.invoke_capability(domain, method, params).await?;
+        let fallback_result = self
+            .fallback
+            .invoke_capability(domain, method, params)
+            .await?;
         let metric_key = format!("capability:{}:{method}", domain.as_str());
         let fallback_count = self
             .fallback
@@ -133,10 +138,272 @@ impl CapabilityRouter {
         let arg0 = first_arg(args);
 
         match channel {
+            "localFilesystem" => match method {
+                "stat" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.stat expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.stat expected file URI/path argument".to_string()
+                    })?;
+                    let metadata = fs::symlink_metadata(&fs_path).map_err(|error| {
+                        format!(
+                            "localFilesystem.stat failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+
+                    Ok(Some(json!({
+                        "type": file_type_from_metadata(&metadata),
+                        "ctime": to_epoch_millis(metadata.created().ok().or_else(|| metadata.modified().ok())),
+                        "mtime": to_epoch_millis(metadata.modified().ok()),
+                        "size": metadata.len()
+                    })))
+                }
+                "realpath" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.realpath expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.realpath expected file URI/path argument".to_string()
+                    })?;
+                    let resolved = fs::canonicalize(&fs_path).map_err(|error| {
+                        format!(
+                            "localFilesystem.realpath failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+
+                    Ok(Some(json!({
+                        "scheme": "file",
+                        "authority": "",
+                        "path": to_forward_slash_path(&resolved)
+                    })))
+                }
+                "readdir" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.readdir expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.readdir expected file URI/path argument".to_string()
+                    })?;
+                    let entries = fs::read_dir(&fs_path).map_err(|error| {
+                        format!(
+                            "localFilesystem.readdir failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+
+                    let mut out = Vec::new();
+                    for entry in entries {
+                        let entry = entry.map_err(|error| {
+                            format!(
+                                "localFilesystem.readdir failed for {}: {error}",
+                                fs_path.display()
+                            )
+                        })?;
+                        let path = entry.path();
+                        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                            format!(
+                                "localFilesystem.readdir failed for {}: {error}",
+                                path.display()
+                            )
+                        })?;
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        out.push(json!([name, file_type_from_metadata(&metadata)]));
+                    }
+
+                    Ok(Some(Value::Array(out)))
+                }
+                "readFile" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.readFile expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.readFile expected file URI/path argument".to_string()
+                    })?;
+                    let bytes = fs::read(&fs_path).map_err(|error| {
+                        format!(
+                            "localFilesystem.readFile failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+
+                    Ok(Some(json!({
+                        "buffer": bytes,
+                        "base64": base64_encode_bytes(&bytes)
+                    })))
+                }
+                "writeFile" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.writeFile expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.writeFile expected file URI/path argument".to_string()
+                    })?;
+                    let content = nth_arg(args, 1).ok_or_else(|| {
+                        "localFilesystem.writeFile expected content argument".to_string()
+                    })?;
+                    let bytes = decode_byte_array(content).ok_or_else(|| {
+                        "localFilesystem.writeFile expected byte content".to_string()
+                    })?;
+
+                    if let Some(parent) = fs_path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            fs::create_dir_all(parent).map_err(|error| {
+                                format!(
+                                    "localFilesystem.writeFile failed to create parent {}: {error}",
+                                    parent.display()
+                                )
+                            })?;
+                        }
+                    }
+
+                    fs::write(&fs_path, &bytes).map_err(|error| {
+                        format!(
+                            "localFilesystem.writeFile failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+
+                    Ok(Some(Value::Null))
+                }
+                "mkdir" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.mkdir expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.mkdir expected file URI/path argument".to_string()
+                    })?;
+                    fs::create_dir_all(&fs_path).map_err(|error| {
+                        format!(
+                            "localFilesystem.mkdir failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+                    Ok(Some(Value::Null))
+                }
+                "delete" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.delete expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.delete expected file URI/path argument".to_string()
+                    })?;
+                    let recursive = nth_arg(args, 1)
+                        .and_then(Value::as_object)
+                        .and_then(|opts| opts.get("recursive"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    remove_path_force(&fs_path, recursive).map_err(|error| {
+                        format!(
+                            "localFilesystem.delete failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+                    Ok(Some(Value::Null))
+                }
+                "rename" => {
+                    let source = nth_arg(args, 0)
+                        .and_then(extract_fs_path)
+                        .ok_or_else(|| "localFilesystem.rename expected source path".to_string())?;
+                    let target = nth_arg(args, 1)
+                        .and_then(extract_fs_path)
+                        .ok_or_else(|| "localFilesystem.rename expected target path".to_string())?;
+                    let overwrite = nth_arg(args, 2)
+                        .and_then(Value::as_object)
+                        .and_then(|opts| opts.get("overwrite"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    if overwrite {
+                        remove_path_force(&target, true).map_err(|error| {
+                            format!(
+                                "localFilesystem.rename could not remove existing target {}: {error}",
+                                target.display()
+                            )
+                        })?;
+                    }
+
+                    if let Some(parent) = target.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            fs::create_dir_all(parent).map_err(|error| {
+                                format!(
+                                    "localFilesystem.rename failed to create parent {}: {error}",
+                                    parent.display()
+                                )
+                            })?;
+                        }
+                    }
+
+                    fs::rename(&source, &target).map_err(|error| {
+                        format!(
+                            "localFilesystem.rename failed from {} to {}: {error}",
+                            source.display(),
+                            target.display()
+                        )
+                    })?;
+                    Ok(Some(Value::Null))
+                }
+                "copy" => {
+                    let source = nth_arg(args, 0)
+                        .and_then(extract_fs_path)
+                        .ok_or_else(|| "localFilesystem.copy expected source path".to_string())?;
+                    let target = nth_arg(args, 1)
+                        .and_then(extract_fs_path)
+                        .ok_or_else(|| "localFilesystem.copy expected target path".to_string())?;
+                    let overwrite = nth_arg(args, 2)
+                        .and_then(Value::as_object)
+                        .and_then(|opts| opts.get("overwrite"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    copy_path_recursive(&source, &target, overwrite).map_err(|error| {
+                        format!(
+                            "localFilesystem.copy failed from {} to {}: {error}",
+                            source.display(),
+                            target.display()
+                        )
+                    })?;
+                    Ok(Some(Value::Null))
+                }
+                "cloneFile" => {
+                    let source = nth_arg(args, 0).and_then(extract_fs_path).ok_or_else(|| {
+                        "localFilesystem.cloneFile expected source path".to_string()
+                    })?;
+                    let target = nth_arg(args, 1).and_then(extract_fs_path).ok_or_else(|| {
+                        "localFilesystem.cloneFile expected target path".to_string()
+                    })?;
+
+                    if let Some(parent) = target.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            fs::create_dir_all(parent).map_err(|error| {
+                                format!(
+                                    "localFilesystem.cloneFile failed to create parent {}: {error}",
+                                    parent.display()
+                                )
+                            })?;
+                        }
+                    }
+
+                    fs::copy(&source, &target).map_err(|error| {
+                        format!(
+                            "localFilesystem.cloneFile failed from {} to {}: {error}",
+                            source.display(),
+                            target.display()
+                        )
+                    })?;
+                    Ok(Some(Value::Null))
+                }
+                _ => Ok(None),
+            },
             "nativeHost" => match method {
                 "notifyReady" => Ok(Some(Value::Null)),
                 "focusWindow" => {
-                    self.window.invoke("window.focus", &json!({ "target": "main" })).await?;
+                    self.window
+                        .invoke("window.focus", &json!({ "target": "main" }))
+                        .await?;
                     Ok(Some(Value::Null))
                 }
                 "isFullScreen" => {
@@ -145,12 +412,10 @@ impl CapabilityRouter {
                         .invoke("window.getState", &json!({ "target": "main" }))
                         .await?
                         .unwrap_or(json!({}));
-                    Ok(Some(json!(
-                        state
-                            .get("fullscreen")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                    )))
+                    Ok(Some(json!(state
+                        .get("fullscreen")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false))))
                 }
                 "toggleFullScreen" => {
                     let state = self
@@ -286,7 +551,10 @@ impl CapabilityRouter {
                         .invoke("clipboard.readText", &json!({}))
                         .await?
                         .unwrap_or_else(|| json!({ "text": "" }));
-                    Ok(Some(json!(result.get("text").and_then(Value::as_str).unwrap_or(""))))
+                    Ok(Some(json!(result
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""))))
                 }
                 "writeClipboardText" => {
                     if let Some(text) = extract_string_arg(arg0) {
@@ -356,6 +624,10 @@ fn first_arg(args: &Value) -> Option<&Value> {
     args.as_array().and_then(|items| items.first())
 }
 
+fn nth_arg(args: &Value, index: usize) -> Option<&Value> {
+    args.as_array().and_then(|items| items.get(index))
+}
+
 fn extract_string_arg(value: Option<&Value>) -> Option<String> {
     let Some(value) = value else {
         return None;
@@ -371,6 +643,221 @@ fn extract_string_arg(value: Option<&Value>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn extract_fs_path(value: &Value) -> Option<PathBuf> {
+    if let Some(text) = value.as_str() {
+        return Some(normalize_file_uri_path(text));
+    }
+
+    let object = value.as_object()?;
+    if let Some(fs_path) = object.get("fsPath").and_then(Value::as_str) {
+        return Some(PathBuf::from(fs_path));
+    }
+    if let Some(path) = object.get("path").and_then(Value::as_str) {
+        return Some(PathBuf::from(path));
+    }
+
+    None
+}
+
+fn normalize_file_uri_path(raw: &str) -> PathBuf {
+    if let Some(stripped) = raw.strip_prefix("file://") {
+        return PathBuf::from(stripped);
+    }
+    PathBuf::from(raw)
+}
+
+fn to_forward_slash_path(path: &Path) -> String {
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        normalized.push('/');
+    }
+    if !normalized.starts_with('/') {
+        normalized.insert(0, '/');
+    }
+    normalized
+}
+
+fn to_epoch_millis(time: Option<std::time::SystemTime>) -> u64 {
+    time.and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn file_type_from_metadata(metadata: &fs::Metadata) -> u32 {
+    let file_type = metadata.file_type();
+    let base = if file_type.is_dir() { 2 } else { 1 };
+    if file_type.is_symlink() {
+        base | 64
+    } else {
+        base
+    }
+}
+
+fn value_to_u8(value: &Value) -> Option<u8> {
+    if let Some(number) = value.as_u64() {
+        return Some((number & 0xff) as u8);
+    }
+    if let Some(number) = value.as_i64() {
+        return Some((number as i128 & 0xff) as u8);
+    }
+    if let Some(number) = value.as_f64() {
+        if number.is_finite() {
+            return Some((number as i128 & 0xff) as u8);
+        }
+    }
+    if let Some(text) = value.as_str() {
+        if let Ok(parsed) = text.parse::<i128>() {
+            return Some((parsed & 0xff) as u8);
+        }
+    }
+    None
+}
+
+fn decode_byte_array(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(value_to_u8(item)?);
+            }
+            Some(out)
+        }
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("Buffer") {
+                if let Some(data) = object.get("data") {
+                    return decode_byte_array(data);
+                }
+            }
+
+            if let Some(data) = object.get("data") {
+                if let Some(decoded) = decode_byte_array(data) {
+                    return Some(decoded);
+                }
+            }
+
+            if let Some(buffer) = object.get("buffer") {
+                if let Some(mut decoded) = decode_byte_array(buffer) {
+                    if let Some(byte_length) = object.get("byteLength").and_then(Value::as_u64) {
+                        decoded.truncate(byte_length as usize);
+                    }
+                    return Some(decoded);
+                }
+            }
+
+            let mut indexed = Vec::<(usize, u8)>::new();
+            for (key, value) in object {
+                if let Ok(index) = key.parse::<usize>() {
+                    if let Some(byte) = value_to_u8(value) {
+                        indexed.push((index, byte));
+                    }
+                }
+            }
+
+            if indexed.is_empty() {
+                return None;
+            }
+
+            indexed.sort_by_key(|(index, _)| *index);
+            let max_index = indexed.last().map(|(index, _)| *index).unwrap_or(0);
+            let mut out = vec![0u8; max_index + 1];
+            for (index, value) in indexed {
+                out[index] = value;
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn base64_encode_bytes(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut index = 0;
+    while index < input.len() {
+        let a = input[index];
+        let b = if index + 1 < input.len() {
+            input[index + 1]
+        } else {
+            0
+        };
+        let c = if index + 2 < input.len() {
+            input[index + 2]
+        } else {
+            0
+        };
+
+        let triple = ((a as u32) << 16) | ((b as u32) << 8) | (c as u32);
+        output.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        output.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+
+        if index + 1 < input.len() {
+            output.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            output.push('=');
+        }
+
+        if index + 2 < input.len() {
+            output.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            output.push('=');
+        }
+
+        index += 3;
+    }
+
+    output
+}
+
+fn remove_path_force(path: &Path, recursive: bool) -> std::io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)
+    } else if recursive {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_dir(path)
+    }
+}
+
+fn copy_path_recursive(source: &Path, target: &Path, overwrite: bool) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+
+    if target.exists() {
+        if !overwrite {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("target {} already exists", target.display()),
+            ));
+        }
+        remove_path_force(target, true)?;
+    }
+
+    if metadata.is_dir() {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = target.join(entry.file_name());
+            copy_path_recursive(&from, &to, false)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    fs::copy(source, target)?;
+    Ok(())
+}
+
 fn extract_url_from_any(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_string());
@@ -382,7 +869,10 @@ fn extract_url_from_any(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     let path = value.get("path").and_then(Value::as_str).unwrap_or("/");
-    let query = value.get("query").and_then(Value::as_str).unwrap_or_default();
+    let query = value
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let fragment = value
         .get("fragment")
         .and_then(Value::as_str)

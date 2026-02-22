@@ -1,5 +1,7 @@
 import { HostClient } from './hostClient';
 
+const ENABLE_CHANNEL_TRACE = new URLSearchParams(window.location.search).get('hostDebug') === '1';
+
 export interface DesktopChannelRegistry {
   readonly channels: readonly string[];
   has(channel: string): boolean;
@@ -106,6 +108,140 @@ function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function toUint8Array(value: unknown): Uint8Array | undefined {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value.map(item => Number(item) & 0xff));
+  }
+
+  const objectValue = asRecord(value);
+  if (typeof objectValue.type === 'string' && objectValue.type === 'Buffer' && Array.isArray(objectValue.data)) {
+    return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
+  }
+
+  if (Array.isArray(objectValue.data)) {
+    return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
+  }
+
+  const hasNumericKeys = Object.keys(objectValue).some(key => /^\d+$/.test(key));
+  if (
+    hasNumericKeys &&
+    typeof objectValue.length === 'number' &&
+    Number.isFinite(objectValue.length) &&
+    objectValue.length >= 0
+  ) {
+    const asArrayLike = Array.from({ length: Math.floor(objectValue.length) }, (_, index) => {
+      const candidate = objectValue[String(index)];
+      if (typeof candidate !== 'number') {
+        return 0;
+      }
+      return Number(candidate) & 0xff;
+    });
+    return Uint8Array.from(asArrayLike);
+  }
+
+  if (objectValue.buffer !== undefined) {
+    return toUint8Array(objectValue.buffer);
+  }
+
+  return undefined;
+}
+
+function decodeBase64ToUint8Array(value: unknown): Uint8Array | undefined {
+  if (typeof value !== 'string' || value.length === 0) {
+    return undefined;
+  }
+
+  try {
+    const binary = atob(value);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i) & 0xff;
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+let vsBufferWrapPromise: Promise<((bytes: Uint8Array) => unknown) | undefined> | undefined;
+
+async function toVsBuffer(bytes: Uint8Array): Promise<unknown> {
+  if (!vsBufferWrapPromise) {
+    vsBufferWrapPromise = import(
+      /* @vite-ignore */ '/out/vs/base/common/buffer.js'
+    )
+      .then(moduleValue => {
+        const candidate = (moduleValue as { VSBuffer?: { wrap?: (input: Uint8Array) => unknown } }).VSBuffer?.wrap;
+        return typeof candidate === 'function' ? candidate : undefined;
+      })
+      .catch(() => undefined);
+  }
+
+  const wrap = await vsBufferWrapPromise;
+  return typeof wrap === 'function' ? wrap(bytes) : bytes;
+}
+
+function normalizeErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error ?? '');
+}
+
+function toFileSystemError(error: unknown): Error {
+  const message = normalizeErrorMessage(error);
+  const fileSystemError = new Error(message);
+  fileSystemError.name = 'Unknown (FileSystemError)';
+
+  if (
+    message.includes('ENOENT') ||
+    message.includes('No such file or directory') ||
+    message.includes('(os error 2)')
+  ) {
+    fileSystemError.name = 'EntryNotFound (FileSystemError)';
+  } else if (
+    message.includes('EEXIST') ||
+    message.includes('File exists') ||
+    message.includes('(os error 17)')
+  ) {
+    fileSystemError.name = 'EntryExists (FileSystemError)';
+  } else if (
+    message.includes('ENOTDIR') ||
+    message.includes('Not a directory') ||
+    message.includes('(os error 20)')
+  ) {
+    fileSystemError.name = 'EntryNotADirectory (FileSystemError)';
+  } else if (
+    message.includes('EISDIR') ||
+    message.includes('Is a directory') ||
+    message.includes('(os error 21)')
+  ) {
+    fileSystemError.name = 'EntryIsADirectory (FileSystemError)';
+  } else if (
+    message.includes('EACCES') ||
+    message.includes('EPERM') ||
+    message.includes('Permission denied') ||
+    message.includes('(os error 13)')
+  ) {
+    fileSystemError.name = 'NoPermissions (FileSystemError)';
+  }
+
+  return fileSystemError;
+}
+
 function inferStatTypeFromArgs(args: unknown[]): number {
   const candidate = asRecord(args[0]);
   const rawPath = typeof candidate.path === 'string' ? candidate.path : '';
@@ -140,6 +276,74 @@ function inferStatTypeFromArgs(args: unknown[]): number {
   }
 
   return last.includes('.') ? 1 : 2;
+}
+
+function createWorkspaceNavigationUrl(key: 'folder' | 'workspace', path: string): string {
+  return `${window.location.origin}${window.location.pathname}?${key}=${encodeURIComponent(path)}`;
+}
+
+function extractPickedPath(result: unknown): string | undefined {
+  const payload = asRecord(result);
+  if (payload.canceled === true) {
+    return undefined;
+  }
+
+  const filePaths = asArray<string>(payload.filePaths).filter((value): value is string => typeof value === 'string');
+  if (filePaths.length > 0) {
+    return filePaths[0];
+  }
+
+  if (typeof payload.filePath === 'string') {
+    return payload.filePath;
+  }
+
+  return undefined;
+}
+
+async function handleNativeHostPickAndOpen(host: HostClient, method: string, args: unknown[]): Promise<null> {
+  const options = asRecord(args[0]);
+  const forceNewWindow = options.forceNewWindow === true;
+  const forceReuseWindow = options.forceReuseWindow === true;
+  const dialogProperties =
+    method === 'pickWorkspaceAndOpen'
+      ? ['openFile', 'createDirectory']
+      : method === 'pickFileFolderAndOpen'
+        ? ['openFile', 'openDirectory', 'createDirectory']
+        : ['openDirectory', 'createDirectory'];
+
+  try {
+    const result = await host.desktopChannelCall('nativeHost', 'showOpenDialog', [
+      {
+        title: method === 'pickWorkspaceAndOpen' ? 'Open Workspace' : 'Open Folder',
+        properties: dialogProperties
+      }
+    ]);
+
+    const pickedPath = extractPickedPath(result);
+    if (!pickedPath) {
+      return null;
+    }
+
+    const key: 'folder' | 'workspace' =
+      method === 'pickWorkspaceAndOpen' || pickedPath.toLowerCase().endsWith('.code-workspace') ? 'workspace' : 'folder';
+    const targetUrl = createWorkspaceNavigationUrl(key, pickedPath);
+
+    if (forceNewWindow && !forceReuseWindow) {
+      const opened = window.open(targetUrl, '_blank', 'toolbar=no');
+      if (!opened) {
+        window.location.href = targetUrl;
+      }
+      return null;
+    }
+
+    window.location.href = targetUrl;
+    return null;
+  } catch (error) {
+    if (ENABLE_CHANNEL_TRACE) {
+      console.warn('[desktop.nativeHost.pickAndOpen.failed]', { method, options, error });
+    }
+    return null;
+  }
 }
 
 const DEFAULT_CALL_RESPONSES = new Map<string, Map<string, DefaultCallHandler>>([
@@ -488,12 +692,65 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
         }
       ],
       ['readdir', result => asArray(result)],
-      ['readFile', result => (asRecord(result).buffer instanceof Uint8Array ? result : { buffer: new Uint8Array(0) })]
+      [
+        'readFile',
+        (result, args) => {
+          const payload = asRecord(result);
+          const decoded =
+            decodeBase64ToUint8Array(payload.base64) ??
+            toUint8Array(payload.buffer) ??
+            toUint8Array(payload.bytes) ??
+            toUint8Array(payload.data) ??
+            toUint8Array(result);
+          if (!decoded) {
+            const arg0 = asRecord(args[0]);
+            const path =
+              (typeof arg0.fsPath === 'string' ? arg0.fsPath : undefined) ??
+              (typeof arg0.path === 'string' ? arg0.path : undefined) ??
+              '';
+            throw toFileSystemError(
+              new Error(
+                `Unable to decode localFilesystem.readFile payload for '${path}' with keys [${Object.keys(payload).join(', ')}]`
+              )
+            );
+          }
+
+          // Keep a legacy-compatible shape (`buffer: number[]`) so existing
+          // DiskFileSystemProviderClient builds can decode without needing
+          // the newer base64-aware normalizer.
+          return Array.from(decoded);
+        }
+      ]
     ])
   ]
 ]);
 
 const EVENT_NORMALIZERS = new Map<string, Map<string, EventNormalizer>>([
+  [
+    'nativeHost',
+    new Map<string, EventNormalizer>([
+      [
+        'onDidChangeWindowAlwaysOnTop',
+        payload => {
+          const event = asRecord(payload);
+          return {
+            windowId: typeof event.windowId === 'number' ? event.windowId : 1,
+            alwaysOnTop: event.alwaysOnTop === true
+          };
+        }
+      ],
+      [
+        'onDidChangeColorScheme',
+        payload => {
+          const event = asRecord(payload);
+          return {
+            dark: event.dark === true,
+            highContrast: event.highContrast === true
+          };
+        }
+      ]
+    ])
+  ],
   [
     'userDataSync',
     new Map<string, EventNormalizer>([
@@ -566,8 +823,22 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
     },
     async call(channel, method, args) {
       const normalized = normalizeArgs(args);
+      if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+        const target = asRecord(normalized[0]);
+        const path =
+          (typeof target.fsPath === 'string' ? target.fsPath : undefined) ??
+          (typeof target.path === 'string' ? target.path : undefined) ??
+          undefined;
+        console.debug('[desktop.fs.call]', { method, path });
+      }
+      if (
+        channel === 'nativeHost' &&
+        (method === 'pickFolderAndOpen' || method === 'pickFileFolderAndOpen' || method === 'pickWorkspaceAndOpen')
+      ) {
+        return handleNativeHostPickAndOpen(host, method, normalized);
+      }
       const normalizeResult = RESULT_NORMALIZERS.get(channel)?.get(method);
-      const fallback = DEFAULT_CALL_RESPONSES.get(channel)?.get(method);
+      const fallback = channel === 'localFilesystem' ? undefined : DEFAULT_CALL_RESPONSES.get(channel)?.get(method);
 
       try {
         const result = await host.desktopChannelCall(channel, method, normalized);
@@ -581,16 +852,48 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           }
         }
 
-        return normalizeResult ? normalizeResult(result, normalized) : result;
+        const normalizedResult = normalizeResult ? normalizeResult(result, normalized) : result;
+        if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+          if (method === 'readFile') {
+            const byteLength =
+              normalizedResult instanceof Uint8Array
+                ? normalizedResult.byteLength
+                : Array.isArray(normalizedResult)
+                  ? normalizedResult.length
+                  : undefined;
+            console.debug('[desktop.fs.result]', { method, byteLength });
+          } else {
+            console.debug('[desktop.fs.result]', { method });
+          }
+        }
+
+        return normalizedResult;
       } catch (error) {
+        if (channel === 'localFilesystem') {
+          if (ENABLE_CHANNEL_TRACE) {
+            const target = asRecord(normalized[0]);
+            const path =
+              (typeof target.fsPath === 'string' ? target.fsPath : undefined) ??
+              (typeof target.path === 'string' ? target.path : undefined) ??
+              undefined;
+            const errorMessage = normalizeErrorMessage(error);
+            console.error('[desktop.fs.error]', { method, path, errorMessage });
+          }
+          throw toFileSystemError(error);
+        }
+
         if (fallback) {
-          console.warn('[desktop.channelCall:fallback-default]', { channel, method, error });
+          if (ENABLE_CHANNEL_TRACE) {
+            console.warn('[desktop.channelCall:fallback-default]', { channel, method, error });
+          }
           const fallbackResult = fallback(normalized);
           return normalizeResult ? normalizeResult(fallbackResult, normalized) : fallbackResult;
         }
 
         if (normalizeResult) {
-          console.warn('[desktop.channelCall:normalized-fallback]', { channel, method, error });
+          if (ENABLE_CHANNEL_TRACE) {
+            console.warn('[desktop.channelCall:normalized-fallback]', { channel, method, error });
+          }
           return normalizeResult(undefined, normalized);
         }
 
@@ -598,6 +901,50 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
       }
     },
     async listen(channel, event, arg, onEvent) {
+      if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+        console.debug('[desktop.fs.listen]', { event });
+      }
+      if (channel === 'localFilesystem' && event === 'readFileStream') {
+        const streamArgs = Array.isArray(arg) ? arg : [];
+        const resource = streamArgs[0];
+        const opts = streamArgs[1];
+        let disposed = false;
+
+        void (async () => {
+          try {
+            const readResult = await this.call(channel, 'readFile', [resource, opts]);
+            if (disposed) {
+              return;
+            }
+
+            const decoded = toUint8Array(readResult);
+            if (!decoded) {
+              throw toFileSystemError(new Error('Unable to normalize readFileStream fallback payload'));
+            }
+
+            onEvent(await toVsBuffer(decoded));
+            if (!disposed) {
+              onEvent('end');
+            }
+
+            if (ENABLE_CHANNEL_TRACE) {
+              console.debug('[desktop.fs.stream-fallback]', { byteLength: decoded.byteLength });
+            }
+          } catch (error) {
+            if (!disposed) {
+              onEvent(toFileSystemError(error));
+            }
+            if (ENABLE_CHANNEL_TRACE) {
+              console.error('[desktop.fs.stream-fallback.error]', { errorMessage: normalizeErrorMessage(error) });
+            }
+          }
+        })();
+
+        return async () => {
+          disposed = true;
+        };
+      }
+
       const normalizeEvent = EVENT_NORMALIZERS.get(channel)?.get(event);
       const normalizeEventByName: EventNormalizer | undefined =
         event === 'onDidChangeStorage'
@@ -628,7 +975,13 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           await stop();
         };
       } catch (error) {
-        console.warn('[desktop.channelListen:noop]', { channel, event, error });
+        if (ENABLE_CHANNEL_TRACE && channel === 'localFilesystem') {
+          const errorMessage = normalizeErrorMessage(error);
+          console.error('[desktop.fs.listen.error]', { event, errorMessage });
+        }
+        if (ENABLE_CHANNEL_TRACE) {
+          console.warn('[desktop.channelListen:noop]', { channel, event, error });
+        }
         return () => {
           return;
         };
