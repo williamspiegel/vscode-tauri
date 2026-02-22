@@ -61,7 +61,9 @@ fn newest_tree_time(root: &Path) -> Option<SystemTime> {
 }
 
 fn modified_time(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).ok().and_then(|metadata| metadata.modified().ok())
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
 }
 
 fn max_time(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<SystemTime> {

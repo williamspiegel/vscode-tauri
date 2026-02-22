@@ -68,14 +68,9 @@ impl FallbackMetrics {
         if let Err(error) = persist_counts(&guard.metrics_path, &guard.counts) {
             eprintln!("Failed to persist fallback metrics: {error}");
         }
-        if let Err(error) = append_event(
-            &guard.events_path,
-            &key,
-            class,
-            domain,
-            method,
-            next_count,
-        ) {
+        if let Err(error) =
+            append_event(&guard.events_path, &key, class, domain, method, next_count)
+        {
             eprintln!("Failed to append fallback event: {error}");
         }
 
@@ -197,11 +192,10 @@ fn append_event(
 fn default_metrics_paths() -> (PathBuf, PathBuf) {
     if let Ok(raw_path) = std::env::var("VSCODE_TAURI_FALLBACK_METRICS_PATH") {
         let metrics_path = PathBuf::from(raw_path);
-        let events_path =
-            std::env::var("VSCODE_TAURI_FALLBACK_EVENTS_PATH").map_or_else(
-                |_| metrics_path.with_extension("events.jsonl"),
-                PathBuf::from,
-            );
+        let events_path = std::env::var("VSCODE_TAURI_FALLBACK_EVENTS_PATH").map_or_else(
+            |_| metrics_path.with_extension("events.jsonl"),
+            PathBuf::from,
+        );
         return (metrics_path, events_path);
     }
 
@@ -234,7 +228,10 @@ fn default_metrics_paths() -> (PathBuf, PathBuf) {
         .join(".vscode-tauri")
         .join("logs")
         .join("fallback-metrics.json");
-    (metrics_path.clone(), metrics_path.with_extension("events.jsonl"))
+    (
+        metrics_path.clone(),
+        metrics_path.with_extension("events.jsonl"),
+    )
 }
 
 fn epoch_millis() -> u64 {

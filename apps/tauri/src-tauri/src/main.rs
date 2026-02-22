@@ -154,7 +154,10 @@ async fn host_invoke(
     }
 
     if request.method == "host.fallbackCounts" {
-        return Ok(ok_response(request.id, json!(state.router.fallback_counts())));
+        return Ok(ok_response(
+            request.id,
+            json!(state.router.fallback_counts()),
+        ));
     }
 
     if request.method == "host.cssModules" {
@@ -195,7 +198,11 @@ async fn host_invoke(
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new()));
 
-        return match state.router.dispatch_channel(&channel, &method, &args).await {
+        return match state
+            .router
+            .dispatch_channel(&channel, &method, &args)
+            .await
+        {
             Ok(value) => Ok(ok_response(request.id, value)),
             Err(error) => Ok(error_response(request.id, 1003, error)),
         };
@@ -224,9 +231,10 @@ async fn host_invoke(
         let arg = object.get("arg").cloned().unwrap_or(Value::Null);
 
         return match state.register_subscription(channel, event, arg) {
-            Ok(subscription_id) => {
-                Ok(ok_response(request.id, json!({ "subscriptionId": subscription_id })))
-            }
+            Ok(subscription_id) => Ok(ok_response(
+                request.id,
+                json!({ "subscriptionId": subscription_id }),
+            )),
             Err(error) => Ok(error_response(request.id, -32603, error)),
         };
     }
@@ -253,7 +261,11 @@ async fn host_invoke(
         };
     }
 
-    match state.router.dispatch(&request.method, &request.params).await {
+    match state
+        .router
+        .dispatch(&request.method, &request.params)
+        .await
+    {
         Ok(result) => Ok(ok_response(request.id, result)),
         Err(error) => Ok(error_response(request.id, 1003, error)),
     }
@@ -400,14 +412,15 @@ fn file_uri_components(path: &Path) -> Value {
 
 fn read_nls_messages(repo_root: &Path) -> Result<Vec<String>, String> {
     let path = repo_root.join("out/nls.messages.json");
-    let bytes = fs::read(&path)
-        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(&path).map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
     serde_json::from_slice::<Vec<String>>(&bytes)
         .map_err(|error| format!("Failed to parse {}: {error}", path.display()))
 }
 
 fn read_json_file(path: &Path) -> Result<Value, String> {
-    let bytes = fs::read(path).map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
     serde_json::from_slice::<Value>(&bytes)
         .map_err(|error| format!("Failed to parse {}: {error}", path.display()))
 }
@@ -562,9 +575,8 @@ fn is_stale_manifest(
 
 fn main() {
     let fallback_script = PathBuf::from("../node/fallback.mjs");
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-    );
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
     let repo_root = manifest_dir
         .join("../../..")
         .canonicalize()

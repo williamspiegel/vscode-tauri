@@ -10,9 +10,12 @@ use crate::capabilities::window::{RustPrimaryWindowCapability, WindowCapability}
 use crate::node_fallback::NodeFallbackClient;
 use crate::protocol::CapabilityDomain;
 use serde_json::{json, Value};
-use std::fs;
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::Emitter;
 
@@ -27,6 +30,8 @@ pub struct CapabilityRouter {
     power: Arc<dyn PowerCapability>,
     os: Arc<dyn OsCapability>,
     update: Arc<dyn UpdateCapability>,
+    local_file_handles: Arc<Mutex<HashMap<u64, File>>>,
+    next_local_file_handle: Arc<AtomicU64>,
     fallback: NodeFallbackClient,
 }
 
@@ -43,6 +48,8 @@ impl CapabilityRouter {
             power: Arc::new(RustPrimaryPowerCapability::new()),
             os: Arc::new(RustPrimaryOsCapability),
             update: Arc::new(RustPrimaryUpdateCapability::new()),
+            local_file_handles: Arc::new(Mutex::new(HashMap::new())),
+            next_local_file_handle: Arc::new(AtomicU64::new(1)),
             fallback: NodeFallbackClient::new(fallback_script, metrics),
         }
     }
@@ -106,6 +113,10 @@ impl CapabilityRouter {
             return Ok(result);
         }
 
+        if let Some(result) = dispatch_channel_rust_default(channel, method, args) {
+            return Ok(result);
+        }
+
         let fallback_result = self.fallback.invoke_channel(channel, method, args).await?;
         let metric_key = format!("channel:{channel}:{method}");
         let fallback_count = self
@@ -138,6 +149,121 @@ impl CapabilityRouter {
         let arg0 = first_arg(args);
 
         match channel {
+            "logger" => match method {
+                "getRegisteredLoggers" => Ok(Some(json!([]))),
+                "createLogger" | "log" | "consoleLog" | "registerLogger" | "deregisterLogger"
+                | "setLogLevel" | "setVisibility" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "storage" => match method {
+                "getItems" => Ok(Some(json!([]))),
+                "isUsed" => Ok(Some(json!(false))),
+                "updateItems" | "optimize" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "policy" => match method {
+                "updatePolicyDefinitions" => Ok(Some(json!({}))),
+                _ => Ok(None),
+            },
+            "sign" => match method {
+                "sign" => Ok(Some(json!(extract_string_arg(arg0).unwrap_or_default()))),
+                "createNewMessage" => {
+                    let data = extract_string_arg(arg0).unwrap_or_default();
+                    let id = stable_short_hex_id(&data);
+                    Ok(Some(json!({ "id": id, "data": data })))
+                }
+                "validate" => Ok(Some(json!(true))),
+                _ => Ok(None),
+            },
+            "userDataProfiles" => match method {
+                "createNamedProfile" => {
+                    let name = extract_string_arg(arg0).unwrap_or_else(|| "Named".to_string());
+                    Ok(Some(fallback_user_data_profile("named", &name)))
+                }
+                "createProfile" => {
+                    let id = extract_string_arg(nth_arg(args, 0))
+                        .unwrap_or_else(|| "profile".to_string());
+                    let name = extract_string_arg(nth_arg(args, 1))
+                        .unwrap_or_else(|| "Profile".to_string());
+                    Ok(Some(fallback_user_data_profile(&id, &name)))
+                }
+                "createTransientProfile" => {
+                    Ok(Some(fallback_user_data_profile("transient", "Transient")))
+                }
+                "updateProfile" => {
+                    if let Some(profile) = nth_arg(args, 0) {
+                        if profile.is_object() {
+                            return Ok(Some(profile.clone()));
+                        }
+                    }
+                    Ok(Some(fallback_user_data_profile("updated", "Updated")))
+                }
+                "removeProfile"
+                | "setProfileForWorkspace"
+                | "resetWorkspaces"
+                | "cleanUp"
+                | "cleanUpTransientProfiles" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "workspaces" => match method {
+                "getRecentlyOpened" => Ok(Some(json!({ "workspaces": [], "files": [] }))),
+                "getDirtyWorkspaces" => Ok(Some(json!([]))),
+                "getWorkspaceIdentifier" => {
+                    Ok(Some(fallback_workspace_identifier("tauri-existing")))
+                }
+                "createUntitledWorkspace" => {
+                    Ok(Some(fallback_workspace_identifier("tauri-untitled")))
+                }
+                "enterWorkspace" => Ok(Some(
+                    json!({ "workspace": fallback_workspace_identifier("tauri-entered") }),
+                )),
+                "addRecentlyOpened"
+                | "removeRecentlyOpened"
+                | "clearRecentlyOpened"
+                | "deleteUntitledWorkspace" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "keyboardLayout" => match method {
+                "getKeyboardLayoutData" => Ok(Some(json!({
+                    "keyboardLayoutInfo": {
+                        "id": "tauri-us",
+                        "lang": "en",
+                        "layout": "US"
+                    },
+                    "keyboardMapping": {}
+                }))),
+                _ => Ok(None),
+            },
+            "extensionHostStarter" => match method {
+                "createExtensionHost" => Ok(Some(json!({ "id": "tauri-extension-host" }))),
+                "start" => Ok(Some(json!({ "pid": Value::Null }))),
+                "enableInspectPort" => Ok(Some(json!(false))),
+                "kill" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "externalTerminal" => match method {
+                "openTerminal" => Ok(Some(Value::Null)),
+                "runInTerminal" => Ok(Some(Value::Null)),
+                "getDefaultTerminalForPlatforms" => Ok(Some(json!({
+                    "windows": "cmd.exe",
+                    "linux": "xterm",
+                    "osx": "Terminal.app"
+                }))),
+                _ => Ok(None),
+            },
+            "localPty" => match method {
+                "getPerformanceMarks" | "getLatency" | "getProfiles" => Ok(Some(json!([]))),
+                "getDefaultSystemShell" => Ok(Some(json!(
+                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+                ))),
+                "getEnvironment" | "getShellEnvironment" => Ok(Some(json!({}))),
+                "getTerminalLayoutInfo" | "requestDetachInstance" => Ok(Some(Value::Null)),
+                "setTerminalLayoutInfo"
+                | "reduceConnectionGraceTime"
+                | "persistTerminalState"
+                | "acceptDetachInstanceReply" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
             "localFilesystem" => match method {
                 "stat" => {
                     let resource = nth_arg(args, 0).ok_or_else(|| {
@@ -233,6 +359,154 @@ impl CapabilityRouter {
                         "buffer": bytes,
                         "base64": base64_encode_bytes(&bytes)
                     })))
+                }
+                "open" => {
+                    let resource = nth_arg(args, 0).ok_or_else(|| {
+                        "localFilesystem.open expected resource argument".to_string()
+                    })?;
+                    let fs_path = extract_fs_path(resource).ok_or_else(|| {
+                        "localFilesystem.open expected file URI/path argument".to_string()
+                    })?;
+                    let options = nth_arg(args, 1).and_then(Value::as_object);
+                    let create = options
+                        .and_then(|value| value.get("create"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let append = options
+                        .and_then(|value| value.get("append"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    let mut open_options = OpenOptions::new();
+                    if create {
+                        open_options.create(true);
+                        if append {
+                            open_options.append(true);
+                        } else {
+                            open_options.write(true).truncate(true);
+                        }
+                    } else {
+                        open_options.read(true);
+                    }
+
+                    let file = open_options.open(&fs_path).map_err(|error| {
+                        format!(
+                            "localFilesystem.open failed for {}: {error}",
+                            fs_path.display()
+                        )
+                    })?;
+                    let fd = self.next_local_file_handle.fetch_add(1, Ordering::Relaxed);
+                    let mut handles = self.local_file_handles.lock().map_err(|_| {
+                        "localFilesystem.open could not lock file handles".to_string()
+                    })?;
+                    handles.insert(fd, file);
+
+                    Ok(Some(json!(fd)))
+                }
+                "close" => {
+                    let fd = parse_u64_arg(
+                        nth_arg(args, 0),
+                        "localFilesystem.close expected file descriptor argument",
+                    )?;
+                    let mut handles = self.local_file_handles.lock().map_err(|_| {
+                        "localFilesystem.close could not lock file handles".to_string()
+                    })?;
+                    if handles.remove(&fd).is_none() {
+                        return Err(format!(
+                            "localFilesystem.close failed: unknown file descriptor {fd}"
+                        ));
+                    }
+                    Ok(Some(Value::Null))
+                }
+                "read" => {
+                    let fd = parse_u64_arg(
+                        nth_arg(args, 0),
+                        "localFilesystem.read expected file descriptor argument",
+                    )?;
+                    let pos = parse_u64_arg(
+                        nth_arg(args, 1),
+                        "localFilesystem.read expected position argument",
+                    )?;
+                    let length = parse_usize_arg(
+                        nth_arg(args, 2),
+                        "localFilesystem.read expected length argument",
+                    )?;
+
+                    let mut handles = self.local_file_handles.lock().map_err(|_| {
+                        "localFilesystem.read could not lock file handles".to_string()
+                    })?;
+                    let file = handles.get_mut(&fd).ok_or_else(|| {
+                        format!("localFilesystem.read failed: unknown file descriptor {fd}")
+                    })?;
+                    file.seek(SeekFrom::Start(pos)).map_err(|error| {
+                        format!("localFilesystem.read seek failed for descriptor {fd}: {error}")
+                    })?;
+
+                    let mut buffer = vec![0u8; length];
+                    let bytes_read = file.read(&mut buffer).map_err(|error| {
+                        format!("localFilesystem.read failed for descriptor {fd}: {error}")
+                    })?;
+                    buffer.truncate(bytes_read);
+
+                    Ok(Some(json!([
+                        { "buffer": buffer },
+                        bytes_read
+                    ])))
+                }
+                "write" => {
+                    let fd = parse_u64_arg(
+                        nth_arg(args, 0),
+                        "localFilesystem.write expected file descriptor argument",
+                    )?;
+                    let pos = parse_u64_arg(
+                        nth_arg(args, 1),
+                        "localFilesystem.write expected position argument",
+                    )?;
+                    let data = nth_arg(args, 2).ok_or_else(|| {
+                        "localFilesystem.write expected data argument".to_string()
+                    })?;
+                    let bytes = decode_byte_array(data)
+                        .ok_or_else(|| "localFilesystem.write expected byte content".to_string())?;
+                    let offset = nth_arg(args, 3)
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize)
+                        .unwrap_or(0);
+                    let length = nth_arg(args, 4)
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize)
+                        .unwrap_or_else(|| bytes.len().saturating_sub(offset));
+
+                    if offset > bytes.len() {
+                        return Err(format!(
+                            "localFilesystem.write invalid offset {offset} for {} bytes",
+                            bytes.len()
+                        ));
+                    }
+                    let end = offset.checked_add(length).ok_or_else(|| {
+                        "localFilesystem.write invalid offset/length combination".to_string()
+                    })?;
+                    if end > bytes.len() {
+                        return Err(format!(
+                            "localFilesystem.write invalid length {length} for offset {offset} and {} bytes",
+                            bytes.len()
+                        ));
+                    }
+                    let payload = &bytes[offset..end];
+
+                    let mut handles = self.local_file_handles.lock().map_err(|_| {
+                        "localFilesystem.write could not lock file handles".to_string()
+                    })?;
+                    let file = handles.get_mut(&fd).ok_or_else(|| {
+                        format!("localFilesystem.write failed: unknown file descriptor {fd}")
+                    })?;
+                    file.seek(SeekFrom::Start(pos)).map_err(|error| {
+                        format!("localFilesystem.write seek failed for descriptor {fd}: {error}")
+                    })?;
+                    file.write_all(payload).map_err(|error| {
+                        format!("localFilesystem.write failed for descriptor {fd}: {error}")
+                    })?;
+
+                    Ok(Some(json!(payload.len())))
                 }
                 "writeFile" => {
                     let resource = nth_arg(args, 0).ok_or_else(|| {
@@ -396,16 +670,50 @@ impl CapabilityRouter {
                     })?;
                     Ok(Some(Value::Null))
                 }
+                "watch" | "unwatch" => Ok(Some(Value::Null)),
                 _ => Ok(None),
             },
             "nativeHost" => match method {
                 "notifyReady" => Ok(Some(Value::Null)),
+                "openWindow"
+                | "openSessionsWindow"
+                | "setBackgroundThrottling"
+                | "setMinimumSize"
+                | "saveWindowSplash"
+                | "setRepresentedFilename"
+                | "setDocumentEdited"
+                | "openDevTools"
+                | "toggleDevTools"
+                | "reload"
+                | "relaunch"
+                | "quit"
+                | "exit"
+                | "updateTouchBar"
+                | "updateWindowControls"
+                | "pickFileFolderAndOpen"
+                | "pickFileAndOpen"
+                | "pickFolderAndOpen"
+                | "pickWorkspaceAndOpen" => Ok(Some(Value::Null)),
                 "focusWindow" => {
                     self.window
                         .invoke("window.focus", &json!({ "target": "main" }))
                         .await?;
                     Ok(Some(Value::Null))
                 }
+                "isMaximized"
+                | "isWindowAlwaysOnTop"
+                | "isOnBatteryPower"
+                | "hasClipboard"
+                | "hasWSLFeatureInstalled"
+                | "isAdmin"
+                | "isRunningUnderARM64Translation" => Ok(Some(json!(false))),
+                "getWindowCount" | "getActiveWindowId" => Ok(Some(json!(1))),
+                "getOSVirtualMachineHint" => Ok(Some(json!(0))),
+                "getWindows" => Ok(Some(json!([]))),
+                "getCursorScreenPoint" => Ok(Some(json!({
+                    "point": { "x": 0, "y": 0 },
+                    "display": { "x": 0, "y": 0, "width": 0, "height": 0 }
+                }))),
                 "isFullScreen" => {
                     let state = self
                         .window
@@ -556,6 +864,17 @@ impl CapabilityRouter {
                         .and_then(Value::as_str)
                         .unwrap_or(""))))
                 }
+                "readClipboardFindText" => {
+                    let result = self
+                        .clipboard
+                        .invoke("clipboard.readText", &json!({}))
+                        .await?
+                        .unwrap_or_else(|| json!({ "text": "" }));
+                    Ok(Some(json!(result
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""))))
+                }
                 "writeClipboardText" => {
                     if let Some(text) = extract_string_arg(arg0) {
                         self.clipboard
@@ -564,6 +883,15 @@ impl CapabilityRouter {
                     }
                     Ok(Some(Value::Null))
                 }
+                "writeClipboardFindText" => {
+                    if let Some(text) = extract_string_arg(arg0) {
+                        self.clipboard
+                            .invoke("clipboard.writeText", &json!({ "text": text }))
+                            .await?;
+                    }
+                    Ok(Some(Value::Null))
+                }
+                "readImage" => Ok(Some(json!([]))),
                 "getProcessId" => Ok(Some(json!(std::process::id()))),
                 "getOSColorScheme" => Ok(Some(json!({
                     "dark": false,
@@ -588,6 +916,89 @@ impl CapabilityRouter {
                     "freemem": 0,
                     "loadavg": [0, 0, 0]
                 }))),
+                "getSystemIdleState" => Ok(Some(json!("active"))),
+                "getSystemIdleTime" => Ok(Some(json!(0))),
+                "getCurrentThermalState" => Ok(Some(json!("nominal"))),
+                "startPowerSaveBlocker" => Ok(Some(json!(1))),
+                "isPowerSaveBlockerStarted" => Ok(Some(json!(false))),
+                "stopPowerSaveBlocker" => Ok(Some(json!(true))),
+                "resolveProxy" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "menubar" => match method {
+                "updateMenubar" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "extensionhostdebugservice" => match method {
+                "reload" | "close" | "attach" | "terminate" => Ok(Some(Value::Null)),
+                "openExtensionDevelopmentHostWindow" | "attachToCurrentWindowRenderer" => {
+                    Ok(Some(json!({ "success": false })))
+                }
+                _ => Ok(None),
+            },
+            "extensionTipsService" => match method {
+                "getConfigBasedTips"
+                | "getImportantExecutableBasedTips"
+                | "getOtherExecutableBasedTips" => Ok(Some(json!([]))),
+                _ => Ok(None),
+            },
+            "userDataSyncAccount" => match method {
+                "_getInitialData" | "updateAccount" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "userDataAutoSync" => match method {
+                "triggerSync" | "turnOn" | "turnOff" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "userDataSyncMachines" => match method {
+                "getMachines" => Ok(Some(json!([]))),
+                "addCurrentMachine"
+                | "removeCurrentMachine"
+                | "renameMachine"
+                | "setEnablements" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "NativeMcpDiscoveryHelper" => match method {
+                "load" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "mcpGalleryManifest" => match method {
+                "setMcpGalleryManifest" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "extensionGalleryManifest" => match method {
+                "setExtensionGalleryManifest" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "remoteTunnel" => match method {
+                "getMode" => Ok(Some(json!({ "active": false }))),
+                "getTunnelStatus" | "initialize" | "startTunnel" => {
+                    Ok(Some(json!({ "type": "disconnected" })))
+                }
+                "stopTunnel" => Ok(Some(Value::Null)),
+                "getTunnelName" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "languagePacks" => match method {
+                "getAvailableLanguages" | "getInstalledLanguages" => Ok(Some(json!([
+                    {
+                        "id": "en",
+                        "label": "English"
+                    }
+                ]))),
+                "getBuiltInExtensionTranslationsUri" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "customEndpointTelemetry" => match method {
+                "publicLog" | "publicLogError" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "sharedWebContentExtractor" => match method {
+                "readImage" => Ok(Some(Value::Null)),
+                _ => Ok(None),
+            },
+            "playwright" => match method {
+                "initialize" => Ok(Some(Value::Null)),
                 _ => Ok(None),
             },
             "url" => match method {
@@ -620,12 +1031,87 @@ impl CapabilityRouter {
     }
 }
 
+fn dispatch_channel_rust_default(channel: &str, method: &str, _args: &Value) -> Option<Value> {
+    match channel {
+        "extensions" => match method {
+            "getInstalled" => Some(json!([])),
+            "getExtensionsControlManifest" => Some(json!({
+                "malicious": [],
+                "deprecated": {},
+                "search": {},
+                "autoUpdate": {}
+            })),
+            _ => Some(default_by_method_name(method)),
+        },
+        "mcpManagement" => match method {
+            "getInstalled" => Some(json!([])),
+            _ => Some(default_by_method_name(method)),
+        },
+        "userDataSync" => match method {
+            "_getInitialData" => Some(json!(["uninitialized", [], Value::Null])),
+            _ => Some(default_by_method_name(method)),
+        },
+        "userDataSyncStoreManagement" => match method {
+            "getPreviousUserDataSyncStore" => {
+                let fallback_store =
+                    json!({ "scheme": "file", "authority": "", "path": "/tmp/vscode-tauri/sync" });
+                Some(json!({
+                    "url": fallback_store,
+                    "type": "stable",
+                    "defaultUrl": fallback_store,
+                    "insidersUrl": fallback_store,
+                    "stableUrl": fallback_store,
+                    "canSwitch": false,
+                    "authenticationProviders": {}
+                }))
+            }
+            _ => Some(default_by_method_name(method)),
+        },
+        "update" => match method {
+            "_getInitialState" => Some(json!({ "type": "uninitialized" })),
+            _ => Some(default_by_method_name(method)),
+        },
+        _ => Some(default_by_method_name(method)),
+    }
+}
+
+fn default_by_method_name(method: &str) -> Value {
+    if method.starts_with("is") || method.starts_with("has") {
+        return json!(false);
+    }
+    if method.starts_with("get") {
+        return Value::Null;
+    }
+    Value::Null
+}
+
 fn first_arg(args: &Value) -> Option<&Value> {
     args.as_array().and_then(|items| items.first())
 }
 
 fn nth_arg(args: &Value, index: usize) -> Option<&Value> {
     args.as_array().and_then(|items| items.get(index))
+}
+
+fn parse_u64_arg(value: Option<&Value>, message: &str) -> Result<u64, String> {
+    let value = value.ok_or_else(|| message.to_string())?;
+    value
+        .as_u64()
+        .or_else(|| {
+            value.as_i64().and_then(|number| {
+                if number >= 0 {
+                    Some(number as u64)
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| message.to_string())
+}
+
+fn parse_usize_arg(value: Option<&Value>, message: &str) -> Result<usize, String> {
+    let parsed = parse_u64_arg(value, message)?;
+    usize::try_from(parsed).map_err(|_| message.to_string())
 }
 
 fn extract_string_arg(value: Option<&Value>) -> Option<String> {
@@ -856,6 +1342,41 @@ fn copy_path_recursive(source: &Path, target: &Path, overwrite: bool) -> std::io
 
     fs::copy(source, target)?;
     Ok(())
+}
+
+fn stable_short_hex_id(input: &str) -> String {
+    let mut hash: i32 = 0;
+    hash = (((hash << 5) - hash) + 149_417) | 0;
+    for byte in input.bytes() {
+        hash = (((hash << 5) - hash) + i32::from(byte)) | 0;
+    }
+    format!("{:08x}", hash as u32)
+}
+
+fn fallback_workspace_identifier(seed: &str) -> Value {
+    json!({
+        "id": format!("{seed}-id"),
+        "configPath": format!("{seed}.code-workspace")
+    })
+}
+
+fn fallback_user_data_profile(id: &str, name: &str) -> Value {
+    let base = "/tmp/vscode-tauri/profiles";
+    json!({
+        "id": id,
+        "isDefault": id == "default",
+        "name": name,
+        "location": { "scheme": "file", "authority": "", "path": format!("{base}/{id}") },
+        "globalStorageHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/globalStorage") },
+        "settingsResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/settings.json") },
+        "keybindingsResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/keybindings.json") },
+        "tasksResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/tasks.json") },
+        "snippetsHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/snippets") },
+        "promptsHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/prompts") },
+        "extensionsResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/extensions.json") },
+        "mcpResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/mcp.json") },
+        "cacheHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/cache") }
+    })
 }
 
 fn extract_url_from_any(value: &Value) -> Option<String> {
