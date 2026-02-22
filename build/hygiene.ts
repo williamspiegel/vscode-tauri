@@ -153,12 +153,14 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	const productJsonFilter = filter('product.json', { restore: true });
 	const snapshotFilter = filter(['**', '!**/*.snap', '!**/*.snap.actual']);
 	const yarnLockFilter = filter(['**', '!**/yarn.lock']);
+	const cargoLockFilter = filter(['**', '!**/Cargo.lock']);
 	const unicodeFilterStream = filter(Array.from(unicodeFilter), { restore: true });
 
 	const result = input
 		.pipe(filter((f) => Boolean(f.stat && !f.stat.isDirectory())))
 		.pipe(snapshotFilter)
 		.pipe(yarnLockFilter)
+		.pipe(cargoLockFilter)
 		.pipe(productJsonFilter)
 		.pipe(process.env['BUILD_SOURCEVERSION'] ? es.through() : productJson)
 		.pipe(productJsonFilter.restore)
@@ -288,11 +290,13 @@ if (import.meta.main) {
 				}
 
 				const some = out.split(/\r?\n/).filter((l) => !!l);
+				const ignoredLockFiles = new Set(['yarn.lock', 'Cargo.lock']);
+				const precommitFiltered = some.filter(file => !ignoredLockFiles.has(path.basename(file)));
 
-				if (some.length > 0) {
+				if (precommitFiltered.length > 0) {
 					console.log('Reading git index versions...');
 
-					createGitIndexVinyls(some)
+					createGitIndexVinyls(precommitFiltered)
 						.then(
 							(vinyls) => {
 								return new Promise<void>((c, e) =>

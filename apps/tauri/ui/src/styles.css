@@ -1,0 +1,31 @@
+:root {
+  --host-bg: #0e1116;
+  --host-fg: #d7dde5;
+  --host-muted: #97a4b4;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at top, #192130 0%, var(--host-bg) 54%);
+  color: var(--host-fg);
+  font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+#status {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  padding: 8px 12px;
+  color: var(--host-muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: pre-wrap;
+}
+
+#workbench {
+  width: 100%;
+  height: calc(100% - 33px);
+}

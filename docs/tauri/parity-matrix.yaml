@@ -1,0 +1,56 @@
+version: 1
+updated_at: 2026-02-22
+platform_focus: macos
+protocol_version: 1.0.0
+
+capabilities:
+  window:
+    status: in-progress
+    backend: rust
+    notes: Rust serves getState; remaining methods currently route to node fallback.
+  filesystem:
+    status: in-progress
+    backend: node-fallback
+    notes: Rust scaffold exists; read/write/watch semantics pending.
+  terminal:
+    status: in-progress
+    backend: node-fallback
+    notes: PTY lifecycle path not yet Rust-native.
+  clipboard:
+    status: in-progress
+    backend: node-fallback
+    notes: Host API contract is in place.
+  dialogs:
+    status: in-progress
+    backend: node-fallback
+    notes: Open/save/message dialogs pending Rust implementation.
+  process:
+    status: in-progress
+    backend: node-fallback
+    notes: Spawn/kill/env delegated while parity behavior is defined.
+  power:
+    status: in-progress
+    backend: node-fallback
+    notes: Idle and sleep blocker support pending.
+  os:
+    status: in-progress
+    backend: rust
+    notes: Rust serves systemInfo; external open/path operations currently fallback.
+  update:
+    status: in-progress
+    backend: node-fallback
+    notes: Update channel workflow pending.
+
+test_coverage:
+  contract:
+    status: implemented
+    artifact: build/tauri/contract-test.mjs
+  smoke:
+    status: implemented
+    artifact: build/tauri/smoke.mjs
+  integration:
+    status: planned
+    artifact: scripts/test-web-integration.sh
+  tauri_e2e:
+    status: planned
+    artifact: build/tauri

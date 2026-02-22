@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "jsonrpc": "2.0",
+  "protocolVersion": "1.0.0",
+  "handshake": {
+    "client": {
+      "required": [
+        "protocolVersion",
+        "clientName",
+        "clientVersion"
+      ],
+      "properties": {
+        "protocolVersion": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientVersion": { "type": "string" },
+        "requestedCapabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "server": {
+      "required": [
+        "protocolVersion",
+        "serverName",
+        "serverVersion",
+        "supportedCapabilities"
+      ],
+      "properties": {
+        "protocolVersion": { "type": "string" },
+        "serverName": { "type": "string" },
+        "serverVersion": { "type": "string" },
+        "supportedCapabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  },
+  "errors": [
+    { "code": -32600, "name": "invalid_request", "description": "Invalid JSON-RPC request object." },
+    { "code": -32601, "name": "method_not_found", "description": "Unknown method name." },
+    { "code": -32602, "name": "invalid_params", "description": "Parameter validation failed." },
+    { "code": -32603, "name": "internal_error", "description": "Unhandled host-side error." },
+    { "code": 1001, "name": "unsupported_protocol", "description": "Client protocol version is unsupported." },
+    { "code": 1002, "name": "unsupported_capability", "description": "Capability is not available in this build." },
+    { "code": 1003, "name": "fallback_unavailable", "description": "Rust handler is missing and Node fallback could not execute." }
+  ],
+  "capabilities": {
+    "window": {
+      "methods": [
+        "window.open",
+        "window.close",
+        "window.focus",
+        "window.setFullscreen",
+        "window.getState"
+      ]
+    },
+    "filesystem": {
+      "methods": [
+        "filesystem.readFile",
+        "filesystem.writeFile",
+        "filesystem.watch",
+        "filesystem.unwatch",
+        "filesystem.stat"
+      ]
+    },
+    "terminal": {
+      "methods": [
+        "terminal.create",
+        "terminal.resize",
+        "terminal.write",
+        "terminal.kill"
+      ]
+    },
+    "clipboard": {
+      "methods": [
+        "clipboard.readText",
+        "clipboard.writeText"
+      ]
+    },
+    "dialogs": {
+      "methods": [
+        "dialogs.openFile",
+        "dialogs.openFolder",
+        "dialogs.saveFile",
+        "dialogs.showMessage"
+      ]
+    },
+    "process": {
+      "methods": [
+        "process.spawn",
+        "process.kill",
+        "process.env"
+      ]
+    },
+    "power": {
+      "methods": [
+        "power.preventSleep",
+        "power.allowSleep",
+        "power.idleState"
+      ]
+    },
+    "os": {
+      "methods": [
+        "os.openExternal",
+        "os.showItemInFolder",
+        "os.systemInfo"
+      ]
+    },
+    "update": {
+      "methods": [
+        "update.check",
+        "update.download",
+        "update.install"
+      ]
+    }
+  },
+  "methods": {
+    "protocol.handshake": {
+      "paramsRef": "#/handshake/client",
+      "resultRef": "#/handshake/server"
+    },
+    "window.open": { "params": { "type": "object", "required": ["target"] } },
+    "window.close": { "params": { "type": "object" } },
+    "window.focus": { "params": { "type": "object" } },
+    "window.setFullscreen": { "params": { "type": "object", "required": ["enabled"] } },
+    "window.getState": { "params": { "type": "object" } },
+
+    "filesystem.readFile": { "params": { "type": "object", "required": ["path"] } },
+    "filesystem.writeFile": { "params": { "type": "object", "required": ["path", "contents"] } },
+    "filesystem.watch": { "params": { "type": "object", "required": ["path"] } },
+    "filesystem.unwatch": { "params": { "type": "object", "required": ["watchId"] } },
+    "filesystem.stat": { "params": { "type": "object", "required": ["path"] } },
+
+    "terminal.create": { "params": { "type": "object", "required": ["shell"] } },
+    "terminal.resize": { "params": { "type": "object", "required": ["id", "cols", "rows"] } },
+    "terminal.write": { "params": { "type": "object", "required": ["id", "data"] } },
+    "terminal.kill": { "params": { "type": "object", "required": ["id"] } },
+
+    "clipboard.readText": { "params": { "type": "object" } },
+    "clipboard.writeText": { "params": { "type": "object", "required": ["text"] } },
+
+    "dialogs.openFile": { "params": { "type": "object" } },
+    "dialogs.openFolder": { "params": { "type": "object" } },
+    "dialogs.saveFile": { "params": { "type": "object" } },
+    "dialogs.showMessage": { "params": { "type": "object", "required": ["message"] } },
+
+    "process.spawn": { "params": { "type": "object", "required": ["command"] } },
+    "process.kill": { "params": { "type": "object", "required": ["pid"] } },
+    "process.env": { "params": { "type": "object" } },
+
+    "power.preventSleep": { "params": { "type": "object", "required": ["reason"] } },
+    "power.allowSleep": { "params": { "type": "object", "required": ["id"] } },
+    "power.idleState": { "params": { "type": "object", "required": ["thresholdSeconds"] } },
+
+    "os.openExternal": { "params": { "type": "object", "required": ["url"] } },
+    "os.showItemInFolder": { "params": { "type": "object", "required": ["path"] } },
+    "os.systemInfo": { "params": { "type": "object" } },
+
+    "update.check": { "params": { "type": "object" } },
+    "update.download": { "params": { "type": "object" } },
+    "update.install": { "params": { "type": "object" } }
+  },
+  "events": {
+    "window.stateChanged": {
+      "payload": {
+        "type": "object",
+        "required": ["focused", "fullscreen"]
+      }
+    },
+    "filesystem.changed": {
+      "payload": {
+        "type": "object",
+        "required": ["watchId", "path", "kind"]
+      }
+    },
+    "terminal.data": {
+      "payload": {
+        "type": "object",
+        "required": ["id", "data"]
+      }
+    },
+    "process.exit": {
+      "payload": {
+        "type": "object",
+        "required": ["pid", "code"]
+      }
+    },
+    "fallback.used": {
+      "payload": {
+        "type": "object",
+        "required": ["domain", "method", "count"]
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+name: tauri-upstream-sync
+
+on:
+  schedule:
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git Identity
+        run: |
+          git config user.name "tauri-sync-bot"
+          git config user.email "tauri-sync-bot@users.noreply.github.com"
+
+      - name: Fetch Upstream
+        run: |
+          git remote add upstream https://github.com/microsoft/vscode.git || true
+          git fetch upstream main
+
+      - name: Attempt Merge
+        id: merge
+        run: |
+          set +e
+          git checkout -B tauri-sync/${{ github.run_id }}
+          git merge --no-ff --no-commit upstream/main
+          status=$?
+          echo "merge_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write Sync Report
+        run: |
+          node build/tauri/upstream-sync-report.mjs
+
+      - name: Run Tauri Contract + Smoke (if merge clean)
+        if: steps.merge.outputs.merge_status == '0'
+        run: |
+          node build/tauri/contract-test.mjs
+          node build/tauri/smoke.mjs
+
+      - name: Upload Sync Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-upstream-sync-report
+          path: tauri-upstream-sync-report.md
+
+      - name: Add Summary
+        run: |
+          cat tauri-upstream-sync-report.md >> "$GITHUB_STEP_SUMMARY"

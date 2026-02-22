@@ -1,0 +1,27 @@
+name: tauri-touchpoint-gate
+
+on:
+  pull_request:
+    branches:
+      - main
+      - vscode-tauri
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch Base
+        run: |
+          git fetch origin ${{ github.base_ref }}
+
+      - name: Enforce Touchpoint Policy
+        run: |
+          node build/tauri/touchpoint-gate.mjs
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_SHA: ${{ github.sha }}

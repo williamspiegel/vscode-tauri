@@ -28,3 +28,9 @@ vscode-telemetry-docs/
 test-output.json
 test/componentFixtures/.screenshots/*
 !test/componentFixtures/.screenshots/baseline/
+
+# Tauri migration artifacts
+/apps/tauri/src-tauri/target/
+/apps/tauri/src-tauri/gen/
+/apps/tauri/ui/dist/*
+!/apps/tauri/ui/dist/.gitkeep
