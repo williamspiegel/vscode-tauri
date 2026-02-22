@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::LogicalPosition;
 use tauri::{Emitter, Listener, Manager, State};
 use tokio::io::AsyncReadExt;
 
@@ -44,15 +46,43 @@ struct ChannelRuntimeState {
     subscriptions: HashMap<String, ChannelSubscription>,
 }
 
+#[derive(Default)]
+struct ContextMenuRuntimeState {
+    active_by_context_menu_id: HashMap<i64, ActiveContextMenu>,
+    item_by_native_menu_id: HashMap<String, ActiveContextMenuItem>,
+}
+
+struct ActiveContextMenu {
+    native_menu_item_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+struct ActiveContextMenuItem {
+    context_menu_id: i64,
+    on_click_channel: String,
+    item_id: i64,
+}
+
 struct AppState {
     router: CapabilityRouter,
     repo_root: PathBuf,
     channel_runtime: Mutex<ChannelRuntimeState>,
+    context_menu_runtime: Mutex<ContextMenuRuntimeState>,
     next_subscription_id: AtomicU64,
     cached_window_config: Mutex<Option<Value>>,
 }
 
 impl AppState {
+    fn handle_ipc_send(&self, method: &str, args: &Value) -> Result<Value, String> {
+        match method {
+            IPC_CONTEXT_MENU_CHANNEL => {
+                self.handle_ipc_context_menu(args)?;
+                Ok(Value::Null)
+            }
+            _ => Ok(Value::Null),
+        }
+    }
+
     async fn register_subscription(
         &self,
         channel: String,
@@ -407,6 +437,155 @@ impl AppState {
         Ok(())
     }
 
+    fn emit_ipc_event(&self, channel: &str, args: Vec<Value>) -> Result<(), String> {
+        self.emit_to_subscriptions(
+            IPC_EVENT_CHANNEL,
+            IPC_EVENT_NAME,
+            json!({
+                "channel": channel,
+                "args": args
+            }),
+            |_| true,
+        )
+    }
+
+    fn close_context_menu(&self, context_menu_id: i64) -> Result<bool, String> {
+        let removed = {
+            let mut state = self
+                .context_menu_runtime
+                .lock()
+                .map_err(|_| "context menu runtime lock poisoned".to_string())?;
+            remove_context_menu_runtime_entries(&mut state, context_menu_id)
+        };
+        Ok(removed)
+    }
+
+    fn clear_context_menus(&self) -> Result<Vec<i64>, String> {
+        let stale_context_ids = {
+            let mut state = self
+                .context_menu_runtime
+                .lock()
+                .map_err(|_| "context menu runtime lock poisoned".to_string())?;
+            let ids = state
+                .active_by_context_menu_id
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            state.active_by_context_menu_id.clear();
+            state.item_by_native_menu_id.clear();
+            ids
+        };
+
+        Ok(stale_context_ids)
+    }
+
+    fn handle_ipc_context_menu(&self, args: &Value) -> Result<(), String> {
+        let args = args
+            .as_array()
+            .ok_or_else(|| "vscode:contextmenu expects args array".to_string())?;
+        let context_menu_id = args
+            .first()
+            .and_then(value_as_i64)
+            .ok_or_else(|| "vscode:contextmenu missing numeric context menu id".to_string())?;
+        let items = args
+            .get(1)
+            .and_then(Value::as_array)
+            .ok_or_else(|| "vscode:contextmenu missing items array".to_string())?;
+        let on_click_channel = args
+            .get(2)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "vscode:contextmenu missing onClick channel".to_string())?;
+        let popup_options = args.get(3).and_then(Value::as_object);
+
+        for stale_id in self.clear_context_menus()? {
+            let _ = self.emit_ipc_event(IPC_CONTEXT_MENU_CLOSE_CHANNEL, vec![json!(stale_id)]);
+        }
+
+        let app_handle = capabilities::window::app_handle()
+            .ok_or_else(|| "tauri app handle not initialized".to_string())?;
+        let window = app_handle
+            .get_webview_window("main")
+            .ok_or_else(|| "main webview window unavailable".to_string())?;
+
+        let mut item_bindings = Vec::new();
+        let menu = build_context_menu(
+            &app_handle,
+            items,
+            context_menu_id,
+            on_click_channel,
+            &mut item_bindings,
+        )?;
+
+        let native_menu_item_ids = item_bindings
+            .iter()
+            .map(|(native_id, _)| native_id.clone())
+            .collect::<Vec<_>>();
+
+        {
+            let mut runtime = self
+                .context_menu_runtime
+                .lock()
+                .map_err(|_| "context menu runtime lock poisoned".to_string())?;
+            runtime.active_by_context_menu_id.insert(
+                context_menu_id,
+                ActiveContextMenu {
+                    native_menu_item_ids,
+                },
+            );
+            for (native_id, binding) in item_bindings {
+                runtime.item_by_native_menu_id.insert(native_id, binding);
+            }
+        }
+
+        let popup_result = if let Some(position) = context_menu_position(popup_options) {
+            window.popup_menu_at(&menu, position)
+        } else {
+            window.popup_menu(&menu)
+        };
+
+        if let Err(error) = popup_result {
+            let _ = self.close_context_menu(context_menu_id);
+            let _ =
+                self.emit_ipc_event(IPC_CONTEXT_MENU_CLOSE_CHANNEL, vec![json!(context_menu_id)]);
+            return Err(format!("vscode:contextmenu failed to show popup: {error}"));
+        }
+
+        Ok(())
+    }
+
+    fn handle_context_menu_event(&self, menu_item_id: &str) -> Result<bool, String> {
+        let resolved = {
+            let mut state = self
+                .context_menu_runtime
+                .lock()
+                .map_err(|_| "context menu runtime lock poisoned".to_string())?;
+            let item = match state.item_by_native_menu_id.remove(menu_item_id) {
+                Some(item) => item,
+                None => return Ok(false),
+            };
+            remove_context_menu_runtime_entries(&mut state, item.context_menu_id);
+            item
+        };
+
+        self.emit_ipc_event(
+            &resolved.on_click_channel,
+            vec![json!(resolved.item_id), json!({})],
+        )?;
+        self.emit_ipc_event(
+            IPC_CONTEXT_MENU_CLOSE_CHANNEL,
+            vec![json!(resolved.context_menu_id)],
+        )?;
+
+        Ok(true)
+    }
+
+    fn handle_native_menu_event(&self, menu_item_id: &str) -> Result<(), String> {
+        if self.handle_context_menu_event(menu_item_id)? {
+            return Ok(());
+        }
+        self.handle_menubar_event(menu_item_id)
+    }
+
     fn handle_menubar_event(&self, menu_item_id: &str) -> Result<(), String> {
         let Some(payload) = self.router.menubar_action_payload(menu_item_id) else {
             return Ok(());
@@ -523,6 +702,13 @@ async fn host_invoke(
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new()));
 
+        if channel == "__ipcSend__" {
+            return match state.handle_ipc_send(&method, &args) {
+                Ok(value) => Ok(ok_response(request.id, value)),
+                Err(error) => Ok(error_response(request.id, 1003, error)),
+            };
+        }
+
         return match state
             .router
             .dispatch_channel(&channel, &method, &args)
@@ -605,6 +791,254 @@ fn required_string_param(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("missing string param '{key}'"))
+}
+
+const IPC_CONTEXT_MENU_CHANNEL: &str = "vscode:contextmenu";
+const IPC_CONTEXT_MENU_CLOSE_CHANNEL: &str = "vscode:onCloseContextMenu";
+const IPC_EVENT_CHANNEL: &str = "__ipc";
+const IPC_EVENT_NAME: &str = "event";
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|value| value as f64))
+        .or_else(|| value.as_u64().map(|value| value as f64))
+}
+
+fn context_menu_position(
+    options: Option<&serde_json::Map<String, Value>>,
+) -> Option<LogicalPosition<f64>> {
+    let options = options?;
+    let x = options.get("x").and_then(value_as_f64)?;
+    let y = options.get("y").and_then(value_as_f64)?;
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    Some(LogicalPosition::new(x, y))
+}
+
+fn build_context_menu<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    items: &[Value],
+    context_menu_id: i64,
+    on_click_channel: &str,
+    item_bindings: &mut Vec<(String, ActiveContextMenuItem)>,
+) -> Result<Menu<R>, String> {
+    let menu = Menu::new(app_handle)
+        .map_err(|error| format!("vscode:contextmenu failed to create menu: {error}"))?;
+    let mut append_to_menu = |item: &dyn IsMenuItem<R>| {
+        menu.append(item)
+            .map_err(|error| format!("vscode:contextmenu failed to append menu item: {error}"))
+    };
+    append_context_menu_entries(
+        app_handle,
+        items,
+        context_menu_id,
+        on_click_channel,
+        item_bindings,
+        &mut append_to_menu,
+    )?;
+    Ok(menu)
+}
+
+fn append_context_menu_entries<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    items: &[Value],
+    context_menu_id: i64,
+    on_click_channel: &str,
+    item_bindings: &mut Vec<(String, ActiveContextMenuItem)>,
+    append_item: &mut dyn FnMut(&dyn IsMenuItem<R>) -> Result<(), String>,
+) -> Result<(), String> {
+    for item in items {
+        let Some(item_object) = item.as_object() else {
+            continue;
+        };
+
+        if item_object.get("visible").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+
+        let item_type = item_object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("normal");
+
+        if item_type == "separator" {
+            let separator = PredefinedMenuItem::separator(app_handle).map_err(|error| {
+                format!("vscode:contextmenu failed to create separator menu item: {error}")
+            })?;
+            append_item(&separator)?;
+            continue;
+        }
+
+        if let Some(submenu_items) = item_object.get("submenu").and_then(Value::as_array) {
+            let label = item_object
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("Submenu");
+            let submenu = Submenu::new(app_handle, label, true).map_err(|error| {
+                format!("vscode:contextmenu failed to create submenu '{label}': {error}")
+            })?;
+            let mut append_to_submenu = |item: &dyn IsMenuItem<R>| {
+                submenu.append(item).map_err(|error| {
+                    format!("vscode:contextmenu failed to append submenu item '{label}': {error}")
+                })
+            };
+            append_context_menu_entries(
+                app_handle,
+                submenu_items,
+                context_menu_id,
+                on_click_channel,
+                item_bindings,
+                &mut append_to_submenu,
+            )?;
+            if !submenu
+                .items()
+                .map_err(|error| {
+                    format!("vscode:contextmenu failed to inspect submenu '{label}': {error}")
+                })?
+                .is_empty()
+            {
+                append_item(&submenu)?;
+            }
+            continue;
+        }
+
+        let context_item_id = match item_object.get("id").and_then(value_as_i64) {
+            Some(id) => id,
+            None => continue,
+        };
+        let label = item_object
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let enabled = item_object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let checked = item_object
+            .get("checked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let accelerator = item_object.get("accelerator").and_then(Value::as_str);
+
+        let native_menu_item_id =
+            format!("vscode-contextmenu::{context_menu_id}::{context_item_id}");
+
+        if item_type == "checkbox" || item_type == "radio" {
+            let check_item = create_context_check_menu_item(
+                app_handle,
+                &native_menu_item_id,
+                label,
+                enabled,
+                checked,
+                accelerator,
+            )?;
+            append_item(&check_item)?;
+        } else {
+            let menu_item = create_context_menu_item(
+                app_handle,
+                &native_menu_item_id,
+                label,
+                enabled,
+                accelerator,
+            )?;
+            append_item(&menu_item)?;
+        }
+
+        item_bindings.push((
+            native_menu_item_id,
+            ActiveContextMenuItem {
+                context_menu_id,
+                on_click_channel: on_click_channel.to_string(),
+                item_id: context_item_id,
+            },
+        ));
+    }
+
+    Ok(())
+}
+
+fn create_context_menu_item<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    label: &str,
+    enabled: bool,
+    accelerator: Option<&str>,
+) -> Result<MenuItem<R>, String> {
+    if let Some(accelerator) = accelerator {
+        if let Ok(item) = MenuItem::with_id(
+            app_handle,
+            id.to_string(),
+            label,
+            enabled,
+            Some(accelerator),
+        ) {
+            return Ok(item);
+        }
+    }
+    MenuItem::with_id(
+        app_handle,
+        id.to_string(),
+        label,
+        enabled,
+        Option::<&str>::None,
+    )
+    .map_err(|error| {
+        format!("vscode:contextmenu failed to create menu item '{label}' ({id}): {error}")
+    })
+}
+
+fn create_context_check_menu_item<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    id: &str,
+    label: &str,
+    enabled: bool,
+    checked: bool,
+    accelerator: Option<&str>,
+) -> Result<CheckMenuItem<R>, String> {
+    if let Some(accelerator) = accelerator {
+        if let Ok(item) = CheckMenuItem::with_id(
+            app_handle,
+            id.to_string(),
+            label,
+            enabled,
+            checked,
+            Some(accelerator),
+        ) {
+            return Ok(item);
+        }
+    }
+    CheckMenuItem::with_id(
+        app_handle,
+        id.to_string(),
+        label,
+        enabled,
+        checked,
+        Option::<&str>::None,
+    )
+    .map_err(|error| {
+        format!("vscode:contextmenu failed to create check menu item '{label}' ({id}): {error}")
+    })
+}
+
+fn remove_context_menu_runtime_entries(
+    state: &mut ContextMenuRuntimeState,
+    context_menu_id: i64,
+) -> bool {
+    let Some(menu_state) = state.active_by_context_menu_id.remove(&context_menu_id) else {
+        return false;
+    };
+    for native_menu_id in menu_state.native_menu_item_ids {
+        state.item_by_native_menu_id.remove(&native_menu_id);
+    }
+    true
 }
 
 fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
@@ -1179,6 +1613,7 @@ fn main() {
         channel_runtime: Mutex::new(ChannelRuntimeState {
             subscriptions: HashMap::new(),
         }),
+        context_menu_runtime: Mutex::new(ContextMenuRuntimeState::default()),
         next_subscription_id: AtomicU64::new(1),
         cached_window_config: Mutex::new(None),
     };
@@ -1210,7 +1645,7 @@ fn main() {
             app_handle.on_menu_event(move |_app, event| {
                 let menu_item_id = event.id().0.clone();
                 let state = menu_listener_handle.state::<AppState>();
-                if let Err(error) = state.handle_menubar_event(&menu_item_id) {
+                if let Err(error) = state.handle_native_menu_event(&menu_item_id) {
                     eprintln!("[desktop.menubar.bridge.error] {error}");
                 }
             });

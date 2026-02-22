@@ -249,7 +249,24 @@ class IpcRendererShim {
     private readonly resolveWindowId: () => Promise<number>
   ) {
     this.channelRegistry = createDesktopChannelRegistry(host);
+    this.installIpcEventBridge();
     this.installMenubarBridge();
+  }
+
+  private installIpcEventBridge(): void {
+    void this.channelRegistry.listen('__ipc', 'event', null, payload => {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+
+      const candidate = payload as { channel?: unknown; args?: unknown };
+      if (typeof candidate.channel !== 'string' || !candidate.channel.startsWith('vscode:')) {
+        return;
+      }
+
+      const args = Array.isArray(candidate.args) ? candidate.args : [];
+      this.emit(candidate.channel, ...args);
+    });
   }
 
   private installMenubarBridge(): void {
