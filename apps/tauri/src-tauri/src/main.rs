@@ -665,7 +665,7 @@ async fn host_invoke(
     }
 
     if request.method == "host.cssModules" {
-        return match workbench_css_modules() {
+        return match workbench_css_modules(&state.repo_root) {
             Ok(modules) => Ok(ok_response(request.id, json!({ "modules": modules }))),
             Err(error) => Ok(error_response(request.id, -32603, error)),
         };
@@ -674,7 +674,10 @@ async fn host_invoke(
     if request.method == "desktop.resolveWindowConfig" {
         return match state.window_config() {
             Ok(config) => Ok(ok_response(request.id, config)),
-            Err(error) => Ok(error_response(request.id, -32603, error)),
+            Err(error) => {
+                eprintln!("[host.desktop.resolveWindowConfig.error] {error}");
+                Ok(error_response(request.id, -32603, error))
+            }
         };
     }
 
@@ -1044,7 +1047,7 @@ fn remove_context_menu_runtime_entries(
 fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     let nls_messages = read_nls_messages(repo_root)?;
     let product = read_json_file(&repo_root.join("product.json"))?;
-    let css_modules = workbench_css_modules()?;
+    let css_modules = workbench_css_modules(repo_root)?;
 
     let home_dir = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -1084,9 +1087,10 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         "VSCODE_DESKTOP_RUNTIME".to_string(),
         "electrobun".to_string(),
     );
-    user_env
-        .entry("VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT".to_string())
-        .or_insert_with(|| "true".to_string());
+    user_env.insert(
+        "VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT".to_string(),
+        "true".to_string(),
+    );
 
     let window_config = json!({
         "windowId": 1,
@@ -1367,30 +1371,37 @@ fn profile_descriptor(repo_root: &Path, profile_id: &str) -> Value {
 }
 
 fn read_nls_messages(repo_root: &Path) -> Result<Vec<String>, String> {
-    let path = repo_root.join("out/nls.messages.json");
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            // Tauri dev mode can run with a transpiled `out` tree that does not
-            // include NLS artifacts. Falling back to an empty message table keeps
-            // startup alive; UI strings can still render from default literals.
-            eprintln!(
-                "warning: missing NLS messages at {}: {error}; using empty messages",
-                path.display()
-            );
-            return Ok(Vec::new());
-        }
-    };
-    match serde_json::from_slice::<Vec<String>>(&bytes) {
-        Ok(messages) => Ok(messages),
-        Err(error) => {
-            eprintln!(
-                "warning: failed to parse NLS messages at {}: {error}; using empty messages",
-                path.display()
-            );
-            Ok(Vec::new())
+    let candidate_paths = [
+        repo_root.join("out/nls.messages.json"),
+        repo_root.join("out-vscode-min/nls.messages.json"),
+    ];
+
+    for path in candidate_paths {
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!(
+                    "warning: missing NLS messages at {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        match serde_json::from_slice::<Vec<String>>(&bytes) {
+            Ok(messages) => return Ok(messages),
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to parse NLS messages at {}: {error}",
+                    path.display()
+                );
+            }
         }
     }
+
+    // Keep startup alive when neither NLS table is available.
+    eprintln!("warning: no readable NLS messages found; using empty messages");
+    Ok(Vec::new())
 }
 
 fn read_json_file(path: &Path) -> Result<Value, String> {
@@ -1412,14 +1423,10 @@ fn os_release() -> String {
     "0.0.0".to_string()
 }
 
-fn workbench_css_modules() -> Result<Vec<String>, String> {
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR")
-            .map_err(|error| format!("Failed to read CARGO_MANIFEST_DIR: {error}"))?,
-    );
-
-    let out_root = manifest_dir.join("../../..").join("out");
+fn workbench_css_modules(repo_root: &Path) -> Result<Vec<String>, String> {
+    let out_root = repo_root.join("out");
     let vs_root = out_root.join("vs");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cache_path = manifest_dir.join("../ui/.cache/css-modules.json");
     let cache_dependency = out_root.join("vs/workbench/workbench.web.main.internal.js");
     if !vs_root.exists() {
@@ -1599,13 +1606,52 @@ mod tests {
 }
 
 fn main() {
+    fn is_repo_root_candidate(path: &Path) -> bool {
+        path.join("product.json").is_file()
+            && path
+                .join("out/vs/code/electron-browser/workbench/workbench.js")
+                .is_file()
+    }
+
+    fn normalize_path(path: PathBuf) -> PathBuf {
+        path.canonicalize().unwrap_or(path)
+    }
+
+    fn discover_repo_root() -> PathBuf {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        if let Ok(explicit_root) = std::env::var("VSCODE_TAURI_REPO_ROOT") {
+            candidates.push(PathBuf::from(explicit_root));
+        }
+
+        let compiled_repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        candidates.push(compiled_repo_root.clone());
+
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.clone());
+            for ancestor in cwd.ancestors().skip(1) {
+                candidates.push(ancestor.to_path_buf());
+            }
+        }
+
+        if let Ok(current_exe) = std::env::current_exe() {
+            for ancestor in current_exe.ancestors().skip(1) {
+                candidates.push(ancestor.to_path_buf());
+            }
+        }
+
+        for candidate in candidates {
+            let normalized = normalize_path(candidate);
+            if is_repo_root_candidate(&normalized) {
+                return normalized;
+            }
+        }
+
+        normalize_path(compiled_repo_root)
+    }
+
     let fallback_script = PathBuf::from("../node/fallback.mjs");
-    let manifest_dir =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
-    let repo_root = manifest_dir
-        .join("../../..")
-        .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.join("../../.."));
+    let repo_root = discover_repo_root();
 
     let app_state = AppState {
         router: CapabilityRouter::new(fallback_script),

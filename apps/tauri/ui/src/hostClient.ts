@@ -45,6 +45,61 @@ export class HostClient {
     'desktop.channelEvent': 'desktop_channel_event'
   };
   private static readonly tauriEventNameInvalidPattern = /[^A-Za-z0-9_/:-]/g;
+  private static formatUnknownError(error: unknown): string {
+    if (error instanceof Error) {
+      const parts: string[] = [];
+      if (error.name) {
+        parts.push(error.name);
+      }
+      if (error.message) {
+        parts.push(error.message);
+      }
+      if (error.stack) {
+        parts.push(error.stack);
+      }
+      return parts.join(' | ');
+    }
+
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+
+  private static normalizeDesktopChannelPayload(
+    envelope: HostEventPayload<'desktop.channelEvent'>
+  ): unknown {
+    if (envelope.channel === 'storage' && envelope.event === 'onDidChangeStorage') {
+      const payload =
+        envelope.payload && typeof envelope.payload === 'object'
+          ? (envelope.payload as Record<string, unknown>)
+          : {};
+      return {
+        changed: Array.isArray(payload.changed) ? payload.changed : [],
+        deleted: Array.isArray(payload.deleted) ? payload.deleted : []
+      };
+    }
+
+    if (envelope.channel === 'userDataProfiles' && envelope.event === 'onDidChangeProfiles') {
+      const payload =
+        envelope.payload && typeof envelope.payload === 'object'
+          ? (envelope.payload as Record<string, unknown>)
+          : {};
+      return {
+        all: Array.isArray(payload.all) ? payload.all : [],
+        added: Array.isArray(payload.added) ? payload.added : [],
+        removed: Array.isArray(payload.removed) ? payload.removed : [],
+        updated: Array.isArray(payload.updated) ? payload.updated : []
+      };
+    }
+
+    return envelope.payload;
+  }
 
   private static toTauriEventName(eventName: string): string {
     const mapped = HostClient.tauriEventNameMap[eventName] ?? eventName;
@@ -148,7 +203,7 @@ export class HostClient {
     try {
       raw = await this.invoke('host_invoke', { request });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = HostClient.formatUnknownError(error);
       throw new Error(`host_invoke transport failed for ${method}: ${message}`);
     }
     const response = raw as JsonRpcResponse<T>;
@@ -158,7 +213,13 @@ export class HostClient {
     }
 
     if (response.error) {
-      throw new Error(`Host error in ${method} (${response.error.code}): ${response.error.message}`);
+      const data =
+        typeof response.error.data === 'undefined'
+          ? ''
+          : ` data=${HostClient.formatUnknownError(response.error.data)}`;
+      throw new Error(
+        `Host error in ${method} (${response.error.code}): ${response.error.message}${data}`
+      );
     }
 
     return response.result as T;
@@ -213,8 +274,13 @@ export class HostClient {
       await this.ensureDesktopChannelEventListener();
     } catch {
       // Some Tauri capability configurations disallow event.listen.
-      // Keep the channel subscription alive in no-op mode.
+      // Fail fast so callers can choose immediate fallbacks instead of
+      // waiting for events that can never arrive in this renderer session.
       dispatcherReady = false;
+    }
+
+    if (!dispatcherReady) {
+      throw new Error('desktop.channelEvent listener is unavailable');
     }
 
     const response = await this.invokeMethod<{ subscriptionId: string }>('desktop.channelListen', {
@@ -228,14 +294,12 @@ export class HostClient {
       throw new Error('desktop.channelListen returned an invalid subscription id.');
     }
 
-    if (dispatcherReady) {
-      this.desktopChannelHandlers.set(subscriptionId, handler);
-      const buffered = this.desktopChannelBufferedEvents.get(subscriptionId);
-      if (buffered && buffered.length > 0) {
-        this.desktopChannelBufferedEvents.delete(subscriptionId);
-        for (const payload of buffered) {
-          handler(payload);
-        }
+    this.desktopChannelHandlers.set(subscriptionId, handler);
+    const buffered = this.desktopChannelBufferedEvents.get(subscriptionId);
+    if (buffered && buffered.length > 0) {
+      this.desktopChannelBufferedEvents.delete(subscriptionId);
+      for (const payload of buffered) {
+        handler(payload);
       }
     }
 
@@ -261,14 +325,16 @@ export class HostClient {
         return;
       }
 
+      const normalizedPayload = HostClient.normalizeDesktopChannelPayload(payload);
+
       const handler = this.desktopChannelHandlers.get(subscriptionId);
       if (handler) {
-        handler(payload.payload);
+        handler(normalizedPayload);
         return;
       }
 
       const buffered = this.desktopChannelBufferedEvents.get(subscriptionId) ?? [];
-      buffered.push(payload.payload);
+      buffered.push(normalizedPayload);
       if (buffered.length > 32) {
         buffered.shift();
       }

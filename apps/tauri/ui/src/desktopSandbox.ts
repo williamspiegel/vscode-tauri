@@ -451,6 +451,28 @@ function addDisposable(target: unknown, disposable: DisposableLike): void {
   }
 }
 
+function normalizeDesktopEventPayload(eventName: string, payload: unknown): unknown {
+  if (eventName === 'onDidChangeStorage') {
+    const event = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+    return {
+      changed: Array.isArray(event.changed) ? event.changed : [],
+      deleted: Array.isArray(event.deleted) ? event.deleted : []
+    };
+  }
+
+  if (eventName === 'onDidChangeProfiles') {
+    const event = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+    return {
+      all: Array.isArray(event.all) ? event.all : [],
+      added: Array.isArray(event.added) ? event.added : [],
+      removed: Array.isArray(event.removed) ? event.removed : [],
+      updated: Array.isArray(event.updated) ? event.updated : []
+    };
+  }
+
+  return payload;
+}
+
 function createHostBackedEvent(
   registry: DesktopChannelRegistry,
   channel: string,
@@ -462,9 +484,10 @@ function createHostBackedEvent(
   let starting: Promise<void> | undefined;
 
   const fire = (payload: unknown) => {
+    const normalizedPayload = normalizeDesktopEventPayload(eventName, payload);
     for (const entry of [...listeners]) {
       try {
-        entry.fn.call(entry.thisArgs, payload);
+        entry.fn.call(entry.thisArgs, normalizedPayload);
       } catch (error) {
         console.error('[desktopSandbox] channel event listener failed', {
           channel,
@@ -628,8 +651,7 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
     ...((configuration.userEnv as Record<string, string> | undefined) ?? {})
   };
   processEnv.VSCODE_DESKTOP_RUNTIME = 'electrobun';
-  processEnv.VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT =
-    processEnv.VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT || 'true';
+  processEnv.VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT = 'true';
   processEnv.VSCODE_CWD = processEnv.VSCODE_CWD || '/';
 
   const processPlatform = parsePlatform(configuration);

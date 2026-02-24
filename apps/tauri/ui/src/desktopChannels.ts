@@ -28,7 +28,9 @@ function readDebugFlag(
 }
 
 const ENABLE_CHANNEL_TRACE = readDebugFlag('hostDebug', 'tauriHostDebug') === true;
-const ENABLE_FS_TRACE = readDebugFlag('fsDebug', 'tauriFsDebug') ?? ENABLE_CHANNEL_TRACE;
+// Temporarily force-disable noisy local filesystem trace logs.
+const ENABLE_FS_TRACE = false;
+const READ_FILE_STREAM_FALLBACK_DELAY_MS = 100;
 
 export interface DesktopChannelRegistry {
   readonly channels: readonly string[];
@@ -734,10 +736,7 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
             );
           }
 
-          // Keep a legacy-compatible shape (`buffer: number[]`) so existing
-          // DiskFileSystemProviderClient builds can decode without needing
-          // the newer base64-aware normalizer.
-          return Array.from(decoded);
+          return decoded;
         }
       ]
     ])
@@ -802,8 +801,8 @@ const EVENT_NORMALIZERS = new Map<string, Map<string, EventNormalizer>>([
         payload => {
           const event = asRecord(payload);
           return {
-            changed: Array.isArray(event.changed) ? event.changed : undefined,
-            deleted: Array.isArray(event.deleted) ? event.deleted : undefined
+            changed: asArray(event.changed),
+            deleted: asArray(event.deleted)
           };
         }
       ]
@@ -973,6 +972,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
       }
       if (channel === 'localFilesystem' && event === 'readFileStream') {
         let stop: (() => Promise<void>) | undefined;
+        let fallbackTimer: number | undefined;
         let didReceiveStreamPayload = false;
         let fallbackActive = false;
         let streamClosed = false;
@@ -981,6 +981,23 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
         const streamArgs = Array.isArray(arg) ? arg : [arg];
         const readTarget = streamArgs[0];
         const readOptions = streamArgs.length > 1 ? streamArgs[1] : undefined;
+        const decodeReadPayload = (result: unknown): Uint8Array | undefined => {
+          const payload = asRecord(result);
+          return (
+            toUint8Array(payload.buffer) ??
+            toUint8Array(payload.bytes) ??
+            toUint8Array(payload.data) ??
+            decodeBase64ToUint8Array(payload.base64) ??
+            toUint8Array(result)
+          );
+        };
+        const clearFallbackTimer = (): void => {
+          if (typeof fallbackTimer !== 'number') {
+            return;
+          }
+          window.clearTimeout(fallbackTimer);
+          fallbackTimer = undefined;
+        };
 
         const emitDecodedBytes = (bytes: Uint8Array): void => {
           if (streamClosed) {
@@ -1012,51 +1029,43 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           onEvent('end');
         };
 
-        const fallbackTimer = window.setTimeout(() => {
+        const fallbackToReadFile = async (listenError?: unknown): Promise<void> => {
           if (didReceiveStreamPayload || fallbackActive || streamClosed) {
             return;
           }
 
           if (typeof readTarget === 'undefined') {
-            onEvent(
-              toFileSystemError(new Error('readFileStream fallback missing resource argument'))
-            );
+            onEvent(toFileSystemError(
+              listenError ?? new Error('readFileStream fallback missing resource argument')
+            ));
             return;
           }
 
           fallbackActive = true;
-          void host
-            .desktopChannelCall('localFilesystem', 'readFile', [readTarget, readOptions])
-            .then(result => {
-              const payload = asRecord(result);
-              const decoded =
-                toUint8Array(payload.buffer) ??
-                toUint8Array(payload.bytes) ??
-                toUint8Array(payload.data) ??
-                decodeBase64ToUint8Array(payload.base64) ??
-                toUint8Array(result);
-              if (!decoded) {
-                onEvent(
-                  toFileSystemError(new Error('Invalid readFile fallback payload for readFileStream'))
-                );
-                return;
-              }
+          try {
+            const result = await host.desktopChannelCall('localFilesystem', 'readFile', [readTarget, readOptions]);
+            const decoded = decodeReadPayload(result);
+            if (!decoded) {
+              onEvent(
+                toFileSystemError(new Error('Invalid readFile fallback payload for readFileStream'))
+              );
+              return;
+            }
 
-              emitDecodedBytes(decoded);
-              emitStreamEnd();
-            })
-            .catch(error => {
-              if (!streamClosed) {
-                streamClosed = true;
-                if (ENABLE_FS_TRACE) {
-                  console.error('[desktop.fs.stream.fallback.error]', {
-                    errorMessage: normalizeErrorMessage(error)
-                  });
-                }
-                onEvent(toFileSystemError(error));
+            emitDecodedBytes(decoded);
+            emitStreamEnd();
+          } catch (error) {
+            if (!streamClosed) {
+              streamClosed = true;
+              if (ENABLE_FS_TRACE) {
+                console.error('[desktop.fs.stream.fallback.error]', {
+                  errorMessage: normalizeErrorMessage(error)
+                });
               }
-            });
-        }, 250);
+              onEvent(toFileSystemError(error));
+            }
+          }
+        };
 
         try {
           stop = await host.desktopChannelListen(channel, event, arg, payload => {
@@ -1065,7 +1074,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
             }
 
             didReceiveStreamPayload = true;
-            window.clearTimeout(fallbackTimer);
+            clearFallbackTimer();
 
             if (payload === 'end') {
               emitStreamEnd();
@@ -1138,31 +1147,12 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
               onEvent(toFileSystemError(new Error('Invalid readFileStream payload from host')));
             }
           });
+          fallbackTimer = window.setTimeout(() => {
+            void fallbackToReadFile();
+          }, READ_FILE_STREAM_FALLBACK_DELAY_MS);
         } catch (error) {
-          window.clearTimeout(fallbackTimer);
-          fallbackActive = true;
-          if (typeof readTarget === 'undefined') {
-            onEvent(toFileSystemError(error));
-          } else {
-            try {
-              const result = await host.desktopChannelCall('localFilesystem', 'readFile', [readTarget, readOptions]);
-              const payload = asRecord(result);
-              const decoded =
-                toUint8Array(payload.buffer) ??
-                toUint8Array(payload.bytes) ??
-                toUint8Array(payload.data) ??
-                decodeBase64ToUint8Array(payload.base64) ??
-                toUint8Array(result);
-              if (!decoded) {
-                onEvent(toFileSystemError(new Error('Invalid readFile fallback payload for readFileStream')));
-              } else {
-                emitDecodedBytes(decoded);
-                emitStreamEnd();
-              }
-            } catch (fallbackError) {
-              onEvent(toFileSystemError(fallbackError));
-            }
-          }
+          clearFallbackTimer();
+          await fallbackToReadFile(error);
           return async () => {
             return;
           };
@@ -1170,7 +1160,7 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
         return async () => {
           fallbackActive = true;
           streamClosed = true;
-          window.clearTimeout(fallbackTimer);
+          clearFallbackTimer();
           await stop?.();
         };
       }
@@ -1181,8 +1171,8 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           ? payload => {
               const e = asRecord(payload);
               return {
-                changed: Array.isArray(e.changed) ? e.changed : undefined,
-                deleted: Array.isArray(e.deleted) ? e.deleted : undefined
+                changed: asArray(e.changed),
+                deleted: asArray(e.deleted)
               };
             }
           : event === 'onDidChangeProfiles'

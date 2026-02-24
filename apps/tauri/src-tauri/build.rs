@@ -104,7 +104,10 @@ fn ensure_workbench_out_link() {
     let ui_root = manifest_dir.join("../ui");
     let ui_dist = ui_root.join("dist");
     let _ = ensure_link(ui_root.join("out"), &repo_out);
-    let _ = ensure_link(ui_dist.join("out"), &repo_out);
+    let dist_out = ui_dist.join("out");
+    if !dist_out.exists() {
+        let _ = ensure_link(dist_out, &repo_out);
+    }
 }
 
 fn ensure_link(link_path: PathBuf, target: &Path) -> std::io::Result<()> {

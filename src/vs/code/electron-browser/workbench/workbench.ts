@@ -289,8 +289,14 @@
 		// NLS
 		setupNLS<T>(configuration);
 
-		// Compute base URL and set as global
-		const baseUrl = new URL(`${fileUriFromPath(configuration.appRoot, { isWindows: safeProcess.platform === 'win32', scheme: 'vscode-file', fallbackAuthority: 'vscode-app' })}/out/`);
+		// Compute base URL and set as global.
+		// When non-electron hosts (e.g. Tauri) force relative imports, module specifiers
+		// resolve against the current `tauri://.../out/...` URL space. Use that same base
+		// for CSS import-map keys so CSS modules are remapped to JS loader blobs instead of
+		// being fetched as module scripts (`text/css` MIME error).
+		const baseUrl = globalThis._VSCODE_USE_RELATIVE_IMPORTS
+			? new URL('../../../../', import.meta.url)
+			: new URL(`${fileUriFromPath(configuration.appRoot, { isWindows: safeProcess.platform === 'win32', scheme: 'vscode-file', fallbackAuthority: 'vscode-app' })}/out/`);
 		globalThis._VSCODE_FILE_ROOT = baseUrl.toString();
 
 		// Dev only: CSS import map tricks

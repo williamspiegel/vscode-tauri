@@ -59,6 +59,193 @@ function waitForWorkbenchRender(timeoutMs = 15000): Promise<boolean> {
   });
 }
 
+function shouldShowVerboseStartupStatus(): boolean {
+  return (
+    new URLSearchParams(window.location.search).get('hostDebug') === '1' ||
+    (() => {
+      try {
+        return window.localStorage?.getItem('tauriHostDebug') === '1';
+      } catch {
+        return false;
+      }
+    })()
+  );
+}
+
+const WORKBENCH_BOOTSTRAP_QUERY_KEY = 'workbenchBundle';
+const LEGACY_WORKBENCH_BOOTSTRAP_PATH = '/out/vs/code/electron-browser/workbench/workbench.js';
+const MIN_WORKBENCH_BOOTSTRAP_PATH = '/out-vscode-min/vs/code/electron-browser/workbench/workbench.js';
+const WORKBENCH_BOOTSTRAP_SUFFIX = '/vs/code/electron-browser/workbench/workbench.js';
+const WORKBENCH_DESKTOP_MAIN_SUFFIX = '/vs/workbench/workbench.desktop.main.js';
+
+function isHttpOrigin(): boolean {
+  return window.location.protocol === 'http:' || window.location.protocol === 'https:';
+}
+
+function toFileUrlFromAppRoot(appRoot: string, pathFromAppRoot: string): string {
+  const root = appRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+  const absoluteRoot = root.startsWith('/') ? root : `/${root}`;
+  const suffix = pathFromAppRoot.startsWith('/') ? pathFromAppRoot : `/${pathFromAppRoot}`;
+  return encodeURI(`file://${absoluteRoot}${suffix}`).replace(/#/g, '%23');
+}
+
+function createOutModuleCandidates(appRoot: string, modulePathFromOut: string): string[] {
+  const normalized = modulePathFromOut.startsWith('/') ? modulePathFromOut : `/${modulePathFromOut}`;
+  const candidates = new Set<string>([
+    `/out${normalized}`
+  ]);
+  if (appRoot) {
+    if (isHttpOrigin()) {
+      candidates.add(`/@fs${appRoot}/out${normalized}`);
+    } else {
+      candidates.add(toFileUrlFromAppRoot(appRoot, `/out${normalized}`));
+    }
+  }
+
+  return [...candidates];
+}
+
+function getWorkbenchDesktopMainPath(workbenchBootstrapPath: string): string {
+  if (workbenchBootstrapPath.endsWith(WORKBENCH_BOOTSTRAP_SUFFIX)) {
+    return `${workbenchBootstrapPath.slice(0, -WORKBENCH_BOOTSTRAP_SUFFIX.length)}${WORKBENCH_DESKTOP_MAIN_SUFFIX}`;
+  }
+
+  if (workbenchBootstrapPath.includes('/out-vscode-min/')) {
+    return '/out-vscode-min/vs/workbench/workbench.desktop.main.js';
+  }
+
+  return '/out/vs/workbench/workbench.desktop.main.js';
+}
+
+function resolveWorkbenchBootstrapCandidates(appRoot: string): string[] {
+  const searchParams = new URLSearchParams(window.location.search);
+  const bundleOverride = searchParams.get(WORKBENCH_BOOTSTRAP_QUERY_KEY);
+  const canUseFsCandidates = isHttpOrigin();
+  const isHttp = isHttpOrigin();
+  const legacyCandidates = appRoot && canUseFsCandidates
+    ? [`/@fs${appRoot}${LEGACY_WORKBENCH_BOOTSTRAP_PATH}`, LEGACY_WORKBENCH_BOOTSTRAP_PATH]
+    : [LEGACY_WORKBENCH_BOOTSTRAP_PATH];
+  const minCandidates = appRoot && canUseFsCandidates
+    ? [`/@fs${appRoot}${MIN_WORKBENCH_BOOTSTRAP_PATH}`, MIN_WORKBENCH_BOOTSTRAP_PATH]
+    : [MIN_WORKBENCH_BOOTSTRAP_PATH];
+  const dedupe = (values: string[]): string[] => [...new Set(values)];
+
+  if (bundleOverride === 'legacy') {
+    return dedupe(legacyCandidates);
+  }
+  if (bundleOverride === 'min') {
+    return dedupe([...minCandidates, ...legacyCandidates]);
+  }
+
+  // Keep legacy default stable until min bundle parity is validated for both
+  // dev and packaged Tauri runtime shims. In packaged runtime, avoid implicit
+  // fallback into min to prevent startup landing on known min-only failures.
+  if (!isHttp) {
+    return dedupe(legacyCandidates);
+  }
+
+  return dedupe(legacyCandidates);
+}
+
+function installWorkbenchModulePreloadHints(workbenchBootstrapCandidates: readonly string[]): void {
+  if (!isHttpOrigin()) {
+    return;
+  }
+
+  const moduleUrls = new Set<string>();
+  const primaryBootstrapPath = workbenchBootstrapCandidates[0];
+  if (primaryBootstrapPath) {
+    moduleUrls.add(primaryBootstrapPath);
+    moduleUrls.add(getWorkbenchDesktopMainPath(primaryBootstrapPath));
+  }
+
+  for (const moduleUrl of moduleUrls) {
+    const href = new URL(moduleUrl, window.location.origin).toString();
+    if (document.head.querySelector(`link[rel="modulepreload"][href="${href}"]`)) {
+      continue;
+    }
+
+    const preload = document.createElement('link');
+    preload.rel = 'modulepreload';
+    preload.href = href;
+    document.head.appendChild(preload);
+  }
+}
+
+function getLatestPerformanceMark(name: string): number | undefined {
+  const entries = performance.getEntriesByName(name, 'mark');
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return entries[entries.length - 1].startTime;
+}
+
+function getDurationFromMarks(startMark: string, endMark: string): number | undefined {
+  const start = getLatestPerformanceMark(startMark);
+  const end = getLatestPerformanceMark(endMark);
+  if (typeof start !== 'number' || typeof end !== 'number' || end < start) {
+    return undefined;
+  }
+
+  return Math.round(end - start);
+}
+
+function logStartupBreakdown(waitDurationMs: number): void {
+  const phaseDurations = {
+    windowConfig: getDurationFromMarks('code/willWaitForWindowConfig', 'code/didWaitForWindowConfig'),
+    cssLoader: getDurationFromMarks('code/willAddCssLoader', 'code/didAddCssLoader'),
+    workbenchMainImport: getDurationFromMarks('code/willLoadWorkbenchMain', 'code/didLoadWorkbenchMain'),
+    sharedProcessConnect: getDurationFromMarks('code/willConnectSharedProcess', 'code/didConnectSharedProcess'),
+    postMainToRender: getDurationFromMarks('code/didLoadWorkbenchMain', 'tauri/workbenchFirstRender')
+  };
+
+  const formatted = Object.entries(phaseDurations)
+    .map(([phase, ms]) => `${phase}=${typeof ms === 'number' ? `${ms}ms` : 'n/a'}`)
+    .join(' ');
+
+  console.info(`[startup.breakdown] wait=${waitDurationMs}ms ${formatted}`);
+}
+
+const SHARED_PROCESS_PATCH_MARKER = '__tauriSharedProcessPatched';
+
+async function installSharedProcessConnectionPatch(appRoot: string): Promise<void> {
+  const candidatePaths = createOutModuleCandidates(
+    appRoot,
+    '/vs/workbench/services/sharedProcess/electron-browser/sharedProcessService.js'
+  );
+
+  for (const modulePath of candidatePaths) {
+    try {
+      const module = (await import(
+        /* @vite-ignore */ modulePath
+      )) as {
+        SharedProcessService?: {
+          prototype?: Record<string, unknown>;
+        };
+      };
+
+      const prototype = module.SharedProcessService?.prototype;
+      if (!prototype || prototype[SHARED_PROCESS_PATCH_MARKER] === true) {
+        continue;
+      }
+
+      const originalConnect = prototype.connect;
+      if (typeof originalConnect !== 'function') {
+        continue;
+      }
+
+      prototype.connect = function patchedConnect(this: Record<string, unknown>, ...args: unknown[]) {
+        this.disableMessagePortTransport = true;
+        return (originalConnect as (...innerArgs: unknown[]) => unknown).apply(this, args);
+      };
+      prototype[SHARED_PROCESS_PATCH_MARKER] = true;
+    } catch (error) {
+      console.warn('[tauri.compat] failed to patch shared process connection path', { modulePath, error });
+    }
+  }
+}
+
 function installGlobalStartupErrorHandlers(): void {
   window.addEventListener('error', event => {
     const detailParts: string[] = [];
@@ -93,11 +280,14 @@ function installGlobalStartupErrorHandlers(): void {
 
 function formatErrorDetails(error: unknown): string {
   if (error instanceof Error) {
-    if (error.stack && error.stack.length > 0) {
-      return error.stack;
+    const parts: string[] = [];
+    if (error.name || error.message) {
+      parts.push(`${error.name || 'Error'}: ${error.message || '<no-message>'}`);
     }
-
-    return `${error.name}: ${error.message}`;
+    if (error.stack && error.stack.length > 0) {
+      parts.push(error.stack);
+    }
+    return parts.join('\n');
   }
 
   if (typeof error === 'string') {
@@ -236,12 +426,10 @@ function installFileRootCompatibilityPatch(): void {
 }
 
 async function installFilesystemCompatibilityPatch(appRoot: string): Promise<void> {
-  const candidatePaths = new Set<string>([
-    '/out/vs/platform/files/common/diskFileSystemProviderClient.js'
-  ]);
-  if (appRoot) {
-    candidatePaths.add(`/@fs${appRoot}/out/vs/platform/files/common/diskFileSystemProviderClient.js`);
-  }
+  const candidatePaths = createOutModuleCandidates(
+    appRoot,
+    '/vs/platform/files/common/diskFileSystemProviderClient.js'
+  );
 
   for (const modulePath of candidatePaths) {
     try {
@@ -298,6 +486,7 @@ async function installFilesystemCompatibilityPatch(appRoot: string): Promise<voi
 
 async function main(): Promise<void> {
   installGlobalStartupErrorHandlers();
+  const verboseStartupStatus = shouldShowVerboseStartupStatus();
   setStatus('Launching Tauri host...');
   const host = new HostClient();
 
@@ -307,6 +496,7 @@ async function main(): Promise<void> {
       return await run();
     } catch (error) {
       const detail = formatErrorDetails(error);
+      console.error('[startup.step.error]', { label, error, detail });
       throw new Error(`${label} failed:\n${detail}`);
     }
   };
@@ -315,10 +505,12 @@ async function main(): Promise<void> {
   const windowConfig = await step('Resolving window config...', () => host.resolveWindowConfig());
   const appRoot =
     typeof windowConfig.appRoot === 'string' ? windowConfig.appRoot : '';
-  const errorModuleCandidates = [
-    '/out/vs/base/common/errors.js',
-    appRoot ? `/@fs${appRoot}/out/vs/base/common/errors.js` : ''
-  ].filter(Boolean);
+  console.info('[startup] using appRoot', appRoot);
+  const workbenchBootstrapCandidates = resolveWorkbenchBootstrapCandidates(appRoot);
+  console.info('[startup] workbench bootstrap candidates', workbenchBootstrapCandidates);
+  // Kick modulepreload early so network/parse can overlap with sandbox/compat setup.
+  installWorkbenchModulePreloadHints(workbenchBootstrapCandidates);
+  const errorModuleCandidates = createOutModuleCandidates(appRoot, '/vs/base/common/errors.js');
   for (const modulePath of errorModuleCandidates) {
     await installVsCodeUnexpectedErrorHookForPath(modulePath);
   }
@@ -337,17 +529,65 @@ async function main(): Promise<void> {
   await step('Installing filesystem compatibility patch...', () => installFilesystemCompatibilityPatch(appRoot));
 
   setStatus('Loading desktop workbench runtime...');
-  const desktopWorkbenchPath = '/out/vs/code/electron-browser/workbench/workbench.js';
-  await step('Loading desktop workbench runtime...', () => import(/* @vite-ignore */ desktopWorkbenchPath).then(() => undefined));
+  const loadedWorkbenchPath = await step('Loading desktop workbench runtime...', async () => {
+    const candidateFailures: string[] = [];
+    for (const candidatePath of workbenchBootstrapCandidates) {
+      try {
+        await import(/* @vite-ignore */ candidatePath);
+        return candidatePath;
+      } catch (error) {
+        candidateFailures.push(`${candidatePath}: ${formatErrorDetails(error)}`);
+        console.warn('[startup] failed to load workbench runtime candidate', {
+          candidatePath,
+          error
+        });
+      }
+    }
+
+    const detail = candidateFailures.join('\n\n');
+    throw new Error(
+      detail.length > 0
+        ? `Unable to load desktop workbench runtime from any candidate path.\n${detail}`
+        : 'Unable to load desktop workbench runtime from any candidate path.'
+    );
+  });
+  console.info(`[startup] loaded workbench runtime from ${loadedWorkbenchPath}`);
 
   for (const modulePath of errorModuleCandidates) {
     await installVsCodeUnexpectedErrorHookForPath(modulePath);
   }
 
-  setStatus('Desktop runtime loaded. Waiting for workbench render...');
+  if (verboseStartupStatus) {
+    setStatus('Desktop runtime loaded. Waiting for workbench render...');
+  } else {
+    setStatus('', 'info', false);
+  }
+
+  const waitStart = performance.now();
   const rendered = await waitForWorkbenchRender();
+  const waitDurationMs = Math.round(performance.now() - waitStart);
+  if (rendered) {
+    performance.mark('tauri/workbenchFirstRender');
+  }
+  if (waitDurationMs >= 500) {
+    console.info(`[startup] waited ${waitDurationMs}ms for first workbench render`);
+    logStartupBreakdown(waitDurationMs);
+  }
+
   if (rendered) {
     setStatus('', 'info', false);
+    const runSharedProcessPatch = () => {
+      void installSharedProcessConnectionPatch(appRoot).catch(error => {
+        console.warn('[tauri.compat] shared-process compatibility patch failed', error);
+      });
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(() => runSharedProcessPatch(), { timeout: 2000 });
+    } else {
+      window.setTimeout(runSharedProcessPatch, 0);
+    }
+
     return;
   }
 
@@ -360,7 +600,10 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  const message =
+    error instanceof Error
+      ? error.message || error.stack || String(error)
+      : String(error);
   setStatus(`Startup failed:\n${message}`, 'error', true);
   console.error(error);
 });
