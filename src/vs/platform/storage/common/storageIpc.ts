@@ -100,14 +100,16 @@ abstract class BaseProfileAwareStorageDatabaseClient extends BaseStorageDatabase
 	}
 
 	private registerListeners(): void {
-		this._register(this.channel.listen<ISerializableItemsChangeEvent>('onDidChangeStorage', { profile: this.profile })((e: ISerializableItemsChangeEvent) => this.onDidChangeStorage(e)));
+		this._register(this.channel.listen<ISerializableItemsChangeEvent | null | undefined>('onDidChangeStorage', { profile: this.profile })(e => this.onDidChangeStorage(e)));
 	}
 
-	private onDidChangeStorage(e: ISerializableItemsChangeEvent): void {
-		if (Array.isArray(e.changed) || Array.isArray(e.deleted)) {
+	private onDidChangeStorage(e: ISerializableItemsChangeEvent | null | undefined): void {
+		const changed = Array.isArray(e?.changed) ? e.changed : undefined;
+		const deleted = Array.isArray(e?.deleted) ? e.deleted : undefined;
+		if (changed || deleted) {
 			this._onDidChangeItemsExternal.fire({
-				changed: e.changed ? new Map(e.changed) : undefined,
-				deleted: e.deleted ? new Set<string>(e.deleted) : undefined
+				changed: changed ? new Map(changed) : undefined,
+				deleted: deleted ? new Set<string>(deleted) : undefined
 			});
 		}
 	}

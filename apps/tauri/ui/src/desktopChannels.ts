@@ -30,7 +30,6 @@ function readDebugFlag(
 const ENABLE_CHANNEL_TRACE = readDebugFlag('hostDebug', 'tauriHostDebug') === true;
 // Temporarily force-disable noisy local filesystem trace logs.
 const ENABLE_FS_TRACE = false;
-const READ_FILE_STREAM_FALLBACK_DELAY_MS = 100;
 
 export interface DesktopChannelRegistry {
   readonly channels: readonly string[];
@@ -44,7 +43,6 @@ export interface DesktopChannelRegistry {
   ): Promise<() => void>;
 }
 
-type DefaultCallHandler = (args: unknown[]) => unknown;
 type ResultNormalizer = (result: unknown, args: unknown[]) => unknown;
 type EventNormalizer = (payload: unknown, arg: unknown) => unknown;
 
@@ -101,32 +99,6 @@ function fallbackUri(path: string): { scheme: string; authority: string; path: s
     scheme: 'file',
     authority: '',
     path
-  };
-}
-
-function fallbackWorkspaceIdentifier(seed = 'tauri-workspace'): { id: string; configPath: string } {
-  return {
-    id: `${seed}-id`,
-    configPath: `${seed}.code-workspace`
-  };
-}
-
-function fallbackUserDataProfile(id = 'default', name = 'Default'): Record<string, unknown> {
-  const base = '/tmp/vscode-tauri/profiles';
-  return {
-    id,
-    isDefault: id === 'default',
-    name,
-    location: { scheme: 'file', authority: '', path: `${base}/${id}` },
-    globalStorageHome: { scheme: 'file', authority: '', path: `${base}/${id}/globalStorage` },
-    settingsResource: { scheme: 'file', authority: '', path: `${base}/${id}/settings.json` },
-    keybindingsResource: { scheme: 'file', authority: '', path: `${base}/${id}/keybindings.json` },
-    tasksResource: { scheme: 'file', authority: '', path: `${base}/${id}/tasks.json` },
-    snippetsHome: { scheme: 'file', authority: '', path: `${base}/${id}/snippets` },
-    promptsHome: { scheme: 'file', authority: '', path: `${base}/${id}/prompts` },
-    extensionsResource: { scheme: 'file', authority: '', path: `${base}/${id}/extensions.json` },
-    mcpResource: { scheme: 'file', authority: '', path: `${base}/${id}/mcp.json` },
-    cacheHome: { scheme: 'file', authority: '', path: `${base}/${id}/cache` }
   };
 }
 
@@ -366,220 +338,6 @@ async function handleNativeHostPickAndOpen(host: HostClient, method: string, arg
     return null;
   }
 }
-
-const DEFAULT_CALL_RESPONSES = new Map<string, Map<string, DefaultCallHandler>>([
-  [
-    'logger',
-    new Map<string, DefaultCallHandler>([
-      ['getRegisteredLoggers', () => []],
-      ['createLogger', () => null],
-      ['log', () => null],
-      ['consoleLog', () => null],
-      ['registerLogger', () => null],
-      ['deregisterLogger', () => null],
-      ['setLogLevel', () => null],
-      ['setVisibility', () => null]
-    ])
-  ],
-  [
-    'storage',
-    new Map<string, DefaultCallHandler>([
-      ['getItems', () => []],
-      ['updateItems', () => null],
-      ['optimize', () => null],
-      ['isUsed', () => false]
-    ])
-  ],
-  [
-    'policy',
-    new Map<string, DefaultCallHandler>([['updatePolicyDefinitions', () => ({})]])
-  ],
-  [
-    'sign',
-    new Map<string, DefaultCallHandler>([
-      ['sign', args => (typeof args[0] === 'string' ? args[0] : '')],
-      ['createNewMessage', args => ({ id: 'tauri-sign-message', data: typeof args[0] === 'string' ? args[0] : '' })],
-      ['validate', () => true]
-    ])
-  ],
-  [
-    'url',
-    new Map<string, DefaultCallHandler>([
-      ['open', () => true],
-      ['handleURL', () => true]
-    ])
-  ],
-  [
-    'workspaces',
-    new Map<string, DefaultCallHandler>([
-      ['getRecentlyOpened', () => ({ workspaces: [], files: [] })],
-      ['getDirtyWorkspaces', () => []],
-      ['getWorkspaceIdentifier', () => fallbackWorkspaceIdentifier('tauri-existing')],
-      ['createUntitledWorkspace', () => fallbackWorkspaceIdentifier('tauri-untitled')],
-      ['enterWorkspace', () => ({ workspace: fallbackWorkspaceIdentifier('tauri-entered') })],
-      ['addRecentlyOpened', () => null],
-      ['removeRecentlyOpened', () => null],
-      ['clearRecentlyOpened', () => null],
-      ['deleteUntitledWorkspace', () => null]
-    ])
-  ],
-  [
-    'userDataProfiles',
-    new Map<string, DefaultCallHandler>([
-      ['createNamedProfile', args => fallbackUserDataProfile('named', typeof args[0] === 'string' ? args[0] : 'Named')],
-      ['createProfile', args => fallbackUserDataProfile(typeof args[0] === 'string' ? args[0] : 'profile', typeof args[1] === 'string' ? args[1] : 'Profile')],
-      ['createTransientProfile', () => fallbackUserDataProfile('transient', 'Transient')],
-      ['updateProfile', args => (typeof args[0] === 'object' && args[0] ? args[0] : fallbackUserDataProfile('updated', 'Updated'))],
-      ['removeProfile', () => null],
-      ['setProfileForWorkspace', () => null],
-      ['resetWorkspaces', () => null],
-      ['cleanUp', () => null],
-      ['cleanUpTransientProfiles', () => null]
-    ])
-  ],
-  [
-    'keyboardLayout',
-    new Map<string, DefaultCallHandler>([
-      [
-        'getKeyboardLayoutData',
-        () => ({
-          keyboardLayoutInfo: {
-            id: 'tauri-us',
-            lang: 'en',
-            layout: 'US'
-          },
-          keyboardMapping: {}
-        })
-      ]
-    ])
-  ],
-  [
-    'nativeHost',
-    new Map<string, DefaultCallHandler>([
-      ['notifyReady', () => null],
-      ['focusWindow', () => null],
-      ['openWindow', () => null],
-      ['openSessionsWindow', () => null],
-      ['toggleFullScreen', () => null],
-      ['setBackgroundThrottling', () => null],
-      ['saveWindowSplash', () => null],
-      ['setRepresentedFilename', () => null],
-      ['setDocumentEdited', () => null],
-      ['openDevTools', () => null],
-      ['toggleDevTools', () => null],
-      ['reload', () => null],
-      ['relaunch', () => null],
-      ['quit', () => null],
-      ['exit', () => null],
-      ['showItemInFolder', () => null],
-      ['pickFileFolderAndOpen', () => null],
-      ['pickFileAndOpen', () => null],
-      ['pickFolderAndOpen', () => null],
-      ['pickWorkspaceAndOpen', () => null],
-      ['isFullScreen', () => false],
-      ['isMaximized', () => false],
-      ['isWindowAlwaysOnTop', () => false],
-      ['isOnBatteryPower', () => false],
-      ['getWindowCount', () => 1],
-      ['getActiveWindowId', () => 1],
-      ['getProcessId', () => 1],
-      ['getWindows', () => []],
-      ['getOSColorScheme', () => ({ dark: false, highContrast: false })],
-      [
-        'getOSProperties',
-        () => ({
-          type: 'Darwin',
-          release: '0.0.0',
-          arch: 'x64',
-          platform: 'darwin',
-          cpus: []
-        })
-      ],
-      ['getOSStatistics', () => ({ totalmem: 0, freemem: 0, loadavg: [0, 0, 0] })],
-      ['getSystemIdleState', () => 'active'],
-      ['getSystemIdleTime', () => 0],
-      ['getCurrentThermalState', () => 'nominal'],
-      ['startPowerSaveBlocker', () => 1],
-      ['isPowerSaveBlockerStarted', () => false],
-      ['stopPowerSaveBlocker', () => true],
-      ['showMessageBox', () => ({ response: 0, checkboxChecked: false })],
-      ['showOpenDialog', () => ({ canceled: true, filePaths: [] })],
-      ['showSaveDialog', () => ({ canceled: true })],
-      ['openExternal', () => true],
-      ['readClipboardText', () => ''],
-      ['readClipboardFindText', () => ''],
-      ['writeClipboardText', () => null],
-      ['writeClipboardFindText', () => null],
-      ['readImage', () => []],
-      ['isAdmin', () => false],
-      ['hasWSLFeatureInstalled', () => false],
-      ['isRunningUnderARM64Translation', () => false],
-      ['resolveProxy', () => undefined]
-    ])
-  ],
-  [
-    'extensionHostStarter',
-    new Map<string, DefaultCallHandler>([
-      ['createExtensionHost', () => ({ id: 'tauri-extension-host' })],
-      ['start', () => ({ pid: undefined })],
-      ['enableInspectPort', () => false],
-      ['kill', () => null]
-    ])
-  ],
-  [
-    'externalTerminal',
-    new Map<string, DefaultCallHandler>([
-      ['openTerminal', () => null],
-      ['runInTerminal', () => undefined],
-      [
-        'getDefaultTerminalForPlatforms',
-        () => ({
-          windows: 'cmd.exe',
-          linux: 'xterm',
-          osx: 'Terminal.app'
-        })
-      ]
-    ])
-  ],
-  [
-    'localPty',
-    new Map<string, DefaultCallHandler>([
-      ['getPerformanceMarks', () => []],
-      ['getLatency', () => []],
-      ['getProfiles', () => []],
-      ['getDefaultSystemShell', () => '/bin/zsh'],
-      ['getEnvironment', () => ({})],
-      ['getShellEnvironment', () => ({})],
-      ['getTerminalLayoutInfo', () => undefined],
-      ['setTerminalLayoutInfo', () => null],
-      ['reduceConnectionGraceTime', () => null],
-      ['persistTerminalState', () => null],
-      ['requestDetachInstance', () => undefined],
-      ['acceptDetachInstanceReply', () => null]
-    ])
-  ],
-  [
-    'localFilesystem',
-    new Map<string, DefaultCallHandler>([
-      ['stat', args => ({ type: inferStatTypeFromArgs(args), ctime: 0, mtime: 0, size: 0 })],
-      ['realpath', () => '/'],
-      ['readdir', () => []],
-      ['readFile', () => ({ buffer: new Uint8Array(0) })],
-      ['writeFile', () => null],
-      ['mkdir', () => null],
-      ['delete', () => null],
-      ['rename', () => null],
-      ['copy', () => null],
-      ['cloneFile', () => null],
-      ['open', () => 1],
-      ['close', () => null],
-      ['read', () => [{ buffer: new Uint8Array(0) }, 0]],
-      ['write', () => 0],
-      ['watch', () => null],
-      ['unwatch', () => null]
-    ])
-  ]
-]);
 
 const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
   [
@@ -898,18 +656,11 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
         return handleNativeHostPickAndOpen(host, method, normalized);
       }
       const normalizeResult = RESULT_NORMALIZERS.get(channel)?.get(method);
-      const fallback = channel === 'localFilesystem' ? undefined : DEFAULT_CALL_RESPONSES.get(channel)?.get(method);
 
       try {
         const result = await host.desktopChannelCall(channel, method, normalized);
-        if (result == null) {
-          if (fallback) {
-            const fallbackResult = fallback(normalized);
-            return normalizeResult ? normalizeResult(fallbackResult, normalized) : fallbackResult;
-          }
-          if (normalizeResult) {
-            return normalizeResult(undefined, normalized);
-          }
+        if (result == null && normalizeResult) {
+          return normalizeResult(undefined, normalized);
         }
 
         const normalizedResult = normalizeResult ? normalizeResult(result, normalized) : result;
@@ -948,19 +699,8 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           throw toFileSystemError(error);
         }
 
-        if (fallback) {
-          if (ENABLE_CHANNEL_TRACE) {
-            console.warn('[desktop.channelCall:fallback-default]', { channel, method, error });
-          }
-          const fallbackResult = fallback(normalized);
-          return normalizeResult ? normalizeResult(fallbackResult, normalized) : fallbackResult;
-        }
-
-        if (normalizeResult) {
-          if (ENABLE_CHANNEL_TRACE) {
-            console.warn('[desktop.channelCall:normalized-fallback]', { channel, method, error });
-          }
-          return normalizeResult(undefined, normalized);
+        if (ENABLE_CHANNEL_TRACE) {
+          console.warn('[desktop.channelCall:error]', { channel, method, error });
         }
 
         throw error;
@@ -972,32 +712,9 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
       }
       if (channel === 'localFilesystem' && event === 'readFileStream') {
         let stop: (() => Promise<void>) | undefined;
-        let fallbackTimer: number | undefined;
-        let didReceiveStreamPayload = false;
-        let fallbackActive = false;
         let streamClosed = false;
         let streamChunkCount = 0;
         let streamTotalBytes = 0;
-        const streamArgs = Array.isArray(arg) ? arg : [arg];
-        const readTarget = streamArgs[0];
-        const readOptions = streamArgs.length > 1 ? streamArgs[1] : undefined;
-        const decodeReadPayload = (result: unknown): Uint8Array | undefined => {
-          const payload = asRecord(result);
-          return (
-            toUint8Array(payload.buffer) ??
-            toUint8Array(payload.bytes) ??
-            toUint8Array(payload.data) ??
-            decodeBase64ToUint8Array(payload.base64) ??
-            toUint8Array(result)
-          );
-        };
-        const clearFallbackTimer = (): void => {
-          if (typeof fallbackTimer !== 'number') {
-            return;
-          }
-          window.clearTimeout(fallbackTimer);
-          fallbackTimer = undefined;
-        };
 
         const emitDecodedBytes = (bytes: Uint8Array): void => {
           if (streamClosed) {
@@ -1029,53 +746,8 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           onEvent('end');
         };
 
-        const fallbackToReadFile = async (listenError?: unknown): Promise<void> => {
-          if (didReceiveStreamPayload || fallbackActive || streamClosed) {
-            return;
-          }
-
-          if (typeof readTarget === 'undefined') {
-            onEvent(toFileSystemError(
-              listenError ?? new Error('readFileStream fallback missing resource argument')
-            ));
-            return;
-          }
-
-          fallbackActive = true;
-          try {
-            const result = await host.desktopChannelCall('localFilesystem', 'readFile', [readTarget, readOptions]);
-            const decoded = decodeReadPayload(result);
-            if (!decoded) {
-              onEvent(
-                toFileSystemError(new Error('Invalid readFile fallback payload for readFileStream'))
-              );
-              return;
-            }
-
-            emitDecodedBytes(decoded);
-            emitStreamEnd();
-          } catch (error) {
-            if (!streamClosed) {
-              streamClosed = true;
-              if (ENABLE_FS_TRACE) {
-                console.error('[desktop.fs.stream.fallback.error]', {
-                  errorMessage: normalizeErrorMessage(error)
-                });
-              }
-              onEvent(toFileSystemError(error));
-            }
-          }
-        };
-
         try {
           stop = await host.desktopChannelListen(channel, event, arg, payload => {
-            if (fallbackActive) {
-              return;
-            }
-
-            didReceiveStreamPayload = true;
-            clearFallbackTimer();
-
             if (payload === 'end') {
               emitStreamEnd();
               return;
@@ -1147,20 +819,15 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
               onEvent(toFileSystemError(new Error('Invalid readFileStream payload from host')));
             }
           });
-          fallbackTimer = window.setTimeout(() => {
-            void fallbackToReadFile();
-          }, READ_FILE_STREAM_FALLBACK_DELAY_MS);
         } catch (error) {
-          clearFallbackTimer();
-          await fallbackToReadFile(error);
+          streamClosed = true;
+          onEvent(toFileSystemError(error));
           return async () => {
             return;
           };
         }
         return async () => {
-          fallbackActive = true;
           streamClosed = true;
-          clearFallbackTimer();
           await stop?.();
         };
       }

@@ -1,8 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capabilities;
-mod metrics;
-mod node_fallback;
 mod protocol;
 mod router;
 
@@ -1650,11 +1648,10 @@ fn main() {
         normalize_path(compiled_repo_root)
     }
 
-    let fallback_script = PathBuf::from("../node/fallback.mjs");
     let repo_root = discover_repo_root();
 
     let app_state = AppState {
-        router: CapabilityRouter::new(fallback_script),
+        router: CapabilityRouter::new(),
         repo_root,
         channel_runtime: Mutex::new(ChannelRuntimeState {
             subscriptions: HashMap::new(),

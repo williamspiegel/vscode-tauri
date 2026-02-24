@@ -7,7 +7,6 @@ use crate::capabilities::process::{ProcessCapability, RustPrimaryProcessCapabili
 use crate::capabilities::terminal::{RustPrimaryTerminalCapability, TerminalCapability};
 use crate::capabilities::update::{RustPrimaryUpdateCapability, UpdateCapability};
 use crate::capabilities::window::{RustPrimaryWindowCapability, WindowCapability};
-use crate::node_fallback::NodeFallbackClient;
 use crate::protocol::CapabilityDomain;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -37,7 +36,6 @@ pub struct CapabilityRouter {
     watcher_state: Arc<Mutex<WatcherRuntimeState>>,
     next_watcher_watch_id: Arc<AtomicU64>,
     menubar_state: Arc<Mutex<MenubarRuntimeState>>,
-    fallback: NodeFallbackClient,
 }
 
 #[derive(Default)]
@@ -65,8 +63,7 @@ enum MenubarAction {
 }
 
 impl CapabilityRouter {
-    pub fn new(fallback_script: PathBuf) -> Self {
-        let metrics = crate::metrics::FallbackMetrics::default();
+    pub fn new() -> Self {
         Self {
             window: Arc::new(RustPrimaryWindowCapability),
             filesystem: Arc::new(RustPrimaryFilesystemCapability::new()),
@@ -82,7 +79,6 @@ impl CapabilityRouter {
             watcher_state: Arc::new(Mutex::new(WatcherRuntimeState::default())),
             next_watcher_watch_id: Arc::new(AtomicU64::new(1)),
             menubar_state: Arc::new(Mutex::new(MenubarRuntimeState::default())),
-            fallback: NodeFallbackClient::new(fallback_script, metrics),
         }
     }
 
@@ -106,30 +102,7 @@ impl CapabilityRouter {
             return Ok(value);
         }
 
-        let fallback_result = self
-            .fallback
-            .invoke_capability(domain, method, params)
-            .await?;
-        let metric_key = format!("capability:{}:{method}", domain.as_str());
-        let fallback_count = self
-            .fallback
-            .metrics()
-            .snapshot()
-            .get(&metric_key)
-            .copied()
-            .unwrap_or(0);
-        if let Some(app_handle) = crate::capabilities::window::app_handle() {
-            let _ = app_handle.emit(
-                "fallback_used",
-                json!({
-                    "domain": domain.as_str(),
-                    "method": method,
-                    "count": fallback_count
-                }),
-            );
-        }
-
-        Ok(fallback_result)
+        Ok(dispatch_capability_rust_default(method, params))
     }
 
     pub async fn dispatch_channel(
@@ -149,27 +122,7 @@ impl CapabilityRouter {
             return Ok(result);
         }
 
-        let fallback_result = self.fallback.invoke_channel(channel, method, args).await?;
-        let metric_key = format!("channel:{channel}:{method}");
-        let fallback_count = self
-            .fallback
-            .metrics()
-            .snapshot()
-            .get(&metric_key)
-            .copied()
-            .unwrap_or(0);
-        if let Some(app_handle) = crate::capabilities::window::app_handle() {
-            let _ = app_handle.emit(
-                "fallback_used",
-                json!({
-                    "domain": format!("channel:{channel}"),
-                    "method": method,
-                    "count": fallback_count
-                }),
-            );
-        }
-
-        Ok(fallback_result)
+        Ok(default_by_method_name(method))
     }
 
     pub fn watcher_verbose_logging(&self) -> bool {
@@ -1376,7 +1329,7 @@ impl CapabilityRouter {
     }
 
     pub fn fallback_counts(&self) -> std::collections::BTreeMap<String, u64> {
-        self.fallback.metrics().snapshot()
+        std::collections::BTreeMap::new()
     }
 
     pub fn menubar_action_payload(&self, menu_item_id: &str) -> Option<Value> {
@@ -1475,6 +1428,10 @@ fn dispatch_channel_rust_default(channel: &str, method: &str, _args: &Value) -> 
         },
         _ => Some(default_by_method_name(method)),
     }
+}
+
+fn dispatch_capability_rust_default(method: &str, _params: &Value) -> Value {
+    default_by_method_name(method)
 }
 
 fn default_by_method_name(method: &str) -> Value {

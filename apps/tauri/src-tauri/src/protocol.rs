@@ -86,20 +86,6 @@ impl CapabilityDomain {
             None
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Window => "window",
-            Self::Filesystem => "filesystem",
-            Self::Terminal => "terminal",
-            Self::Clipboard => "clipboard",
-            Self::Dialogs => "dialogs",
-            Self::Process => "process",
-            Self::Power => "power",
-            Self::Os => "os",
-            Self::Update => "update",
-        }
-    }
 }
 
 pub fn ok_response(id: u64, result: Value) -> JsonRpcResponse {

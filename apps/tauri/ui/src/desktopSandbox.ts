@@ -202,17 +202,6 @@ class RendererChannelServer {
         });
       }
 
-      // Extra dynamic channels still route through host fallback.
-      server.registerChannel('tauriFallback', {
-        call: async (_ctx: unknown, command: string, arg?: unknown) => {
-          const args = Array.isArray(arg) ? arg : typeof arg === 'undefined' ? [] : [arg];
-          return this.registry.call('tauriFallback', command, args);
-        },
-        listen: (_ctx: unknown, eventName: string, arg?: unknown) => {
-          return createHostBackedEvent(this.registry, 'tauriFallback', eventName, arg);
-        }
-      });
-
       // Keep buffer module loaded so wrap is available in acceptMessage.
       this.vsBufferWrap = bufferModule.VSBuffer.wrap;
     })();
