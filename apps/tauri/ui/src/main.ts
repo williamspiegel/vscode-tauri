@@ -136,13 +136,135 @@ function shouldAutoDownloadStartupProfile(): boolean {
 }
 
 const WORKBENCH_BOOTSTRAP_QUERY_KEY = 'workbenchBundle';
+const LEGACY_RETRY_QUERY_KEY = 'tauriLegacyRetry';
 const LEGACY_WORKBENCH_BOOTSTRAP_PATH = '/out/vs/code/electron-browser/workbench/workbench.js';
 const MIN_WORKBENCH_BOOTSTRAP_PATH = '/out-vscode-min/vs/code/electron-browser/workbench/workbench.js';
 const WORKBENCH_BOOTSTRAP_SUFFIX = '/vs/code/electron-browser/workbench/workbench.js';
 const WORKBENCH_DESKTOP_MAIN_SUFFIX = '/vs/workbench/workbench.desktop.main.js';
+const BOOTSTRAP_STATE_STORAGE_KEY = 'tauriWorkbenchBootstrapState';
+
+type WorkbenchBootstrapConfig = {
+  primaryPath?: string;
+  fallbackPath?: string;
+  preferredBundle?: string;
+  buildId?: string;
+};
+
+type WorkbenchBootstrapState = {
+  buildId?: string;
+  lastAttemptPath?: string;
+  lastGoodPath?: string;
+  failedPath?: string;
+  failedCount?: number;
+};
+
+let startupBootstrapBuildId = 'unknown';
+let startupPhaseActive = true;
+let startupRecoveryTriggered = false;
+let startupCurrentAttemptPath: string | undefined;
 
 function isHttpOrigin(): boolean {
   return window.location.protocol === 'http:' || window.location.protocol === 'https:';
+}
+
+function canonicalizeBootstrapPath(path: string | undefined): string | undefined {
+  if (!path) {
+    return undefined;
+  }
+  if (path.includes('/out-vscode-min/vs/code/electron-browser/workbench/workbench.js')) {
+    return MIN_WORKBENCH_BOOTSTRAP_PATH;
+  }
+  if (path.includes('/out/vs/code/electron-browser/workbench/workbench.js')) {
+    return LEGACY_WORKBENCH_BOOTSTRAP_PATH;
+  }
+  return path;
+}
+
+function isValidBootstrapPath(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    (value.startsWith('/out/') || value.startsWith('/out-vscode-min/'))
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function readBootstrapState(): WorkbenchBootstrapState {
+  try {
+    const raw = window.localStorage?.getItem(BOOTSTRAP_STATE_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = asRecord(JSON.parse(raw));
+    return {
+      buildId: typeof parsed.buildId === 'string' ? parsed.buildId : undefined,
+      lastAttemptPath: canonicalizeBootstrapPath(
+        typeof parsed.lastAttemptPath === 'string' ? parsed.lastAttemptPath : undefined
+      ),
+      lastGoodPath: canonicalizeBootstrapPath(
+        typeof parsed.lastGoodPath === 'string' ? parsed.lastGoodPath : undefined
+      ),
+      failedPath: canonicalizeBootstrapPath(
+        typeof parsed.failedPath === 'string' ? parsed.failedPath : undefined
+      ),
+      failedCount: typeof parsed.failedCount === 'number' ? parsed.failedCount : undefined
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeBootstrapState(next: WorkbenchBootstrapState): void {
+  try {
+    window.localStorage?.setItem(BOOTSTRAP_STATE_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function markBootstrapAttempt(buildId: string, path: string): void {
+  const canonicalPath = canonicalizeBootstrapPath(path) ?? path;
+  startupCurrentAttemptPath = canonicalPath;
+  const state = readBootstrapState();
+  writeBootstrapState({
+    ...state,
+    buildId,
+    lastAttemptPath: canonicalPath
+  });
+}
+
+function markBootstrapFailure(buildId: string, path: string): void {
+  const canonicalPath = canonicalizeBootstrapPath(path) ?? path;
+  if (startupCurrentAttemptPath === canonicalPath) {
+    startupCurrentAttemptPath = undefined;
+  }
+  const state = readBootstrapState();
+  const priorFailures = state.failedPath === canonicalPath ? state.failedCount ?? 0 : 0;
+  writeBootstrapState({
+    ...state,
+    buildId,
+    failedPath: canonicalPath,
+    failedCount: priorFailures + 1
+  });
+}
+
+function markBootstrapSuccess(buildId: string, path: string): void {
+  const canonicalPath = canonicalizeBootstrapPath(path) ?? path;
+  if (startupCurrentAttemptPath === canonicalPath) {
+    startupCurrentAttemptPath = undefined;
+  }
+  const state = readBootstrapState();
+  writeBootstrapState({
+    ...state,
+    buildId,
+    lastGoodPath: canonicalPath,
+    lastAttemptPath: undefined,
+    failedPath: state.failedPath === canonicalPath ? undefined : state.failedPath,
+    failedCount: state.failedPath === canonicalPath ? undefined : state.failedCount
+  });
 }
 
 function toFileUrlFromAppRoot(appRoot: string, pathFromAppRoot: string): string {
@@ -180,33 +302,137 @@ function getWorkbenchDesktopMainPath(workbenchBootstrapPath: string): string {
   return '/out/vs/workbench/workbench.desktop.main.js';
 }
 
-function resolveWorkbenchBootstrapCandidates(appRoot: string): string[] {
+function resolveHostWorkbenchBootstrapConfig(windowConfig: Record<string, unknown>): WorkbenchBootstrapConfig {
+  const bootstrap = asRecord(windowConfig.workbenchBootstrap);
+  return {
+    primaryPath: isValidBootstrapPath(bootstrap.primaryPath) ? bootstrap.primaryPath : undefined,
+    fallbackPath: isValidBootstrapPath(bootstrap.fallbackPath) ? bootstrap.fallbackPath : undefined,
+    preferredBundle: typeof bootstrap.preferredBundle === 'string' ? bootstrap.preferredBundle : undefined,
+    buildId: typeof bootstrap.buildId === 'string' && bootstrap.buildId.length > 0 ? bootstrap.buildId : undefined
+  };
+}
+
+function expandBootstrapCandidates(appRoot: string, path: string): string[] {
+  const out = new Set<string>([path]);
+  if (!path.startsWith('/')) {
+    return [...out];
+  }
+  const isKnownWorkbenchPath = path.startsWith('/out/') || path.startsWith('/out-vscode-min/');
+  if (isHttpOrigin()) {
+    if (isKnownWorkbenchPath) {
+      return [...out];
+    }
+    if (appRoot) {
+      out.add(`/@fs${appRoot}${path}`);
+    }
+  } else if (appRoot) {
+    out.add(toFileUrlFromAppRoot(appRoot, path));
+  }
+  return [...out];
+}
+
+function moveCandidateToFront(candidates: string[], preferredPath: string): string[] {
+  const index = candidates.indexOf(preferredPath);
+  if (index <= 0) {
+    return candidates;
+  }
+  const reordered = candidates.slice();
+  const [entry] = reordered.splice(index, 1);
+  reordered.unshift(entry);
+  return reordered;
+}
+
+function moveCandidateToBack(candidates: string[], deprioritizedPath: string): string[] {
+  const index = candidates.indexOf(deprioritizedPath);
+  if (index < 0 || index === candidates.length - 1) {
+    return candidates;
+  }
+  const reordered = candidates.slice();
+  const [entry] = reordered.splice(index, 1);
+  reordered.push(entry);
+  return reordered;
+}
+
+function resolveWorkbenchBootstrapCandidates(appRoot: string, windowConfig: Record<string, unknown>): string[] {
   const searchParams = new URLSearchParams(window.location.search);
   const bundleOverride = searchParams.get(WORKBENCH_BOOTSTRAP_QUERY_KEY);
-  const canUseFsCandidates = isHttpOrigin();
-  const isHttp = isHttpOrigin();
-  const legacyCandidates = appRoot && canUseFsCandidates
-    ? [LEGACY_WORKBENCH_BOOTSTRAP_PATH, `/@fs${appRoot}${LEGACY_WORKBENCH_BOOTSTRAP_PATH}`]
-    : [LEGACY_WORKBENCH_BOOTSTRAP_PATH];
-  const minCandidates = appRoot && canUseFsCandidates
-    ? [MIN_WORKBENCH_BOOTSTRAP_PATH, `/@fs${appRoot}${MIN_WORKBENCH_BOOTSTRAP_PATH}`]
-    : [MIN_WORKBENCH_BOOTSTRAP_PATH];
+  const hostBootstrap = resolveHostWorkbenchBootstrapConfig(windowConfig);
+  const buildId = hostBootstrap.buildId ?? 'unknown';
+  startupBootstrapBuildId = buildId;
+  const primaryPath = hostBootstrap.primaryPath ?? LEGACY_WORKBENCH_BOOTSTRAP_PATH;
+  const fallbackPath =
+    hostBootstrap.fallbackPath ??
+    (primaryPath === MIN_WORKBENCH_BOOTSTRAP_PATH
+      ? LEGACY_WORKBENCH_BOOTSTRAP_PATH
+      : MIN_WORKBENCH_BOOTSTRAP_PATH);
+  const legacyCandidates = expandBootstrapCandidates(appRoot, LEGACY_WORKBENCH_BOOTSTRAP_PATH);
+  const minCandidates = expandBootstrapCandidates(appRoot, MIN_WORKBENCH_BOOTSTRAP_PATH);
   const dedupe = (values: string[]): string[] => [...new Set(values)];
 
   if (bundleOverride === 'legacy') {
-    return dedupe(legacyCandidates);
+    return dedupe([...legacyCandidates, ...minCandidates]);
   }
   if (bundleOverride === 'min') {
     return dedupe([...minCandidates, ...legacyCandidates]);
   }
 
-  // Keep legacy as default until min bundle runtime parity is fully stable.
-  // Still include min as a fallback candidate and allow explicit ?workbenchBundle=min.
-  if (!isHttp) {
-    return dedupe([...legacyCandidates, ...minCandidates]);
+  let candidates = dedupe([
+    ...expandBootstrapCandidates(appRoot, primaryPath),
+    ...expandBootstrapCandidates(appRoot, fallbackPath),
+    ...legacyCandidates,
+    ...minCandidates
+  ]);
+  const state = readBootstrapState();
+  if (state.buildId === buildId && typeof state.lastGoodPath === 'string') {
+    candidates = moveCandidateToFront(candidates, state.lastGoodPath);
   }
+  if (state.buildId === buildId && typeof state.failedPath === 'string') {
+    candidates = moveCandidateToBack(candidates, state.failedPath);
+  }
+  return candidates;
+}
 
-  return dedupe([...legacyCandidates, ...minCandidates]);
+function shouldAutoRetryWithLegacy(lastAttemptPath: string): boolean {
+  const canonical = canonicalizeBootstrapPath(lastAttemptPath) ?? lastAttemptPath;
+  if (!canonical.includes('/out-vscode-min/')) {
+    return false;
+  }
+  const searchParams = new URLSearchParams(window.location.search);
+  if (searchParams.get(WORKBENCH_BOOTSTRAP_QUERY_KEY) === 'min') {
+    return false;
+  }
+  if (searchParams.get(LEGACY_RETRY_QUERY_KEY) === '1') {
+    return false;
+  }
+  return true;
+}
+
+function redirectToLegacyRetry(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set(WORKBENCH_BOOTSTRAP_QUERY_KEY, 'legacy');
+  url.searchParams.set(LEGACY_RETRY_QUERY_KEY, '1');
+  window.location.replace(url.toString());
+}
+
+function tryRecoverStartupWithLegacy(reason: string): boolean {
+  if (!startupPhaseActive || startupRecoveryTriggered) {
+    return false;
+  }
+  const bootstrapState =
+    typeof startupCurrentAttemptPath === 'string' ? undefined : readBootstrapState();
+  const lastAttemptPath = startupCurrentAttemptPath ??
+    (typeof bootstrapState?.lastAttemptPath === 'string' ? bootstrapState.lastAttemptPath : '');
+  if (!lastAttemptPath || !shouldAutoRetryWithLegacy(lastAttemptPath)) {
+    return false;
+  }
+  startupRecoveryTriggered = true;
+  markBootstrapFailure(startupBootstrapBuildId, lastAttemptPath);
+  console.warn('[startup] retrying with legacy bundle after startup runtime failure', {
+    reason,
+    failedPath: lastAttemptPath
+  });
+  redirectToLegacyRetry();
+  return true;
 }
 
 function installWorkbenchModulePreloadHints(workbenchBootstrapCandidates: readonly string[]): void {
@@ -378,6 +604,10 @@ async function installSharedProcessConnectionPatch(appRoot: string): Promise<voi
 
 function installGlobalStartupErrorHandlers(): void {
   window.addEventListener('error', event => {
+    if (tryRecoverStartupWithLegacy(`window.error: ${event.message || '<unknown>'}`)) {
+      event.preventDefault();
+      return;
+    }
     const detailParts: string[] = [];
     if (event.error instanceof Error) {
       if (event.error.message) {
@@ -399,6 +629,11 @@ function installGlobalStartupErrorHandlers(): void {
   });
 
   window.addEventListener('unhandledrejection', event => {
+    const reasonDetails = formatErrorDetails(event.reason);
+    if (tryRecoverStartupWithLegacy(`unhandledrejection: ${reasonDetails}`)) {
+      event.preventDefault();
+      return;
+    }
     const reason = event.reason;
     const message =
       reason instanceof Error
@@ -544,6 +779,26 @@ type GlobalWithVscodeFileRoot = typeof globalThis & {
   _VSCODE_TAURI_FS_CAPABILITIES_MASK?: unknown;
 };
 
+type GlobalWithLocalFontsApi = typeof globalThis & {
+  queryLocalFonts?: () => Promise<unknown[]>;
+  navigator: Navigator & {
+    queryLocalFonts?: () => Promise<unknown[]>;
+  };
+};
+
+function installLocalFontsCompatibilityPatch(): void {
+  const globalWithFonts = globalThis as GlobalWithLocalFontsApi;
+  const fallback = async (): Promise<unknown[]> => [];
+
+  if (typeof globalWithFonts.navigator.queryLocalFonts !== 'function') {
+    globalWithFonts.navigator.queryLocalFonts = fallback;
+  }
+
+  if (typeof globalWithFonts.queryLocalFonts !== 'function') {
+    globalWithFonts.queryLocalFonts = () => globalWithFonts.navigator.queryLocalFonts!();
+  }
+}
+
 function installFileRootCompatibilityPatch(): void {
   const desiredFileRoot = new URL('/out/', window.location.origin).toString();
   const globalWithFileRoot = globalThis as GlobalWithVscodeFileRoot;
@@ -621,7 +876,7 @@ async function main(): Promise<void> {
   const appRoot =
     typeof windowConfig.appRoot === 'string' ? windowConfig.appRoot : '';
   console.info('[startup] using appRoot', appRoot);
-  const workbenchBootstrapCandidates = resolveWorkbenchBootstrapCandidates(appRoot);
+  const workbenchBootstrapCandidates = resolveWorkbenchBootstrapCandidates(appRoot, windowConfig);
   console.info('[startup] workbench bootstrap candidates', workbenchBootstrapCandidates);
   // Kick modulepreload early so network/parse can overlap with sandbox/compat setup.
   installWorkbenchModulePreloadHints(workbenchBootstrapCandidates);
@@ -638,15 +893,18 @@ async function main(): Promise<void> {
 
   await step('Installing desktop sandbox...', () => installDesktopSandbox(host));
   installFileRootCompatibilityPatch();
+  installLocalFontsCompatibilityPatch();
 
   setStatus('Loading desktop workbench runtime...');
   const loadedWorkbenchPath = await step('Loading desktop workbench runtime...', async () => {
     const candidateFailures: string[] = [];
     for (const candidatePath of workbenchBootstrapCandidates) {
+      markBootstrapAttempt(startupBootstrapBuildId, candidatePath);
       try {
         await import(/* @vite-ignore */ candidatePath);
         return candidatePath;
       } catch (error) {
+        markBootstrapFailure(startupBootstrapBuildId, candidatePath);
         candidateFailures.push(`${candidatePath}: ${formatErrorDetails(error)}`);
         console.warn('[startup] failed to load workbench runtime candidate', {
           candidatePath,
@@ -682,6 +940,8 @@ async function main(): Promise<void> {
   }
 
   if (rendered) {
+    markBootstrapSuccess(startupBootstrapBuildId, loadedWorkbenchPath);
+    startupPhaseActive = false;
     setStatus('', 'info', false);
     const runDeferredStartupPatches = () => {
       void installSharedProcessConnectionPatch(appRoot).catch(error => {
@@ -739,6 +999,11 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
+  if (tryRecoverStartupWithLegacy(`main.catch: ${formatErrorDetails(error)}`)) {
+    return;
+  }
+  startupPhaseActive = false;
+
   const message =
     error instanceof Error
       ? error.message || error.stack || String(error)

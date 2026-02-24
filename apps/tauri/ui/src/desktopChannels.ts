@@ -113,6 +113,46 @@ function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function fallbackResultForMethod(channel: string, method: string): unknown {
+  if (method === 'getInstalled') {
+    return [];
+  }
+
+  if (method === 'queryLocal') {
+    return [];
+  }
+
+  if (method === 'getExtensionsControlManifest') {
+    return {
+      malicious: [],
+      deprecated: {},
+      search: [],
+      autoUpdate: {}
+    };
+  }
+
+  if (method === '_getInitialData') {
+    if (channel === 'userDataSync') {
+      return ['uninitialized', [], undefined];
+    }
+    return undefined;
+  }
+
+  if (channel === 'update' && method === '_getInitialState') {
+    return { type: 'uninitialized' };
+  }
+
+  if (channel === 'localFilesystem' && method === 'read') {
+    return [{ buffer: new Uint8Array(0) }, 0];
+  }
+
+  if (channel === 'localFilesystem' && method === 'readFile') {
+    return { buffer: new Uint8Array(0) };
+  }
+
+  return undefined;
+}
+
 function toUint8Array(value: unknown): Uint8Array | undefined {
   if (value instanceof Uint8Array) {
     return value;
@@ -354,7 +394,7 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
           return {
             malicious: Array.isArray(objectResult.malicious) ? objectResult.malicious : [],
             deprecated: objectResult.deprecated && typeof objectResult.deprecated === 'object' ? objectResult.deprecated : {},
-            search: objectResult.search && typeof objectResult.search === 'object' ? objectResult.search : {},
+            search: Array.isArray(objectResult.search) ? objectResult.search : [],
             autoUpdate: objectResult.autoUpdate && typeof objectResult.autoUpdate === 'object' ? objectResult.autoUpdate : {}
           };
         }
@@ -431,10 +471,17 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
         result => {
           const objectResult = asRecord(result);
           return {
-            pid: typeof objectResult.pid === 'number' ? objectResult.pid : undefined
+            pid: typeof objectResult.pid === 'number' ? objectResult.pid : -1
           };
         }
       ]
+    ])
+  ],
+  [
+    'userDataSyncAccount',
+    new Map<string, ResultNormalizer>([
+      ['_getInitialData', result => (result && typeof result === 'object' ? result : undefined)],
+      ['updateAccount', () => undefined]
     ])
   ],
   [
@@ -481,8 +528,33 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
       ],
       ['readdir', result => asArray(result)],
       [
+        'read',
+        result => {
+          const parts = asArray(result);
+          const chunk = parts[0];
+          const bytesReadCandidate = parts[1];
+          const chunkPayload = asRecord(chunk);
+          const decoded =
+            toUint8Array(chunkPayload.buffer) ??
+            toUint8Array(chunkPayload.bytes) ??
+            toUint8Array(chunkPayload.data) ??
+            decodeBase64ToUint8Array(chunkPayload.base64) ??
+            toUint8Array(chunk) ??
+            new Uint8Array(0);
+          const bytesRead =
+            typeof bytesReadCandidate === 'number' && Number.isFinite(bytesReadCandidate)
+              ? bytesReadCandidate
+              : decoded.byteLength;
+          return [{ buffer: decoded }, bytesRead];
+        }
+      ],
+      [
         'readFile',
         (result, args) => {
+          if (result == null) {
+            return { buffer: new Uint8Array(0) };
+          }
+
           const payload = asRecord(result);
           const decoded =
             toUint8Array(payload.buffer) ??
@@ -503,7 +575,7 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
             );
           }
 
-          return decoded;
+          return { buffer: decoded };
         }
       ]
     ])
@@ -636,6 +708,16 @@ const EVENT_NORMALIZERS = new Map<string, Map<string, EventNormalizer>>([
     new Map<string, EventNormalizer>([
       ['onDynamicExit', payload => (payload && typeof payload === 'object' ? payload : { code: 0, signal: '' })]
     ])
+  ],
+  [
+    'extensions',
+    new Map<string, EventNormalizer>([
+      ['onDidInstallExtensions', payload => asArray(payload)],
+      ['onInstallExtension', payload => (payload && typeof payload === 'object' ? payload : {})],
+      ['onUninstallExtension', payload => (payload && typeof payload === 'object' ? payload : {})],
+      ['onDidUninstallExtension', payload => (payload && typeof payload === 'object' ? payload : {})],
+      ['onDidUpdateExtensionMetadata', payload => (payload && typeof payload === 'object' ? payload : {})]
+    ])
   ]
 ]);
 
@@ -672,7 +754,10 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
           return normalizeResult(undefined, normalized);
         }
 
-        const normalizedResult = normalizeResult ? normalizeResult(result, normalized) : result;
+        let normalizedResult = normalizeResult ? normalizeResult(result, normalized) : result;
+        if (typeof normalizedResult === 'undefined') {
+          normalizedResult = fallbackResultForMethod(channel, method);
+        }
         if (ENABLE_FS_TRACE && channel === 'localFilesystem') {
           if (method === 'readFile') {
             const byteLength =

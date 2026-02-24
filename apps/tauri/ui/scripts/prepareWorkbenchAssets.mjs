@@ -24,6 +24,40 @@ const distRoot = path.join(uiRoot, 'dist');
 const targetOutRoot = path.join(distRoot, 'out');
 const targetVsRoot = path.join(targetOutRoot, 'vs');
 const targetMinRoot = path.join(distRoot, 'out-vscode-min', 'vs');
+const targetDevMinRoot = path.join(uiRoot, 'out-vscode-min', 'vs');
+
+function stripSourceMappingUrlDirectives(contents) {
+  return contents
+    .replace(/\/\/[@#]\s*sourceMappingURL=.*$/gm, '')
+    .replace(/\/\*[@#]\s*sourceMappingURL=.*?\*\//g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd()
+    .concat('\n');
+}
+
+async function copyMinAsset(sourceFile, targetFile) {
+  const extension = path.extname(sourceFile).toLowerCase();
+  if (extension !== '.js' && extension !== '.css') {
+    await fs.copyFile(sourceFile, targetFile);
+    return;
+  }
+
+  const raw = await fs.readFile(sourceFile, 'utf8');
+  const sanitized = stripSourceMappingUrlDirectives(raw);
+  await fs.writeFile(targetFile, sanitized, 'utf8');
+}
+
+async function copyMinAssetsTo(targetMinVsRoot) {
+  await fs.rm(path.dirname(targetMinVsRoot), { recursive: true, force: true });
+  await fs.mkdir(targetMinVsRoot, { recursive: true });
+  for (const relativePath of minWorkbenchFiles) {
+    const sourceFile = path.join(sourceMinRoot, relativePath);
+    const targetFile = path.join(targetMinVsRoot, relativePath);
+    await assertFile(sourceFile, `Min workbench asset (${relativePath})`);
+    await fs.mkdir(path.dirname(targetFile), { recursive: true });
+    await copyMinAsset(sourceFile, targetFile);
+  }
+}
 
 async function assertFile(filePath, label) {
   try {
@@ -63,15 +97,8 @@ await fs.cp(sourceVsRoot, targetVsRoot, {
 
 try {
   await assertDir(sourceMinRoot, 'VS Code out-vscode-min/vs directory');
-  await fs.rm(path.join(distRoot, 'out-vscode-min'), { recursive: true, force: true });
-  await fs.mkdir(targetMinRoot, { recursive: true });
-  for (const relativePath of minWorkbenchFiles) {
-    const sourceFile = path.join(sourceMinRoot, relativePath);
-    const targetFile = path.join(targetMinRoot, relativePath);
-    await assertFile(sourceFile, `Min workbench asset (${relativePath})`);
-    await fs.mkdir(path.dirname(targetFile), { recursive: true });
-    await fs.copyFile(sourceFile, targetFile);
-  }
+  await copyMinAssetsTo(targetMinRoot);
+  await copyMinAssetsTo(targetDevMinRoot);
 } catch (error) {
   const detail = error instanceof Error ? error.message : String(error);
   console.warn(`[tauri.ui] skipping out-vscode-min assets: ${detail}`);

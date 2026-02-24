@@ -1046,6 +1046,7 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     let nls_messages = read_nls_messages(repo_root)?;
     let product = read_json_file(&repo_root.join("product.json"))?;
     let css_modules = workbench_css_modules(repo_root)?;
+    let workbench_bootstrap = resolve_workbench_bootstrap_config(repo_root, &product);
 
     let home_dir = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -1131,6 +1132,7 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         "isInitialStartup": true,
         "logLevel": 3,
         "loggers": [],
+        "workbenchBootstrap": workbench_bootstrap,
 
         "fullscreen": false,
         "maximized": false,
@@ -1154,6 +1156,57 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     });
 
     Ok(window_config)
+}
+
+const LEGACY_WORKBENCH_BOOTSTRAP_PATH: &str = "/out/vs/code/electron-browser/workbench/workbench.js";
+const MIN_WORKBENCH_BOOTSTRAP_PATH: &str =
+    "/out-vscode-min/vs/code/electron-browser/workbench/workbench.js";
+
+fn resolve_workbench_bootstrap_config(repo_root: &Path, product: &Value) -> Value {
+    let preference = std::env::var("VSCODE_TAURI_WORKBENCH_BUNDLE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "legacy".to_string());
+    let legacy_exists = repo_root
+        .join("out/vs/code/electron-browser/workbench/workbench.js")
+        .is_file();
+    let min_exists = repo_root
+        .join("out-vscode-min/vs/code/electron-browser/workbench/workbench.js")
+        .is_file();
+
+    let preferred_bundle = if preference == "min" && min_exists {
+        "min"
+    } else if legacy_exists {
+        "legacy"
+    } else if min_exists {
+        "min"
+    } else {
+        "legacy"
+    };
+    let (primary_path, fallback_path) = if preferred_bundle == "min" {
+        (
+            MIN_WORKBENCH_BOOTSTRAP_PATH,
+            LEGACY_WORKBENCH_BOOTSTRAP_PATH,
+        )
+    } else {
+        (
+            LEGACY_WORKBENCH_BOOTSTRAP_PATH,
+            MIN_WORKBENCH_BOOTSTRAP_PATH,
+        )
+    };
+    let build_id = product
+        .get("commit")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| product.get("version").and_then(Value::as_str))
+        .unwrap_or("dev");
+
+    json!({
+        "primaryPath": primary_path,
+        "fallbackPath": fallback_path,
+        "preferredBundle": preferred_bundle,
+        "buildId": build_id
+    })
 }
 
 fn file_uri_components(path: &Path) -> Value {

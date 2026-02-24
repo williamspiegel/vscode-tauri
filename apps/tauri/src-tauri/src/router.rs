@@ -914,7 +914,7 @@ impl CapabilityRouter {
                     let extension_host_id = self.next_extension_host_id.fetch_add(1, Ordering::Relaxed);
                     Ok(Some(json!({ "id": format!("tauri-extension-host-{extension_host_id}") })))
                 }
-                "start" => Ok(Some(json!({ "pid": Value::Null }))),
+                "start" => Ok(Some(json!({ "pid": -1 }))),
                 "enableInspectPort" => Ok(Some(json!(false))),
                 "kill" => Ok(Some(Value::Null)),
                 _ => Ok(None),
@@ -1861,7 +1861,7 @@ impl CapabilityRouter {
                 "getExtensionsControlManifest" => Some(json!({
                     "malicious": [],
                     "deprecated": {},
-                    "search": {},
+                    "search": [],
                     "autoUpdate": {}
                 })),
                 _ => Some(default_by_method_name(method)),
