@@ -946,6 +946,8 @@ export function createDesktopChannelRegistry(host: HostClient): DesktopChannelRe
                   updated: asArray(e.updated)
                 };
               }
+            : event === 'onDidChangeFile' || event === 'fileChange'
+              ? payload => (Array.isArray(payload) ? payload : [])
             : undefined;
       try {
         const stop = await host.desktopChannelListen(channel, event, arg, payload => {

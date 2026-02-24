@@ -1062,6 +1062,19 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     let profile_home = user_data_dir.join("User/profiles");
     let profile_location = profile_home.join("default");
     let profile_cache = user_data_dir.join("CachedProfilesData/default");
+    let _ = fs::create_dir_all(&profile_cache);
+    let _ = fs::create_dir_all(profile_location.join("globalStorage"));
+    let _ = fs::create_dir_all(profile_location.join("snippets"));
+    let _ = fs::create_dir_all(profile_location.join("prompts"));
+    let _ = fs::create_dir_all(profile_location.join("workspaceStorage"));
+
+    ensure_user_data_default_file(&profile_location.join("settings.json"), "{}\n");
+    ensure_user_data_default_file(&profile_location.join("keybindings.json"), "[]\n");
+    ensure_user_data_default_file(&profile_location.join("tasks.json"), "{\"version\":\"2.0.0\",\"tasks\":[]}\n");
+    ensure_user_data_default_file(&profile_location.join("extensions.json"), "[]\n");
+    ensure_user_data_default_file(&profile_location.join("mcp.json"), "{}\n");
+    ensure_user_data_default_file(&profile_location.join("chatLanguageModels.json"), "[]\n");
+
     let default_profile = json!({
         "id": "default",
         "isDefault": true,
@@ -1156,6 +1169,17 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     });
 
     Ok(window_config)
+}
+
+fn ensure_user_data_default_file(path: &Path, contents: &str) {
+    if path.exists() {
+        return;
+    }
+
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, contents);
 }
 
 const LEGACY_WORKBENCH_BOOTSTRAP_PATH: &str = "/out/vs/code/electron-browser/workbench/workbench.js";

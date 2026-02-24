@@ -74,6 +74,14 @@ export class HostClient {
   private static normalizeDesktopChannelPayload(
     envelope: HostEventPayload<'desktop.channelEvent'>
   ): unknown {
+    if (envelope.channel === 'watcher' && envelope.event === 'onDidChangeFile') {
+      return Array.isArray(envelope.payload) ? envelope.payload : [];
+    }
+
+    if (envelope.channel === 'localFilesystem' && envelope.event === 'fileChange') {
+      return Array.isArray(envelope.payload) ? envelope.payload : [];
+    }
+
     if (envelope.channel === 'storage' && envelope.event === 'onDidChangeStorage') {
       const payload =
         envelope.payload && typeof envelope.payload === 'object'

@@ -239,6 +239,10 @@ impl CapabilityRouter {
         }
         drop(state);
 
+        if !should_emit_fallback_event(next_count) {
+            return;
+        }
+
         if let Some(app_handle) = crate::capabilities::window::app_handle() {
             let _ = app_handle.emit(
                 "fallback_used",
@@ -1963,6 +1967,13 @@ fn default_by_method_name(method: &str) -> Value {
         return Value::Null;
     }
     Value::Null
+}
+
+fn should_emit_fallback_event(count: u64) -> bool {
+    if count <= 3 {
+        return true;
+    }
+    matches!(count, 5 | 10 | 25 | 50 | 100) || count % 500 == 0
 }
 
 #[cfg(target_os = "macos")]

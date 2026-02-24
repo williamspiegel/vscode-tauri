@@ -441,6 +441,10 @@ function addDisposable(target: unknown, disposable: DisposableLike): void {
 }
 
 function normalizeDesktopEventPayload(eventName: string, payload: unknown): unknown {
+  if (eventName === 'onDidChangeFile' || eventName === 'fileChange') {
+    return Array.isArray(payload) ? payload : [];
+  }
+
   if (eventName === 'onDidChangeStorage') {
     const event = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
     return {
