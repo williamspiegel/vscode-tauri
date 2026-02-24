@@ -166,6 +166,19 @@ function asRecord(value: unknown): Record<string, unknown> {
 	return {};
 }
 
+type GlobalWithTauriFilesystemCapabilityMask = typeof globalThis & {
+	_VSCODE_TAURI_FS_CAPABILITIES_MASK?: unknown;
+};
+
+function getTauriFilesystemCapabilityMask(): FileSystemProviderCapabilities | undefined {
+	const rawMask = (globalThis as GlobalWithTauriFilesystemCapabilityMask)._VSCODE_TAURI_FS_CAPABILITIES_MASK;
+	if (typeof rawMask !== 'number' || !Number.isFinite(rawMask)) {
+		return undefined;
+	}
+
+	return rawMask as FileSystemProviderCapabilities;
+}
+
 function asFileSystemProviderErrorCode(value: unknown): FileSystemProviderErrorCode | undefined {
 	if (typeof value !== 'string') {
 		return undefined;
@@ -275,6 +288,11 @@ export class DiskFileSystemProviderClient extends Disposable implements
 
 			if (this.extraCapabilities.trash) {
 				this._capabilities |= FileSystemProviderCapabilities.Trash;
+			}
+
+			const tauriCapabilitiesMask = getTauriFilesystemCapabilityMask();
+			if (typeof tauriCapabilitiesMask === 'number') {
+				this._capabilities &= tauriCapabilitiesMask;
 			}
 		}
 

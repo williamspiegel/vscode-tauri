@@ -2,6 +2,40 @@ import { HostClient } from './hostClient';
 import { installDesktopSandbox } from './desktopSandbox';
 
 type StatusLevel = 'info' | 'error';
+type StartupStepTiming = {
+  label: string;
+  durationMs: number;
+};
+type StartupLongTaskTiming = {
+  name: string;
+  startTime: number;
+  duration: number;
+};
+type StartupResourceTiming = {
+  name: string;
+  initiatorType: string;
+  startTime: number;
+  duration: number;
+  transferSize?: number;
+};
+type StartupPhaseDurations = {
+  windowConfig?: number;
+  cssLoader?: number;
+  workbenchMainImport?: number;
+  sharedProcessConnect?: number;
+  postMainToRender?: number;
+};
+type StartupProfileReport = {
+  totalStartupMs: number;
+  firstRenderWaitMs: number;
+  loadedWorkbenchPath: string;
+  phases: StartupPhaseDurations;
+  steps: StartupStepTiming[];
+  longTasks: StartupLongTaskTiming[];
+  topResources: StartupResourceTiming[];
+  workbenchImportResources: StartupResourceTiming[];
+  fallbackCounts?: Record<string, number>;
+};
 
 const SOURCEMAP_WARNING_PATTERN = /Sourcemap for ".*" points to missing source files/;
 const originalConsoleWarn = console.warn.bind(console);
@@ -72,6 +106,35 @@ function shouldShowVerboseStartupStatus(): boolean {
   );
 }
 
+function shouldEnableStartupProfile(): boolean {
+  const queryValue = new URLSearchParams(window.location.search).get('startupProfile');
+  if (queryValue === '1' || queryValue === 'true' || queryValue === 'on') {
+    return true;
+  }
+  if (queryValue === '0' || queryValue === 'false' || queryValue === 'off') {
+    return false;
+  }
+
+  try {
+    return window.localStorage?.getItem('tauriStartupProfile') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function shouldAutoDownloadStartupProfile(): boolean {
+  const queryValue = new URLSearchParams(window.location.search).get('startupProfile');
+  if (queryValue === 'download') {
+    return true;
+  }
+
+  try {
+    return window.localStorage?.getItem('tauriStartupProfileDownload') === '1';
+  } catch {
+    return false;
+  }
+}
+
 const WORKBENCH_BOOTSTRAP_QUERY_KEY = 'workbenchBundle';
 const LEGACY_WORKBENCH_BOOTSTRAP_PATH = '/out/vs/code/electron-browser/workbench/workbench.js';
 const MIN_WORKBENCH_BOOTSTRAP_PATH = '/out-vscode-min/vs/code/electron-browser/workbench/workbench.js';
@@ -123,10 +186,10 @@ function resolveWorkbenchBootstrapCandidates(appRoot: string): string[] {
   const canUseFsCandidates = isHttpOrigin();
   const isHttp = isHttpOrigin();
   const legacyCandidates = appRoot && canUseFsCandidates
-    ? [`/@fs${appRoot}${LEGACY_WORKBENCH_BOOTSTRAP_PATH}`, LEGACY_WORKBENCH_BOOTSTRAP_PATH]
+    ? [LEGACY_WORKBENCH_BOOTSTRAP_PATH, `/@fs${appRoot}${LEGACY_WORKBENCH_BOOTSTRAP_PATH}`]
     : [LEGACY_WORKBENCH_BOOTSTRAP_PATH];
   const minCandidates = appRoot && canUseFsCandidates
-    ? [`/@fs${appRoot}${MIN_WORKBENCH_BOOTSTRAP_PATH}`, MIN_WORKBENCH_BOOTSTRAP_PATH]
+    ? [MIN_WORKBENCH_BOOTSTRAP_PATH, `/@fs${appRoot}${MIN_WORKBENCH_BOOTSTRAP_PATH}`]
     : [MIN_WORKBENCH_BOOTSTRAP_PATH];
   const dedupe = (values: string[]): string[] => [...new Set(values)];
 
@@ -191,20 +254,88 @@ function getDurationFromMarks(startMark: string, endMark: string): number | unde
   return Math.round(end - start);
 }
 
-function logStartupBreakdown(waitDurationMs: number): void {
-  const phaseDurations = {
+function getStartupPhaseDurations(): StartupPhaseDurations {
+  return {
     windowConfig: getDurationFromMarks('code/willWaitForWindowConfig', 'code/didWaitForWindowConfig'),
     cssLoader: getDurationFromMarks('code/willAddCssLoader', 'code/didAddCssLoader'),
     workbenchMainImport: getDurationFromMarks('code/willLoadWorkbenchMain', 'code/didLoadWorkbenchMain'),
     sharedProcessConnect: getDurationFromMarks('code/willConnectSharedProcess', 'code/didConnectSharedProcess'),
     postMainToRender: getDurationFromMarks('code/didLoadWorkbenchMain', 'tauri/workbenchFirstRender')
   };
+}
+
+function logStartupBreakdown(waitDurationMs: number): void {
+  const phaseDurations = getStartupPhaseDurations();
 
   const formatted = Object.entries(phaseDurations)
     .map(([phase, ms]) => `${phase}=${typeof ms === 'number' ? `${ms}ms` : 'n/a'}`)
     .join(' ');
 
   console.info(`[startup.breakdown] wait=${waitDurationMs}ms ${formatted}`);
+}
+
+function collectTopStartupResources(limit = 25): StartupResourceTiming[] {
+  return performance
+    .getEntriesByType('resource')
+    .filter((entry): entry is PerformanceResourceTiming => entry instanceof PerformanceResourceTiming)
+    .filter(entry => {
+      return (
+        entry.name.includes('/out/') ||
+        entry.name.includes('/out-vscode-min/') ||
+        entry.name.includes('/@fs/') ||
+        entry.initiatorType === 'script'
+      );
+    })
+    .sort((left, right) => right.duration - left.duration)
+    .slice(0, limit)
+    .map(entry => ({
+      name: entry.name,
+      initiatorType: entry.initiatorType,
+      startTime: Math.round(entry.startTime),
+      duration: Math.round(entry.duration),
+      transferSize: typeof entry.transferSize === 'number' ? entry.transferSize : undefined
+    }));
+}
+
+function collectWorkbenchImportResources(limit = 50): StartupResourceTiming[] {
+  const importWindowStart = getLatestPerformanceMark('code/willLoadWorkbenchMain');
+  const importWindowEnd = getLatestPerformanceMark('code/didLoadWorkbenchMain');
+  if (typeof importWindowStart !== 'number' || typeof importWindowEnd !== 'number' || importWindowEnd < importWindowStart) {
+    return [];
+  }
+
+  return performance
+    .getEntriesByType('resource')
+    .filter((entry): entry is PerformanceResourceTiming => entry instanceof PerformanceResourceTiming)
+    .filter(entry => entry.startTime >= importWindowStart && entry.startTime <= importWindowEnd)
+    .filter(entry => entry.initiatorType === 'script' || entry.name.includes('/out/'))
+    .sort((left, right) => right.duration - left.duration)
+    .slice(0, limit)
+    .map(entry => ({
+      name: entry.name,
+      initiatorType: entry.initiatorType,
+      startTime: Math.round(entry.startTime - importWindowStart),
+      duration: Math.round(entry.duration),
+      transferSize: typeof entry.transferSize === 'number' ? entry.transferSize : undefined
+    }));
+}
+
+function publishStartupProfile(report: StartupProfileReport, autoDownload: boolean): void {
+  (window as Window & { __TAURI_STARTUP_PROFILE__?: StartupProfileReport }).__TAURI_STARTUP_PROFILE__ = report;
+  console.info('[startup.profile]', report);
+
+  if (!autoDownload) {
+    return;
+  }
+
+  const payload = JSON.stringify(report, null, 2);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `tauri-startup-profile-${Date.now()}.json`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 const SHARED_PROCESS_PATCH_MARKER = '__tauriSharedProcessPatched';
@@ -333,6 +464,12 @@ async function installVsCodeUnexpectedErrorHookForPath(modulePath: string): Prom
   }
 }
 
+async function installVsCodeUnexpectedErrorHooks(modulePaths: readonly string[]): Promise<void> {
+  for (const modulePath of [...new Set(modulePaths)]) {
+    await installVsCodeUnexpectedErrorHookForPath(modulePath);
+  }
+}
+
 async function attachDebugHostListeners(host: HostClient): Promise<void> {
   const debugEnabled =
     new URLSearchParams(window.location.search).get('hostDebug') === '1' ||
@@ -395,10 +532,17 @@ async function attachDebugHostListeners(host: HostClient): Promise<void> {
   });
 }
 
-const DISK_FS_PATCH_MARKER = '__tauriDiskFsPatched';
+const TAURI_DISK_FS_CAPABILITIES_MASK =
+  2 | // FileReadWrite
+  8 | // FileFolderCopy
+  1024 | // PathCaseSensitive
+  4096 | // Trash
+  131072 | // FileClone
+  262144; // FileRealpath
 
 type GlobalWithVscodeFileRoot = typeof globalThis & {
   _VSCODE_FILE_ROOT?: unknown;
+  _VSCODE_TAURI_FS_CAPABILITIES_MASK?: unknown;
 };
 
 function installFileRootCompatibilityPatch(): void {
@@ -423,77 +567,49 @@ function installFileRootCompatibilityPatch(): void {
   });
 
   globalWithFileRoot._VSCODE_FILE_ROOT = desiredFileRoot;
-}
-
-async function installFilesystemCompatibilityPatch(appRoot: string): Promise<void> {
-  const candidatePaths = createOutModuleCandidates(
-    appRoot,
-    '/vs/platform/files/common/diskFileSystemProviderClient.js'
-  );
-
-  for (const modulePath of candidatePaths) {
-    try {
-      const diskFsModule = (await import(
-        /* @vite-ignore */ modulePath
-      )) as {
-        DiskFileSystemProviderClient?: { prototype?: Record<string, unknown> };
-      };
-
-      const prototype = diskFsModule.DiskFileSystemProviderClient?.prototype;
-      if (!prototype) {
-        continue;
-      }
-
-      if (prototype[DISK_FS_PATCH_MARKER] === true) {
-        continue;
-      }
-
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'capabilities');
-      if (descriptor?.get && descriptor.configurable !== false) {
-        Object.defineProperty(prototype, 'capabilities', {
-          configurable: true,
-          enumerable: descriptor.enumerable ?? false,
-          get: function getPatchedCapabilities(this: unknown): number {
-            const current = descriptor.get?.call(this);
-            if (typeof current !== 'number') {
-              return 0;
-            }
-
-            // Keep only capabilities that are implemented by the Tauri
-            // localFilesystem channel to avoid the workbench taking unsupported
-            // low-level paths (open/read/close, read streams, append, unlock, atomic flags).
-            const unsupportedCapabilitiesMask =
-              4 | // FileOpenReadWriteClose
-              16 | // FileReadStream
-              8192 | // FileWriteUnlock
-              16384 | // FileAtomicRead
-              32768 | // FileAtomicWrite
-              65536 | // FileAtomicDelete
-              524288; // FileAppend
-            return current & ~unsupportedCapabilitiesMask;
-          }
-        });
-      }
-
-      // Disable legacy read/open monkey-patch path; it is fragile in the
-      // Tauri runtime and can throw during startup with unexpected call contexts.
-      prototype[DISK_FS_PATCH_MARKER] = true;
-    } catch (error) {
-      console.warn('[tauri.compat] failed to apply filesystem compatibility patch', { modulePath, error });
-    }
-  }
+  globalWithFileRoot._VSCODE_TAURI_FS_CAPABILITIES_MASK = TAURI_DISK_FS_CAPABILITIES_MASK;
 }
 
 async function main(): Promise<void> {
+  const startupStartTime = performance.now();
   installGlobalStartupErrorHandlers();
   const verboseStartupStatus = shouldShowVerboseStartupStatus();
+  const startupProfileEnabled = shouldEnableStartupProfile();
+  const autoDownloadStartupProfile = shouldAutoDownloadStartupProfile();
+  const stepTimings: StartupStepTiming[] = [];
+  const longTaskTimings: StartupLongTaskTiming[] = [];
+  let longTaskObserver: PerformanceObserver | undefined;
+  if (startupProfileEnabled && typeof PerformanceObserver !== 'undefined') {
+    try {
+      longTaskObserver = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
+          longTaskTimings.push({
+            name: entry.name,
+            startTime: Math.round(entry.startTime),
+            duration: Math.round(entry.duration)
+          });
+        }
+      });
+      longTaskObserver.observe({ type: 'longtask', buffered: true } as PerformanceObserverInit);
+      console.info('[startup.profile] enabled');
+    } catch (error) {
+      console.warn('[startup.profile] failed to enable longtask observer', error);
+    }
+  }
   setStatus('Launching Tauri host...');
   const host = new HostClient();
 
   const step = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
     setStatus(label);
+    const stepStart = performance.now();
     try {
-      return await run();
+      const result = await run();
+      const durationMs = Math.round(performance.now() - stepStart);
+      stepTimings.push({ label, durationMs });
+      if (startupProfileEnabled) {
+        console.info(`[startup.step] ${label} ${durationMs}ms`);
+      }
+      return result;
     } catch (error) {
       const detail = formatErrorDetails(error);
       console.error('[startup.step.error]', { label, error, detail });
@@ -511,9 +627,6 @@ async function main(): Promise<void> {
   // Kick modulepreload early so network/parse can overlap with sandbox/compat setup.
   installWorkbenchModulePreloadHints(workbenchBootstrapCandidates);
   const errorModuleCandidates = createOutModuleCandidates(appRoot, '/vs/base/common/errors.js');
-  for (const modulePath of errorModuleCandidates) {
-    await installVsCodeUnexpectedErrorHookForPath(modulePath);
-  }
 
   try {
     await attachDebugHostListeners(host);
@@ -526,7 +639,6 @@ async function main(): Promise<void> {
 
   await step('Installing desktop sandbox...', () => installDesktopSandbox(host));
   installFileRootCompatibilityPatch();
-  await step('Installing filesystem compatibility patch...', () => installFilesystemCompatibilityPatch(appRoot));
 
   setStatus('Loading desktop workbench runtime...');
   const loadedWorkbenchPath = await step('Loading desktop workbench runtime...', async () => {
@@ -553,10 +665,6 @@ async function main(): Promise<void> {
   });
   console.info(`[startup] loaded workbench runtime from ${loadedWorkbenchPath}`);
 
-  for (const modulePath of errorModuleCandidates) {
-    await installVsCodeUnexpectedErrorHookForPath(modulePath);
-  }
-
   if (verboseStartupStatus) {
     setStatus('Desktop runtime loaded. Waiting for workbench render...');
   } else {
@@ -576,20 +684,52 @@ async function main(): Promise<void> {
 
   if (rendered) {
     setStatus('', 'info', false);
-    const runSharedProcessPatch = () => {
+    const runDeferredStartupPatches = () => {
       void installSharedProcessConnectionPatch(appRoot).catch(error => {
         console.warn('[tauri.compat] shared-process compatibility patch failed', error);
+      });
+
+      void installVsCodeUnexpectedErrorHooks(errorModuleCandidates).catch(error => {
+        console.warn('[tauri.compat] failed to install VS Code unexpected error hooks', error);
       });
     };
 
     if (typeof window.requestIdleCallback === 'function') {
-      window.requestIdleCallback(() => runSharedProcessPatch(), { timeout: 2000 });
+      window.requestIdleCallback(() => runDeferredStartupPatches(), { timeout: 2000 });
     } else {
-      window.setTimeout(runSharedProcessPatch, 0);
+      window.setTimeout(runDeferredStartupPatches, 0);
     }
+
+    if (startupProfileEnabled) {
+      let fallbackCounts: Record<string, number> | undefined;
+      try {
+        fallbackCounts = await host.getFallbackCounts();
+      } catch (error) {
+        console.warn('[startup.profile] failed to read fallback counts', error);
+      }
+
+      publishStartupProfile(
+        {
+          totalStartupMs: Math.round(performance.now() - startupStartTime),
+          firstRenderWaitMs: waitDurationMs,
+          loadedWorkbenchPath,
+          phases: getStartupPhaseDurations(),
+          steps: stepTimings,
+          longTasks: longTaskTimings.sort((left, right) => right.duration - left.duration),
+          topResources: collectTopStartupResources(),
+          workbenchImportResources: collectWorkbenchImportResources(),
+          fallbackCounts
+        },
+        autoDownloadStartupProfile
+      );
+    }
+
+    longTaskObserver?.disconnect();
 
     return;
   }
+
+  longTaskObserver?.disconnect();
 
   setStatus(
     'Workbench did not render within 15s.\n' +

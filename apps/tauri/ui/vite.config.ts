@@ -43,6 +43,13 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    warmup: {
+      clientFiles: [
+        '../../../out/vs/code/electron-browser/workbench/workbench.js',
+        '../../../out/vs/workbench/workbench.desktop.main.js',
+        '../../../out/vs/base/common/errors.js'
+      ]
+    },
     fs: {
       allow: ['..', '../../..', '../../../..']
     }
