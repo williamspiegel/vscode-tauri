@@ -65,26 +65,25 @@ impl UpdateCapability for RustPrimaryUpdateCapability {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_string();
-                let now = epoch_millis();
 
                 let mut state = self
                     .state
                     .lock()
                     .map_err(|_| "update state lock poisoned".to_string())?;
-                state.downloaded_version = Some(requested_version.clone());
-                state.downloaded_at_ms = Some(now);
+                state.downloaded_version = None;
+                state.downloaded_at_ms = None;
 
                 Ok(Some(json!({
-                    "downloaded": true,
+                    "downloaded": false,
                     "version": requested_version,
-                    "downloadedAtMs": now,
+                    "downloadedAtMs": Value::Null,
                     "bytes": 0,
-                    "source": "rust-primary-placeholder",
+                    "source": "rust-primary-disabled",
+                    "reason": "native updater download is not implemented for this Tauri host",
                     "handledBy": "rust-primary"
                 })))
             }
             "update.install" => {
-                let now = epoch_millis();
                 let mut state = self
                     .state
                     .lock()
@@ -105,16 +104,16 @@ impl UpdateCapability for RustPrimaryUpdateCapability {
                     })));
                 };
 
-                state.install_scheduled_version = Some(version.clone());
-                state.install_scheduled_at_ms = Some(now);
+                state.install_scheduled_version = None;
+                state.install_scheduled_at_ms = None;
 
                 Ok(Some(json!({
-                    "scheduled": true,
+                    "scheduled": false,
                     "installed": false,
                     "version": version,
-                    "scheduledAtMs": now,
-                    "requiresRestart": true,
-                    "reason": "native installer pipeline is not wired yet; install is only marked as scheduled",
+                    "scheduledAtMs": Value::Null,
+                    "requiresRestart": false,
+                    "reason": "native updater install is not implemented for this Tauri host",
                     "handledBy": "rust-primary"
                 })))
             }

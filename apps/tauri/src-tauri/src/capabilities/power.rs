@@ -29,11 +29,16 @@ impl PowerCapability for RustPrimaryPowerCapability {
     async fn invoke(&self, method: &str, params: &Value) -> Result<Option<Value>, String> {
         match method {
             "power.preventSleep" => {
+                let reason = parse_required_string(params, "reason")?;
                 if !cfg!(target_os = "macos") {
-                    return Ok(None);
+                    return Ok(Some(json!({
+                        "id": Value::Null,
+                        "reason": reason,
+                        "active": false,
+                        "supported": false
+                    })));
                 }
 
-                let reason = parse_required_string(params, "reason")?;
                 let child = Command::new("caffeinate")
                     .args(["-dimsu"])
                     .spawn()
@@ -58,11 +63,15 @@ impl PowerCapability for RustPrimaryPowerCapability {
                 })))
             }
             "power.allowSleep" => {
+                let id = parse_required_string(params, "id")?;
                 if !cfg!(target_os = "macos") {
-                    return Ok(None);
+                    return Ok(Some(json!({
+                        "id": id,
+                        "released": false,
+                        "supported": false
+                    })));
                 }
 
-                let id = parse_required_string(params, "id")?;
                 let mut blockers = self
                     .blockers
                     .lock()
@@ -86,11 +95,16 @@ impl PowerCapability for RustPrimaryPowerCapability {
                 })))
             }
             "power.idleState" => {
+                let threshold_seconds = parse_required_u64(params, "thresholdSeconds")?;
                 if !cfg!(target_os = "macos") {
-                    return Ok(None);
+                    return Ok(Some(json!({
+                        "state": "active",
+                        "idleSeconds": 0.0,
+                        "thresholdSeconds": threshold_seconds,
+                        "supported": false
+                    })));
                 }
 
-                let threshold_seconds = parse_required_u64(params, "thresholdSeconds")?;
                 let idle_nanos = read_macos_idle_time_nanos()?;
                 let idle_seconds = idle_nanos as f64 / 1_000_000_000_f64;
                 let state = if idle_seconds >= threshold_seconds as f64 {

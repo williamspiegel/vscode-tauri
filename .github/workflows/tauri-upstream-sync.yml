@@ -43,6 +43,19 @@ jobs:
         run: |
           node build/tauri/contract-test.mjs
           node build/tauri/smoke.mjs
+          node build/tauri/startup-bundle-test.mjs
+
+      - name: Run Tauri Rust Unit Tests (if merge clean)
+        if: steps.merge.outputs.merge_status == '0'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+          cargo test --manifest-path apps/tauri/src-tauri/Cargo.toml
 
       - name: Upload Sync Report Artifact
         uses: actions/upload-artifact@v4

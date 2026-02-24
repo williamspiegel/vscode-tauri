@@ -26,11 +26,20 @@ impl WindowCapability for RustPrimaryWindowCapability {
         match method {
             "window.open" => {
                 let target = parse_window_label(params);
-                if target != "main" {
-                    return Ok(None);
-                }
-
-                let window = get_window(target)?;
+                let window = match get_window(target) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        if target == "main" {
+                            return Err(error);
+                        }
+                        return Ok(Some(json!({
+                            "target": target,
+                            "opened": false,
+                            "existing": false,
+                            "reason": error
+                        })));
+                    }
+                };
                 window
                     .show()
                     .map_err(|error| format!("failed to show window '{target}': {error}"))?;

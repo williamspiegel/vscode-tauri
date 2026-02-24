@@ -13,7 +13,39 @@ pub struct RustPrimaryDialogsCapability;
 impl DialogsCapability for RustPrimaryDialogsCapability {
     async fn invoke(&self, method: &str, params: &Value) -> Result<Option<Value>, String> {
         if !cfg!(target_os = "macos") {
-            return Ok(None);
+            return match method {
+                "dialogs.showMessage" => {
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("VS Code");
+                    let title = params
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("VS Code Tauri");
+                    let buttons = parse_string_array(params.get("buttons"))?;
+                    let effective_buttons = if buttons.is_empty() {
+                        vec!["OK".to_string()]
+                    } else {
+                        buttons
+                    };
+                    Ok(Some(json!({
+                        "title": title,
+                        "message": message,
+                        "buttons": effective_buttons,
+                        "selectedIndex": 0,
+                        "interactive": false,
+                        "handledBy": "rust-primary-non-macos"
+                    })))
+                }
+                "dialogs.openFile" | "dialogs.openFolder" | "dialogs.saveFile" => Ok(Some(json!({
+                    "path": Value::Null,
+                    "canceled": true,
+                    "reason": "native dialog picker is currently implemented for macOS only",
+                    "handledBy": "rust-primary-non-macos"
+                }))),
+                _ => Ok(None),
+            };
         }
 
         match method {

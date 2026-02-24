@@ -200,14 +200,13 @@ function resolveWorkbenchBootstrapCandidates(appRoot: string): string[] {
     return dedupe([...minCandidates, ...legacyCandidates]);
   }
 
-  // Keep legacy default stable until min bundle parity is validated for both
-  // dev and packaged Tauri runtime shims. In packaged runtime, avoid implicit
-  // fallback into min to prevent startup landing on known min-only failures.
+  // Keep legacy as default until min bundle runtime parity is fully stable.
+  // Still include min as a fallback candidate and allow explicit ?workbenchBundle=min.
   if (!isHttp) {
-    return dedupe(legacyCandidates);
+    return dedupe([...legacyCandidates, ...minCandidates]);
   }
 
-  return dedupe(legacyCandidates);
+  return dedupe([...legacyCandidates, ...minCandidates]);
 }
 
 function installWorkbenchModulePreloadHints(workbenchBootstrapCandidates: readonly string[]): void {

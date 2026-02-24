@@ -102,6 +102,9 @@ function fallbackUri(path: string): { scheme: string; authority: string; path: s
   };
 }
 
+const DEFAULT_SYNC_STORE_PATH = '/.vscode-tauri/user-data/sync';
+let fallbackExtensionHostCounter = 0;
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
@@ -393,7 +396,7 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
             return objectResult;
           }
 
-          const fallbackStore = fallbackUri('/tmp/vscode-tauri/sync');
+          const fallbackStore = fallbackUri(DEFAULT_SYNC_STORE_PATH);
           return {
             url: fallbackStore,
             type: 'stable',
@@ -416,7 +419,13 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
   [
     'extensionHostStarter',
     new Map<string, ResultNormalizer>([
-      ['createExtensionHost', result => (typeof asRecord(result).id === 'string' ? result : { id: 'tauri-extension-host' })],
+      [
+        'createExtensionHost',
+        result =>
+          typeof asRecord(result).id === 'string'
+            ? result
+            : { id: `tauri-extension-host-${++fallbackExtensionHostCounter}` }
+      ],
       [
         'start',
         result => {

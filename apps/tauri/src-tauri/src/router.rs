@@ -10,18 +10,19 @@ use crate::capabilities::window::{RustPrimaryWindowCapability, WindowCapability}
 use crate::protocol::CapabilityDomain;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::Emitter;
 
 #[derive(Clone)]
 pub struct CapabilityRouter {
+    repo_root: Arc<PathBuf>,
     window: Arc<dyn WindowCapability>,
     filesystem: Arc<dyn FilesystemCapability>,
     terminal: Arc<dyn TerminalCapability>,
@@ -36,6 +37,12 @@ pub struct CapabilityRouter {
     watcher_state: Arc<Mutex<WatcherRuntimeState>>,
     next_watcher_watch_id: Arc<AtomicU64>,
     menubar_state: Arc<Mutex<MenubarRuntimeState>>,
+    storage_state: Arc<Mutex<StorageRuntimeState>>,
+    workspaces_state: Arc<Mutex<WorkspacesRuntimeState>>,
+    user_data_profiles_state: Arc<Mutex<UserDataProfilesRuntimeState>>,
+    local_pty_state: Arc<Mutex<LocalPtyRuntimeState>>,
+    next_extension_host_id: Arc<AtomicU64>,
+    fallback_telemetry: Arc<Mutex<FallbackTelemetryState>>,
 }
 
 #[derive(Default)]
@@ -54,6 +61,37 @@ struct MenubarRuntimeState {
     next_generated_menu_item_id: u64,
 }
 
+#[derive(Default)]
+struct StorageRuntimeState {
+    scopes: HashMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Default)]
+struct WorkspacesRuntimeState {
+    recent_workspaces: Vec<Value>,
+    recent_files: Vec<Value>,
+    next_untitled_id: u64,
+}
+
+#[derive(Default)]
+struct UserDataProfilesRuntimeState {
+    profiles: BTreeMap<String, Value>,
+    workspace_profiles: BTreeMap<String, String>,
+    next_profile_id: u64,
+    next_transient_id: u64,
+}
+
+#[derive(Default)]
+struct LocalPtyRuntimeState {
+    layout_by_workspace: HashMap<String, Value>,
+}
+
+struct FallbackTelemetryState {
+    counts: BTreeMap<String, u64>,
+    metrics_path: PathBuf,
+    events_path: PathBuf,
+}
+
 #[derive(Clone)]
 enum MenubarAction {
     RunAction {
@@ -63,8 +101,30 @@ enum MenubarAction {
 }
 
 impl CapabilityRouter {
-    pub fn new() -> Self {
+    pub fn new(repo_root: PathBuf) -> Self {
+        let user_data_dir = repo_root.join(".vscode-tauri").join("user-data");
+        let _ = fs::create_dir_all(user_data_dir.join("User/profiles/default"));
+        let _ = fs::create_dir_all(user_data_dir.join("CachedProfilesData/default"));
+
+        let mut workspaces_state = WorkspacesRuntimeState::default();
+        workspaces_state.next_untitled_id = 1;
+
+        let mut user_data_profiles_state = UserDataProfilesRuntimeState::default();
+        user_data_profiles_state
+            .profiles
+            .insert(
+                "default".to_string(),
+                profile_descriptor(&user_data_dir, "default", "Default", true, false),
+            );
+        user_data_profiles_state.next_profile_id = 1;
+        user_data_profiles_state.next_transient_id = 1;
+
+        let metrics_path = repo_root.join("apps/tauri/logs/fallback-metrics.json");
+        let events_path = repo_root.join("apps/tauri/logs/fallback-metrics.events.jsonl");
+        let fallback_counts = read_fallback_counts(&metrics_path).unwrap_or_default();
+
         Self {
+            repo_root: Arc::new(repo_root),
             window: Arc::new(RustPrimaryWindowCapability),
             filesystem: Arc::new(RustPrimaryFilesystemCapability::new()),
             terminal: Arc::new(RustPrimaryTerminalCapability::new()),
@@ -79,6 +139,16 @@ impl CapabilityRouter {
             watcher_state: Arc::new(Mutex::new(WatcherRuntimeState::default())),
             next_watcher_watch_id: Arc::new(AtomicU64::new(1)),
             menubar_state: Arc::new(Mutex::new(MenubarRuntimeState::default())),
+            storage_state: Arc::new(Mutex::new(StorageRuntimeState::default())),
+            workspaces_state: Arc::new(Mutex::new(workspaces_state)),
+            user_data_profiles_state: Arc::new(Mutex::new(user_data_profiles_state)),
+            local_pty_state: Arc::new(Mutex::new(LocalPtyRuntimeState::default())),
+            next_extension_host_id: Arc::new(AtomicU64::new(1)),
+            fallback_telemetry: Arc::new(Mutex::new(FallbackTelemetryState {
+                counts: fallback_counts,
+                metrics_path,
+                events_path,
+            })),
         }
     }
 
@@ -102,6 +172,13 @@ impl CapabilityRouter {
             return Ok(value);
         }
 
+        let domain_name = capability_domain_name(domain);
+        let method_name = method
+            .split_once('.')
+            .map(|(_, value)| value)
+            .unwrap_or(method);
+        self.record_fallback("capability", domain_name, method_name);
+
         Ok(dispatch_capability_rust_default(method, params))
     }
 
@@ -115,14 +192,69 @@ impl CapabilityRouter {
             .dispatch_channel_rust_primary(channel, method, args)
             .await?
         {
+            self.record_fallback("channel", channel, method);
             return Ok(result);
         }
 
-        if let Some(result) = dispatch_channel_rust_default(channel, method, args) {
+        if let Some(result) = self.dispatch_channel_rust_default(channel, method, args) {
+            self.record_fallback("channel", channel, method);
             return Ok(result);
         }
 
+        self.record_fallback("channel", channel, method);
         Ok(default_by_method_name(method))
+    }
+
+    fn record_fallback(&self, class: &str, domain: &str, method: &str) {
+        let key = format!("{class}:{domain}:{method}");
+        let at_ms = epoch_millis();
+        let mut state = match self.fallback_telemetry.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+
+        let count = state.counts.entry(key.clone()).or_insert(0);
+        *count += 1;
+        let next_count = *count;
+
+        if let Err(error) = persist_fallback_metrics(&state.metrics_path, at_ms, &state.counts) {
+            eprintln!(
+                "[fallback.telemetry.error] failed to persist {}: {error}",
+                state.metrics_path.display()
+            );
+        }
+        if let Err(error) = append_fallback_event(
+            &state.events_path,
+            at_ms,
+            &key,
+            class,
+            domain,
+            method,
+            next_count,
+        ) {
+            eprintln!(
+                "[fallback.telemetry.error] failed to append {}: {error}",
+                state.events_path.display()
+            );
+        }
+        drop(state);
+
+        if let Some(app_handle) = crate::capabilities::window::app_handle() {
+            let _ = app_handle.emit(
+                "fallback_used",
+                json!({
+                    "domain": domain,
+                    "method": method,
+                    "count": next_count,
+                    "class": class,
+                    "key": key
+                }),
+            );
+        }
+    }
+
+    fn user_data_dir(&self) -> PathBuf {
+        self.repo_root.join(".vscode-tauri").join("user-data")
     }
 
     pub fn watcher_verbose_logging(&self) -> bool {
@@ -379,9 +511,83 @@ impl CapabilityRouter {
                 _ => Ok(None),
             },
             "storage" => match method {
-                "getItems" => Ok(Some(json!([]))),
-                "isUsed" => Ok(Some(json!(false))),
-                "updateItems" | "optimize" => Ok(Some(Value::Null)),
+                "getItems" => {
+                    let scope_key = storage_scope_key(arg0);
+                    let items = {
+                        let state = self
+                            .storage_state
+                            .lock()
+                            .map_err(|_| "storage state lock poisoned".to_string())?;
+                        state.scopes.get(&scope_key).cloned().unwrap_or_default()
+                    };
+                    let mut serialized = Vec::with_capacity(items.len());
+                    for (key, value) in items {
+                        serialized.push(json!([key, value]));
+                    }
+                    Ok(Some(Value::Array(serialized)))
+                }
+                "isUsed" => {
+                    let target = arg0
+                        .and_then(|value| value.get("payload"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if target.is_empty() {
+                        return Ok(Some(json!(false)));
+                    }
+                    let is_used = self
+                        .storage_state
+                        .lock()
+                        .map_err(|_| "storage state lock poisoned".to_string())?
+                        .scopes
+                        .values()
+                        .any(|scope| scope.contains_key(target));
+                    Ok(Some(json!(is_used)))
+                }
+                "updateItems" => {
+                    let scope_key = storage_scope_key(arg0);
+                    let request = arg0.and_then(Value::as_object);
+                    let mut state = self
+                        .storage_state
+                        .lock()
+                        .map_err(|_| "storage state lock poisoned".to_string())?;
+                    let scope = state.scopes.entry(scope_key).or_insert_with(BTreeMap::new);
+
+                    if let Some(insert) = request
+                        .and_then(|value| value.get("insert"))
+                        .and_then(Value::as_array)
+                    {
+                        for item in insert {
+                            let Some(tuple) = item.as_array() else {
+                                continue;
+                            };
+                            if tuple.len() < 2 {
+                                continue;
+                            }
+                            let Some(key) = tuple[0].as_str() else {
+                                continue;
+                            };
+                            let Some(value) = tuple[1].as_str() else {
+                                continue;
+                            };
+                            scope.insert(key.to_string(), value.to_string());
+                        }
+                    }
+
+                    if let Some(delete) = request
+                        .and_then(|value| value.get("delete"))
+                        .and_then(Value::as_array)
+                    {
+                        for key in delete {
+                            let Some(key) = key.as_str() else {
+                                continue;
+                            };
+                            scope.remove(key);
+                        }
+                    }
+
+                    Ok(Some(Value::Null))
+                }
+                "optimize" => Ok(Some(Value::Null)),
                 _ => Ok(None),
             },
             "policy" => match method {
@@ -401,55 +607,301 @@ impl CapabilityRouter {
             "userDataProfiles" => match method {
                 "createNamedProfile" => {
                     let name = extract_string_arg(arg0).unwrap_or_else(|| "Named".to_string());
-                    Ok(Some(fallback_user_data_profile("named", &name)))
+                    let workspace = nth_arg(args, 2);
+                    let is_transient = nth_arg(args, 1)
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get("transient"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let user_data_dir = self.user_data_dir();
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    let profile_id = format!("profile-{}", state.next_profile_id);
+                    state.next_profile_id += 1;
+                    let profile =
+                        profile_descriptor(&user_data_dir, &profile_id, &name, false, is_transient);
+                    state.profiles.insert(profile_id.clone(), profile.clone());
+                    if let Some(workspace_identifier) = workspace_identifier_key(workspace) {
+                        state.workspace_profiles.insert(workspace_identifier, profile_id);
+                    }
+                    Ok(Some(profile))
                 }
                 "createProfile" => {
-                    let id = extract_string_arg(nth_arg(args, 0))
-                        .unwrap_or_else(|| "profile".to_string());
+                    let requested_id =
+                        extract_string_arg(nth_arg(args, 0)).unwrap_or_else(|| "profile".to_string());
                     let name = extract_string_arg(nth_arg(args, 1))
                         .unwrap_or_else(|| "Profile".to_string());
-                    Ok(Some(fallback_user_data_profile(&id, &name)))
+                    let workspace = nth_arg(args, 3);
+                    let is_transient = nth_arg(args, 2)
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get("transient"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let user_data_dir = self.user_data_dir();
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    let profile_id = unique_profile_id(&state.profiles, requested_id);
+                    let profile =
+                        profile_descriptor(&user_data_dir, &profile_id, &name, false, is_transient);
+                    state.profiles.insert(profile_id.clone(), profile.clone());
+                    if let Some(workspace_identifier) = workspace_identifier_key(workspace) {
+                        state.workspace_profiles.insert(workspace_identifier, profile_id);
+                    }
+                    Ok(Some(profile))
                 }
                 "createTransientProfile" => {
-                    Ok(Some(fallback_user_data_profile("transient", "Transient")))
+                    let workspace = nth_arg(args, 0);
+                    let user_data_dir = self.user_data_dir();
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    let profile_id = format!("transient-{}", state.next_transient_id);
+                    state.next_transient_id += 1;
+                    let profile = profile_descriptor(
+                        &user_data_dir,
+                        &profile_id,
+                        "Transient",
+                        false,
+                        true,
+                    );
+                    state.profiles.insert(profile_id.clone(), profile.clone());
+                    if let Some(workspace_identifier) = workspace_identifier_key(workspace) {
+                        state.workspace_profiles.insert(workspace_identifier, profile_id);
+                    }
+                    Ok(Some(profile))
                 }
                 "updateProfile" => {
-                    if let Some(profile) = nth_arg(args, 0) {
-                        if profile.is_object() {
-                            return Ok(Some(profile.clone()));
+                    let input_profile = nth_arg(args, 0).and_then(Value::as_object);
+                    let update_options = nth_arg(args, 1).and_then(Value::as_object);
+                    let user_data_dir = self.user_data_dir();
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+
+                    let requested_id = input_profile
+                        .and_then(|profile| profile.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("profile");
+                    let profile_id = if state.profiles.contains_key(requested_id) {
+                        requested_id.to_string()
+                    } else {
+                        unique_profile_id(&state.profiles, requested_id.to_string())
+                    };
+
+                    let current = state
+                        .profiles
+                        .get(&profile_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            profile_descriptor(&user_data_dir, &profile_id, "Profile", false, false)
+                        });
+                    let mut next = current.clone();
+                    if let Some(name) = update_options
+                        .and_then(|options| options.get("name"))
+                        .and_then(Value::as_str)
+                    {
+                        next["name"] = json!(name);
+                    }
+                    if let Some(short_name) = update_options
+                        .and_then(|options| options.get("shortName"))
+                        .and_then(Value::as_str)
+                    {
+                        next["shortName"] = json!(short_name);
+                    }
+                    state.profiles.insert(profile_id, next.clone());
+                    Ok(Some(next))
+                }
+                "removeProfile" => {
+                    let profile_id = nth_arg(args, 0)
+                        .and_then(profile_id_from_value)
+                        .unwrap_or_default();
+                    if profile_id.is_empty() || profile_id == "default" {
+                        return Ok(Some(Value::Null));
+                    }
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    state.profiles.remove(&profile_id);
+                    state
+                        .workspace_profiles
+                        .retain(|_, mapped_id| mapped_id != &profile_id);
+                    Ok(Some(Value::Null))
+                }
+                "setProfileForWorkspace" => {
+                    let workspace = nth_arg(args, 0);
+                    let profile_id = nth_arg(args, 1).and_then(profile_id_from_value);
+                    if let (Some(workspace_identifier), Some(profile_id)) =
+                        (workspace_identifier_key(workspace), profile_id)
+                    {
+                        let mut state = self
+                            .user_data_profiles_state
+                            .lock()
+                            .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                        if state.profiles.contains_key(&profile_id) {
+                            state.workspace_profiles.insert(workspace_identifier, profile_id);
                         }
                     }
-                    Ok(Some(fallback_user_data_profile("updated", "Updated")))
+                    Ok(Some(Value::Null))
                 }
-                "removeProfile"
-                | "setProfileForWorkspace"
-                | "resetWorkspaces"
-                | "cleanUp"
-                | "cleanUpTransientProfiles" => Ok(Some(Value::Null)),
+                "resetWorkspaces" => {
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    state.workspace_profiles.clear();
+                    Ok(Some(Value::Null))
+                }
+                "cleanUp" => {
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    let existing_ids = state.profiles.keys().cloned().collect::<Vec<_>>();
+                    state
+                        .workspace_profiles
+                        .retain(|_, profile_id| existing_ids.iter().any(|id| id == profile_id));
+                    Ok(Some(Value::Null))
+                }
+                "cleanUpTransientProfiles" => {
+                    let mut state = self
+                        .user_data_profiles_state
+                        .lock()
+                        .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
+                    let transient_ids = state
+                        .profiles
+                        .iter()
+                        .filter_map(|(profile_id, profile)| {
+                            let transient = profile
+                                .get("isTransient")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            if transient {
+                                Some(profile_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    for transient_id in transient_ids {
+                        state.profiles.remove(&transient_id);
+                        state
+                            .workspace_profiles
+                            .retain(|_, profile_id| profile_id != &transient_id);
+                    }
+                    Ok(Some(Value::Null))
+                }
                 _ => Ok(None),
             },
             "workspaces" => match method {
-                "getRecentlyOpened" => Ok(Some(json!({ "workspaces": [], "files": [] }))),
+                "getRecentlyOpened" => {
+                    let state = self
+                        .workspaces_state
+                        .lock()
+                        .map_err(|_| "workspaces state lock poisoned".to_string())?;
+                    Ok(Some(json!({
+                        "workspaces": state.recent_workspaces,
+                        "files": state.recent_files
+                    })))
+                }
                 "getDirtyWorkspaces" => Ok(Some(json!([]))),
                 "getWorkspaceIdentifier" => {
-                    Ok(Some(fallback_workspace_identifier("tauri-existing")))
+                    let input = nth_arg(args, 0).unwrap_or(&Value::Null);
+                    Ok(Some(workspace_identifier_from_value(input)))
                 }
                 "createUntitledWorkspace" => {
-                    Ok(Some(fallback_workspace_identifier("tauri-untitled")))
+                    let mut state = self
+                        .workspaces_state
+                        .lock()
+                        .map_err(|_| "workspaces state lock poisoned".to_string())?;
+                    let untitled_id = state.next_untitled_id;
+                    state.next_untitled_id += 1;
+                    drop(state);
+
+                    let config_path = self
+                        .user_data_dir()
+                        .join("Workspaces")
+                        .join(format!("Untitled-{untitled_id}.code-workspace"));
+                    if let Some(parent) = config_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    if !config_path.exists() {
+                        let _ = fs::write(&config_path, "{\n  \"folders\": []\n}\n");
+                    }
+
+                    Ok(Some(workspace_identifier_for_path(&config_path)))
                 }
-                "enterWorkspace" => Ok(Some(
-                    json!({ "workspace": fallback_workspace_identifier("tauri-entered") }),
-                )),
+                "enterWorkspace" => {
+                    let input = nth_arg(args, 0).unwrap_or(&Value::Null);
+                    Ok(Some(json!({
+                        "workspace": workspace_identifier_from_value(input)
+                    })))
+                }
                 "addRecentlyOpened"
                 | "removeRecentlyOpened"
                 | "clearRecentlyOpened"
-                | "deleteUntitledWorkspace" => Ok(Some(Value::Null)),
+                | "deleteUntitledWorkspace" => {
+                    let mut state = self
+                        .workspaces_state
+                        .lock()
+                        .map_err(|_| "workspaces state lock poisoned".to_string())?;
+                    match method {
+                        "addRecentlyOpened" => {
+                            if let Some(recents) = nth_arg(args, 0).and_then(Value::as_array) {
+                                for recent in recents {
+                                    let object = match recent.as_object() {
+                                        Some(value) => value.clone(),
+                                        None => continue,
+                                    };
+                                    if object.contains_key("workspace")
+                                        || object.contains_key("folderUri")
+                                    {
+                                        state.recent_workspaces.push(Value::Object(object));
+                                    } else if object.contains_key("fileUri") {
+                                        state.recent_files.push(Value::Object(object));
+                                    }
+                                }
+                            }
+                        }
+                        "removeRecentlyOpened" => {
+                            if let Some(paths) = nth_arg(args, 0).and_then(Value::as_array) {
+                                state.recent_workspaces.retain(|recent| {
+                                    !paths
+                                        .iter()
+                                        .any(|path| recent_entry_matches_path(recent, path))
+                                });
+                                state.recent_files.retain(|recent| {
+                                    !paths
+                                        .iter()
+                                        .any(|path| recent_entry_matches_path(recent, path))
+                                });
+                            }
+                        }
+                        "clearRecentlyOpened" => {
+                            state.recent_workspaces.clear();
+                            state.recent_files.clear();
+                        }
+                        "deleteUntitledWorkspace" => {
+                            if let Some(path) = nth_arg(args, 0).and_then(extract_fs_path) {
+                                let _ = fs::remove_file(path);
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(Some(Value::Null))
+                }
                 _ => Ok(None),
             },
             "keyboardLayout" => match method {
                 "getKeyboardLayoutData" => Ok(Some(json!({
                     "keyboardLayoutInfo": {
-                        "id": "tauri-us",
+                        "id": keyboard_layout_id(),
                         "lang": "en",
                         "layout": "US"
                     },
@@ -458,7 +910,10 @@ impl CapabilityRouter {
                 _ => Ok(None),
             },
             "extensionHostStarter" => match method {
-                "createExtensionHost" => Ok(Some(json!({ "id": "tauri-extension-host" }))),
+                "createExtensionHost" => {
+                    let extension_host_id = self.next_extension_host_id.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(json!({ "id": format!("tauri-extension-host-{extension_host_id}") })))
+                }
                 "start" => Ok(Some(json!({ "pid": Value::Null }))),
                 "enableInspectPort" => Ok(Some(json!(false))),
                 "kill" => Ok(Some(Value::Null)),
@@ -475,16 +930,69 @@ impl CapabilityRouter {
                 _ => Ok(None),
             },
             "localPty" => match method {
-                "getPerformanceMarks" | "getLatency" | "getProfiles" => Ok(Some(json!([]))),
+                "getPerformanceMarks" | "getLatency" => Ok(Some(json!([]))),
+                "getProfiles" => {
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                    let profile_name = shell
+                        .rsplit('/')
+                        .next()
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("shell")
+                        .to_string();
+                    Ok(Some(json!([{
+                        "profileName": profile_name,
+                        "path": shell,
+                        "isDefault": true,
+                        "isAutoDetected": true
+                    }])))
+                }
                 "getDefaultSystemShell" => Ok(Some(json!(
                     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
                 ))),
-                "getEnvironment" | "getShellEnvironment" => Ok(Some(json!({}))),
-                "getTerminalLayoutInfo" | "requestDetachInstance" => Ok(Some(Value::Null)),
+                "getEnvironment" | "getShellEnvironment" => Ok(Some(json!(
+                    std::env::vars().collect::<BTreeMap<String, String>>()
+                ))),
+                "getTerminalLayoutInfo" => {
+                    let workspace_id = nth_arg(args, 0)
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get("workspaceId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("default");
+                    let state = self
+                        .local_pty_state
+                        .lock()
+                        .map_err(|_| "localPty state lock poisoned".to_string())?;
+                    Ok(Some(
+                        state
+                            .layout_by_workspace
+                            .get(workspace_id)
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ))
+                }
+                "requestDetachInstance" => Ok(Some(Value::Null)),
                 "setTerminalLayoutInfo"
                 | "reduceConnectionGraceTime"
                 | "persistTerminalState"
-                | "acceptDetachInstanceReply" => Ok(Some(Value::Null)),
+                | "acceptDetachInstanceReply" => {
+                    if method == "setTerminalLayoutInfo" {
+                        if let Some(layout) = nth_arg(args, 0).and_then(Value::as_object) {
+                            let workspace_id = layout
+                                .get("workspaceId")
+                                .and_then(Value::as_str)
+                                .unwrap_or("default")
+                                .to_string();
+                            let mut state = self
+                                .local_pty_state
+                                .lock()
+                                .map_err(|_| "localPty state lock poisoned".to_string())?;
+                            state
+                                .layout_by_workspace
+                                .insert(workspace_id, Value::Object(layout.clone()));
+                        }
+                    }
+                    Ok(Some(Value::Null))
+                }
                 _ => Ok(None),
             },
             "localFilesystem" => match method {
@@ -1011,7 +1519,13 @@ impl CapabilityRouter {
                 | "isRunningUnderARM64Translation" => Ok(Some(json!(false))),
                 "getWindowCount" | "getActiveWindowId" => Ok(Some(json!(1))),
                 "getOSVirtualMachineHint" => Ok(Some(json!(0))),
-                "getWindows" => Ok(Some(json!([]))),
+                "getWindows" => Ok(Some(json!([{
+                    "id": 1,
+                    "workspace": Value::Null,
+                    "title": "Code - Tauri",
+                    "filename": Value::Null,
+                    "folderUri": Value::Null
+                }]))),
                 "getCursorScreenPoint" => Ok(Some(json!({
                     "point": { "x": 0, "y": 0 },
                     "display": { "x": 0, "y": 0, "width": 0, "height": 0 }
@@ -1328,8 +1842,59 @@ impl CapabilityRouter {
         }
     }
 
-    pub fn fallback_counts(&self) -> std::collections::BTreeMap<String, u64> {
-        std::collections::BTreeMap::new()
+    pub fn fallback_counts(&self) -> BTreeMap<String, u64> {
+        self.fallback_telemetry
+            .lock()
+            .map(|state| state.counts.clone())
+            .unwrap_or_default()
+    }
+
+    fn dispatch_channel_rust_default(
+        &self,
+        channel: &str,
+        method: &str,
+        _args: &Value,
+    ) -> Option<Value> {
+        match channel {
+            "extensions" => match method {
+                "getInstalled" => Some(json!([])),
+                "getExtensionsControlManifest" => Some(json!({
+                    "malicious": [],
+                    "deprecated": {},
+                    "search": {},
+                    "autoUpdate": {}
+                })),
+                _ => Some(default_by_method_name(method)),
+            },
+            "mcpManagement" => match method {
+                "getInstalled" => Some(json!([])),
+                _ => Some(default_by_method_name(method)),
+            },
+            "userDataSync" => match method {
+                "_getInitialData" => Some(json!(["uninitialized", [], Value::Null])),
+                _ => Some(default_by_method_name(method)),
+            },
+            "userDataSyncStoreManagement" => match method {
+                "getPreviousUserDataSyncStore" => {
+                    let sync_store = file_uri_value_from_path(&self.user_data_dir().join("sync"));
+                    Some(json!({
+                        "url": sync_store,
+                        "type": "stable",
+                        "defaultUrl": sync_store,
+                        "insidersUrl": sync_store,
+                        "stableUrl": sync_store,
+                        "canSwitch": false,
+                        "authenticationProviders": {}
+                    }))
+                }
+                _ => Some(default_by_method_name(method)),
+            },
+            "update" => match method {
+                "_getInitialState" => Some(json!({ "type": "uninitialized" })),
+                _ => Some(default_by_method_name(method)),
+            },
+            _ => Some(default_by_method_name(method)),
+        }
     }
 
     pub fn menubar_action_payload(&self, menu_item_id: &str) -> Option<Value> {
@@ -1383,50 +1948,6 @@ impl CapabilityRouter {
             .map_err(|_| "menubar state lock poisoned".to_string())?;
         *state = runtime_state;
         Ok(())
-    }
-}
-
-fn dispatch_channel_rust_default(channel: &str, method: &str, _args: &Value) -> Option<Value> {
-    match channel {
-        "extensions" => match method {
-            "getInstalled" => Some(json!([])),
-            "getExtensionsControlManifest" => Some(json!({
-                "malicious": [],
-                "deprecated": {},
-                "search": {},
-                "autoUpdate": {}
-            })),
-            _ => Some(default_by_method_name(method)),
-        },
-        "mcpManagement" => match method {
-            "getInstalled" => Some(json!([])),
-            _ => Some(default_by_method_name(method)),
-        },
-        "userDataSync" => match method {
-            "_getInitialData" => Some(json!(["uninitialized", [], Value::Null])),
-            _ => Some(default_by_method_name(method)),
-        },
-        "userDataSyncStoreManagement" => match method {
-            "getPreviousUserDataSyncStore" => {
-                let fallback_store =
-                    json!({ "scheme": "file", "authority": "", "path": "/tmp/vscode-tauri/sync" });
-                Some(json!({
-                    "url": fallback_store,
-                    "type": "stable",
-                    "defaultUrl": fallback_store,
-                    "insidersUrl": fallback_store,
-                    "stableUrl": fallback_store,
-                    "canSwitch": false,
-                    "authenticationProviders": {}
-                }))
-            }
-            _ => Some(default_by_method_name(method)),
-        },
-        "update" => match method {
-            "_getInitialState" => Some(json!({ "type": "uninitialized" })),
-            _ => Some(default_by_method_name(method)),
-        },
-        _ => Some(default_by_method_name(method)),
     }
 }
 
@@ -2165,37 +2686,292 @@ fn copy_path_recursive(source: &Path, target: &Path, overwrite: bool) -> std::io
 
 fn stable_short_hex_id(input: &str) -> String {
     let mut hash: i32 = 0;
-    hash = (((hash << 5) - hash) + 149_417) | 0;
+    hash = hash
+        .wrapping_shl(5)
+        .wrapping_sub(hash)
+        .wrapping_add(149_417);
     for byte in input.bytes() {
-        hash = (((hash << 5) - hash) + i32::from(byte)) | 0;
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(byte));
     }
     format!("{:08x}", hash as u32)
 }
 
-fn fallback_workspace_identifier(seed: &str) -> Value {
+fn capability_domain_name(domain: CapabilityDomain) -> &'static str {
+    match domain {
+        CapabilityDomain::Window => "window",
+        CapabilityDomain::Filesystem => "filesystem",
+        CapabilityDomain::Terminal => "terminal",
+        CapabilityDomain::Clipboard => "clipboard",
+        CapabilityDomain::Dialogs => "dialogs",
+        CapabilityDomain::Process => "process",
+        CapabilityDomain::Power => "power",
+        CapabilityDomain::Os => "os",
+        CapabilityDomain::Update => "update",
+    }
+}
+
+fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn keyboard_layout_id() -> String {
+    let raw = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".to_string());
+    let normalized = raw
+        .split('.')
+        .next()
+        .unwrap_or("en-US")
+        .replace('_', "-")
+        .to_lowercase();
+    format!("tauri-{normalized}")
+}
+
+fn storage_scope_key(request: Option<&Value>) -> String {
+    let request = request.and_then(Value::as_object);
+    if let Some(workspace_key) =
+        workspace_identifier_key(request.and_then(|value| value.get("workspace")))
+    {
+        return format!("workspace:{workspace_key}");
+    }
+    if let Some(profile_id) = request
+        .and_then(|value| value.get("profile"))
+        .and_then(profile_id_from_value)
+    {
+        return format!("profile:{profile_id}");
+    }
+    "application:default".to_string()
+}
+
+fn unique_profile_id(existing: &BTreeMap<String, Value>, requested_id: String) -> String {
+    let mut sanitized = requested_id
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while sanitized.contains("--") {
+        sanitized = sanitized.replace("--", "-");
+    }
+    sanitized = sanitized.trim_matches('-').to_string();
+    if sanitized.is_empty() {
+        sanitized = "profile".to_string();
+    }
+    if !existing.contains_key(&sanitized) {
+        return sanitized;
+    }
+    let mut index = 1u64;
+    loop {
+        let candidate = format!("{sanitized}-{index}");
+        if !existing.contains_key(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn profile_id_from_value(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    let object = value.as_object()?;
+    if let Some(id) = object.get("id").and_then(Value::as_str) {
+        return Some(id.to_string());
+    }
+    let location = object.get("location")?;
+    let location_path = location.get("path").and_then(Value::as_str)?;
+    Path::new(location_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+fn workspace_identifier_key(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        return Some(id.to_string());
+    }
+    if let Some(config_path) = value.get("configPath") {
+        if let Some(path) = extract_fs_path(config_path) {
+            return Some(to_forward_slash_path(&path));
+        }
+    }
+    if let Some(uri) = value.get("uri") {
+        if let Some(path) = extract_fs_path(uri) {
+            return Some(to_forward_slash_path(&path));
+        }
+    }
+    if let Some(path) = extract_fs_path(value) {
+        return Some(to_forward_slash_path(&path));
+    }
+    None
+}
+
+fn workspace_identifier_for_path(path: &Path) -> Value {
+    let normalized = to_forward_slash_path(path);
     json!({
-        "id": format!("{seed}-id"),
-        "configPath": format!("{seed}.code-workspace")
+        "id": stable_short_hex_id(&normalized),
+        "configPath": file_uri_value_from_path(path)
     })
 }
 
-fn fallback_user_data_profile(id: &str, name: &str) -> Value {
-    let base = "/tmp/vscode-tauri/profiles";
+fn workspace_identifier_from_value(value: &Value) -> Value {
+    if let Some(object) = value.as_object() {
+        if object.get("id").and_then(Value::as_str).is_some() && object.get("configPath").is_some()
+        {
+            let mut workspace = Value::Object(object.clone());
+            if let Some(config_path) = workspace.get("configPath").and_then(Value::as_str) {
+                workspace["configPath"] = file_uri_value_from_path(&PathBuf::from(config_path));
+            }
+            return workspace;
+        }
+    }
+
+    let path = extract_fs_path(value).unwrap_or_else(|| PathBuf::from("/"));
+    workspace_identifier_for_path(&path)
+}
+
+fn recent_entry_matches_path(recent: &Value, candidate_path: &Value) -> bool {
+    let mut candidate_paths = collect_recent_paths(candidate_path);
+    if candidate_paths.is_empty() {
+        return false;
+    }
+    candidate_paths.sort();
+    candidate_paths.dedup();
+    let recent_paths = collect_recent_paths(recent);
+    recent_paths
+        .iter()
+        .any(|recent_path| candidate_paths.binary_search(recent_path).is_ok())
+}
+
+fn collect_recent_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = extract_fs_path(value) {
+        paths.push(to_forward_slash_path(&path));
+    }
+    if let Some(object) = value.as_object() {
+        for key in ["workspace", "folderUri", "fileUri", "uri", "configPath"] {
+            if let Some(nested) = object.get(key) {
+                paths.extend(collect_recent_paths(nested));
+            }
+        }
+    }
+    paths
+}
+
+fn profile_descriptor(
+    user_data_dir: &Path,
+    profile_id: &str,
+    profile_name: &str,
+    is_default: bool,
+    is_transient: bool,
+) -> Value {
+    let profile_root = user_data_dir.join("User/profiles").join(profile_id);
+    let cache_home = user_data_dir.join("CachedProfilesData").join(profile_id);
+    let _ = fs::create_dir_all(&profile_root);
+    let _ = fs::create_dir_all(&cache_home);
+
     json!({
-        "id": id,
-        "isDefault": id == "default",
-        "name": name,
-        "location": { "scheme": "file", "authority": "", "path": format!("{base}/{id}") },
-        "globalStorageHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/globalStorage") },
-        "settingsResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/settings.json") },
-        "keybindingsResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/keybindings.json") },
-        "tasksResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/tasks.json") },
-        "snippetsHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/snippets") },
-        "promptsHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/prompts") },
-        "extensionsResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/extensions.json") },
-        "mcpResource": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/mcp.json") },
-        "cacheHome": { "scheme": "file", "authority": "", "path": format!("{base}/{id}/cache") }
+        "id": profile_id,
+        "isDefault": is_default,
+        "isTransient": is_transient,
+        "name": profile_name,
+        "location": file_uri_value_from_path(&profile_root),
+        "globalStorageHome": file_uri_value_from_path(&profile_root.join("globalStorage")),
+        "settingsResource": file_uri_value_from_path(&profile_root.join("settings.json")),
+        "keybindingsResource": file_uri_value_from_path(&profile_root.join("keybindings.json")),
+        "tasksResource": file_uri_value_from_path(&profile_root.join("tasks.json")),
+        "snippetsHome": file_uri_value_from_path(&profile_root.join("snippets")),
+        "promptsHome": file_uri_value_from_path(&profile_root.join("prompts")),
+        "extensionsResource": file_uri_value_from_path(&profile_root.join("extensions.json")),
+        "mcpResource": file_uri_value_from_path(&profile_root.join("mcp.json")),
+        "cacheHome": file_uri_value_from_path(&cache_home)
     })
+}
+
+fn read_fallback_counts(path: &Path) -> Result<BTreeMap<String, u64>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new())
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read fallback metrics {}: {error}",
+                path.display()
+            ))
+        }
+    };
+
+    let payload: Value = serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "failed to parse fallback metrics {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut counts = BTreeMap::new();
+    if let Some(entries) = payload.get("counts").and_then(Value::as_object) {
+        for (key, value) in entries {
+            let Some(count) = value.as_u64() else {
+                continue;
+            };
+            counts.insert(key.clone(), count);
+        }
+    }
+    Ok(counts)
+}
+
+fn persist_fallback_metrics(
+    path: &Path,
+    at_ms: u64,
+    counts: &BTreeMap<String, u64>,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let payload = json!({
+        "version": 1,
+        "updated_at_ms": at_ms,
+        "counts": counts
+    });
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    fs::write(path, bytes)
+}
+
+fn append_fallback_event(
+    path: &Path,
+    at_ms: u64,
+    key: &str,
+    class: &str,
+    domain: &str,
+    method: &str,
+    count: u64,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let event = json!({
+        "at_ms": at_ms,
+        "key": key,
+        "class": class,
+        "domain": domain,
+        "method": method,
+        "count": count
+    });
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let serialized =
+        serde_json::to_string(&event).map_err(|error| std::io::Error::other(error.to_string()))?;
+    file.write_all(serialized.as_bytes())?;
+    file.write_all(b"\n")
 }
 
 fn extract_url_from_any(value: &Value) -> Option<String> {
@@ -2235,6 +3011,16 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn temp_repo_root(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vscode-tauri-router-{prefix}-{nonce}"));
+        fs::create_dir_all(&path).expect("temp repo root should be created");
+        path
+    }
+
     #[test]
     fn checksum_sha256_base64_matches_expected() {
         let nonce = SystemTime::now()
@@ -2256,5 +3042,89 @@ mod tests {
         assert_eq!(file_change_type_from_kind("created"), 1);
         assert_eq!(file_change_type_from_kind("deleted"), 2);
         assert_eq!(file_change_type_from_kind("anything-else"), 0);
+    }
+
+    #[tokio::test]
+    async fn fallback_counts_record_channel_calls() {
+        let repo_root = temp_repo_root("fallback");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        router
+            .dispatch_channel("logger", "log", &json!([{"message": "hello"}]))
+            .await
+            .expect("channel call should succeed");
+
+        let counts = router.fallback_counts();
+        assert_eq!(counts.get("channel:logger:log"), Some(&1));
+
+        let metrics_path = repo_root.join("apps/tauri/logs/fallback-metrics.json");
+        let metrics = fs::read_to_string(metrics_path).expect("fallback metrics should be written");
+        assert!(metrics.contains("channel:logger:log"));
+    }
+
+    #[tokio::test]
+    async fn storage_channel_is_stateful() {
+        let repo_root = temp_repo_root("storage");
+        let router = CapabilityRouter::new(repo_root);
+
+        router
+            .dispatch_channel(
+                "storage",
+                "updateItems",
+                &json!([{
+                    "insert": [
+                        ["alpha", "1"],
+                        ["beta", "2"]
+                    ]
+                }]),
+            )
+            .await
+            .expect("storage updateItems should succeed");
+
+        let items = router
+            .dispatch_channel("storage", "getItems", &json!([{}]))
+            .await
+            .expect("storage getItems should succeed")
+            .as_array()
+            .cloned()
+            .expect("storage getItems should return array");
+        assert!(items.contains(&json!(["alpha", "1"])));
+        assert!(items.contains(&json!(["beta", "2"])));
+    }
+
+    #[tokio::test]
+    async fn workspaces_and_local_pty_use_repo_backed_state() {
+        let repo_root = temp_repo_root("workspace-pty");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let workspace = router
+            .dispatch_channel("workspaces", "createUntitledWorkspace", &json!([]))
+            .await
+            .expect("createUntitledWorkspace should succeed");
+        let config_path_value = workspace
+            .get("configPath")
+            .expect("workspace should include configPath");
+        let config_path =
+            extract_fs_path(config_path_value).expect("configPath should be a file URI/path");
+        assert!(config_path.starts_with(repo_root.join(".vscode-tauri/user-data/Workspaces")));
+
+        let expected_layout = json!({
+            "workspaceId": "workspace-a",
+            "tabs": [],
+            "background": null
+        });
+        router
+            .dispatch_channel("localPty", "setTerminalLayoutInfo", &json!([expected_layout]))
+            .await
+            .expect("setTerminalLayoutInfo should succeed");
+        let loaded_layout = router
+            .dispatch_channel(
+                "localPty",
+                "getTerminalLayoutInfo",
+                &json!([{ "workspaceId": "workspace-a" }]),
+            )
+            .await
+            .expect("getTerminalLayoutInfo should succeed");
+        assert_eq!(loaded_layout["workspaceId"], json!("workspace-a"));
     }
 }

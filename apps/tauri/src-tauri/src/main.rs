@@ -1651,7 +1651,7 @@ fn main() {
     let repo_root = discover_repo_root();
 
     let app_state = AppState {
-        router: CapabilityRouter::new(),
+        router: CapabilityRouter::new(repo_root.clone()),
         repo_root,
         channel_runtime: Mutex::new(ChannelRuntimeState {
             subscriptions: HashMap::new(),
