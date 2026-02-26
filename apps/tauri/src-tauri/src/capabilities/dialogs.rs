@@ -276,6 +276,7 @@ fn escape_apple_script_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn unknown_method_returns_none() {
@@ -342,5 +343,42 @@ mod tests {
             .await
             .expect_err("non-array buttons should fail validation");
         assert!(error.contains("buttons must be an array of strings"));
+    }
+
+    #[test]
+    fn parse_required_string_and_array_helpers_validate_shape() {
+        let payload = json!({ "message": "hello" });
+        let message = parse_required_string(&payload, "message")
+            .expect("message should parse");
+        assert_eq!(message, "hello");
+
+        let not_object_error =
+            parse_required_string(&json!(["hello"]), "message").expect_err("array should fail");
+        assert!(not_object_error.contains("params must be an object"));
+
+        let missing_error =
+            parse_required_string(&json!({}), "message").expect_err("missing key should fail");
+        assert!(missing_error.contains("missing string param 'message'"));
+
+        let buttons = parse_string_array(Some(&json!(["Yes", "No"])))
+            .expect("button array should parse");
+        assert_eq!(buttons, vec!["Yes".to_string(), "No".to_string()]);
+
+        let invalid_array = parse_string_array(Some(&json!("Yes")))
+            .expect_err("string payload should fail");
+        assert!(invalid_array.contains("buttons must be an array of strings"));
+    }
+
+    #[test]
+    fn parse_string_array_and_escape_helpers_are_stable() {
+        let empty = parse_string_array(None).expect("missing array should resolve to empty");
+        assert!(empty.is_empty());
+
+        let invalid_element = parse_string_array(Some(&json!(["ok", 1])))
+            .expect_err("non-string button should fail");
+        assert!(invalid_element.contains("buttons must contain only strings"));
+
+        let escaped = escape_apple_script_string("say \"hello\" \\\\ demo");
+        assert_eq!(escaped, "say \\\"hello\\\" \\\\\\\\ demo");
     }
 }

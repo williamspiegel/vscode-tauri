@@ -4160,7 +4160,43 @@ fn extract_url_from_any(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Clone)]
+    struct RecordingDialogsCapability {
+        calls: Arc<Mutex<Vec<(String, Value)>>>,
+        responses: Arc<Mutex<VecDeque<Result<Option<Value>, String>>>>,
+    }
+
+    impl RecordingDialogsCapability {
+        fn new(responses: Vec<Result<Option<Value>, String>>) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            }
+        }
+
+        fn take_calls(&self) -> Vec<(String, Value)> {
+            let mut calls = self.calls.lock().expect("dialog calls should lock");
+            std::mem::take(&mut *calls)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DialogsCapability for RecordingDialogsCapability {
+        async fn invoke(&self, method: &str, params: &Value) -> Result<Option<Value>, String> {
+            self.calls
+                .lock()
+                .expect("dialog calls should lock")
+                .push((method.to_string(), params.clone()));
+            self.responses
+                .lock()
+                .expect("dialog responses should lock")
+                .pop_front()
+                .unwrap_or(Ok(None))
+        }
+    }
 
     fn temp_repo_root(prefix: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -6838,5 +6874,140 @@ mod tests {
         let parsed = read_fallback_counts(&metrics_path).expect("valid file should parse");
         assert_eq!(parsed.get("channel:logger:log"), Some(&2));
         assert!(!parsed.contains_key("channel:bad:value"));
+    }
+
+    #[tokio::test]
+    async fn native_host_show_message_box_maps_dialog_payload_and_response() {
+        let repo_root = temp_repo_root("native-host-message-box");
+        let mut router = CapabilityRouter::new(repo_root);
+        let dialogs = RecordingDialogsCapability::new(vec![Ok(Some(json!({
+            "selectedIndex": 2
+        })))]);
+        router.dialogs = Arc::new(dialogs.clone());
+
+        let message_box = router
+            .dispatch_channel(
+                "nativeHost",
+                "showMessageBox",
+                &json!([{
+                    "message": "Confirm action",
+                    "title": "Prompt",
+                    "buttons": ["Cancel", "Ignore", "Apply"]
+                }]),
+            )
+            .await
+            .expect("showMessageBox should succeed");
+        assert_eq!(message_box["response"], json!(2));
+        assert_eq!(message_box["checkboxChecked"], json!(false));
+
+        let calls = dialogs.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "dialogs.showMessage");
+        assert_eq!(calls[0].1["message"], json!("Confirm action"));
+        assert_eq!(calls[0].1["title"], json!("Prompt"));
+        assert_eq!(calls[0].1["buttons"], json!(["Cancel", "Ignore", "Apply"]));
+    }
+
+    #[tokio::test]
+    async fn native_host_show_message_box_defaults_when_payload_or_result_missing() {
+        let repo_root = temp_repo_root("native-host-message-box-defaults");
+        let mut router = CapabilityRouter::new(repo_root);
+        let dialogs = RecordingDialogsCapability::new(vec![Ok(None)]);
+        router.dialogs = Arc::new(dialogs.clone());
+
+        let message_box = router
+            .dispatch_channel("nativeHost", "showMessageBox", &json!([]))
+            .await
+            .expect("showMessageBox should succeed");
+        assert_eq!(message_box["response"], json!(0));
+        assert_eq!(message_box["checkboxChecked"], json!(false));
+
+        let calls = dialogs.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "dialogs.showMessage");
+        assert_eq!(calls[0].1["message"], json!("VS Code"));
+        assert_eq!(calls[0].1["title"], json!("Code Tauri"));
+        assert_eq!(calls[0].1["buttons"], json!(["OK"]));
+    }
+
+    #[tokio::test]
+    async fn native_host_show_open_dialog_routes_file_and_folder_modes() {
+        let repo_root = temp_repo_root("native-host-open-dialog");
+        let mut router = CapabilityRouter::new(repo_root);
+        let dialogs = RecordingDialogsCapability::new(vec![
+            Ok(Some(json!({ "canceled": false, "path": "/tmp/from-folder" }))),
+            Ok(Some(json!({ "canceled": false, "path": "/tmp/from-file.txt" }))),
+            Ok(Some(json!({ "canceled": true }))),
+        ]);
+        router.dialogs = Arc::new(dialogs.clone());
+
+        let open_folder = router
+            .dispatch_channel(
+                "nativeHost",
+                "showOpenDialog",
+                &json!([{
+                    "properties": ["openDirectory"]
+                }]),
+            )
+            .await
+            .expect("showOpenDialog folder mode should succeed");
+        assert_eq!(open_folder["canceled"], json!(false));
+        assert_eq!(open_folder["filePaths"], json!(["/tmp/from-folder"]));
+
+        let open_file = router
+            .dispatch_channel(
+                "nativeHost",
+                "showOpenDialog",
+                &json!([{
+                    "properties": ["openFile"]
+                }]),
+            )
+            .await
+            .expect("showOpenDialog file mode should succeed");
+        assert_eq!(open_file["canceled"], json!(false));
+        assert_eq!(open_file["filePaths"], json!(["/tmp/from-file.txt"]));
+
+        let open_canceled = router
+            .dispatch_channel("nativeHost", "showOpenDialog", &json!([{}]))
+            .await
+            .expect("showOpenDialog canceled mode should succeed");
+        assert_eq!(open_canceled["canceled"], json!(true));
+        assert_eq!(open_canceled["filePaths"], json!([]));
+
+        let calls = dialogs.take_calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0, "dialogs.openFolder");
+        assert_eq!(calls[1].0, "dialogs.openFile");
+        assert_eq!(calls[2].0, "dialogs.openFile");
+    }
+
+    #[tokio::test]
+    async fn native_host_show_save_dialog_maps_path_and_cancellation() {
+        let repo_root = temp_repo_root("native-host-save-dialog");
+        let mut router = CapabilityRouter::new(repo_root);
+        let dialogs = RecordingDialogsCapability::new(vec![
+            Ok(Some(json!({ "path": "/tmp/output.txt" }))),
+            Ok(None),
+        ]);
+        router.dialogs = Arc::new(dialogs.clone());
+
+        let saved = router
+            .dispatch_channel("nativeHost", "showSaveDialog", &json!([{}]))
+            .await
+            .expect("showSaveDialog with path should succeed");
+        assert_eq!(saved["canceled"], json!(false));
+        assert_eq!(saved["filePath"], json!("/tmp/output.txt"));
+
+        let canceled = router
+            .dispatch_channel("nativeHost", "showSaveDialog", &json!([]))
+            .await
+            .expect("showSaveDialog cancel should succeed");
+        assert_eq!(canceled["canceled"], json!(true));
+        assert_eq!(canceled["filePath"], Value::Null);
+
+        let calls = dialogs.take_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "dialogs.saveFile");
+        assert_eq!(calls[1].0, "dialogs.saveFile");
     }
 }
