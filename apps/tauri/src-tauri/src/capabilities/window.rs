@@ -144,6 +144,30 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn open_main_errors_when_app_handle_is_missing() {
+        let capability = RustPrimaryWindowCapability;
+        let error = capability
+            .invoke("window.open", &json!({ "target": "main" }))
+            .await
+            .expect_err("main window open should fail without app handle");
+        assert!(error.contains("tauri app handle not initialized"));
+    }
+
+    #[tokio::test]
+    async fn open_non_main_returns_non_fatal_payload_when_app_handle_is_missing() {
+        let capability = RustPrimaryWindowCapability;
+        let result = capability
+            .invoke("window.open", &json!({ "target": "settings" }))
+            .await
+            .expect("non-main window open should not fail")
+            .expect("non-main window open should return payload");
+        assert_eq!(result["target"], json!("settings"));
+        assert_eq!(result["opened"], json!(false));
+        assert_eq!(result["existing"], json!(false));
+        assert_eq!(result["reason"], json!("tauri app handle not initialized"));
+    }
+
+    #[tokio::test]
     async fn set_fullscreen_requires_enabled_param() {
         let capability = RustPrimaryWindowCapability;
         let error = capability
@@ -151,6 +175,16 @@ mod tests {
             .await
             .expect_err("missing enabled should return an error");
         assert!(error.contains("missing boolean param 'enabled'"));
+    }
+
+    #[tokio::test]
+    async fn get_state_errors_when_app_handle_is_missing() {
+        let capability = RustPrimaryWindowCapability;
+        let error = capability
+            .invoke("window.getState", &json!({}))
+            .await
+            .expect_err("window.getState should fail without app handle");
+        assert!(error.contains("tauri app handle not initialized"));
     }
 
     #[tokio::test]

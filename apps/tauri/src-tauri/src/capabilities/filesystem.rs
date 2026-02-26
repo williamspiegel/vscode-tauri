@@ -812,4 +812,57 @@ mod tests {
             .expect_err("missing watchId should fail");
         assert!(error.contains("missing param 'watchId'"));
     }
+
+    #[tokio::test]
+    async fn read_file_missing_path_returns_error() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("missing-read");
+
+        let error = capability
+            .invoke(
+                "filesystem.readFile",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect_err("readFile on missing path should fail");
+        assert!(error.contains("filesystem.readFile failed"));
+    }
+
+    #[tokio::test]
+    async fn stat_missing_path_returns_error() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("missing-stat");
+
+        let error = capability
+            .invoke(
+                "filesystem.stat",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect_err("stat on missing path should fail");
+        assert!(error.contains("filesystem.stat failed"));
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_invalid_base64() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("invalid-base64");
+
+        let error = capability
+            .invoke(
+                "filesystem.writeFile",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "contents": "abc",
+                    "encoding": "base64"
+                }),
+            )
+            .await
+            .expect_err("invalid base64 should fail");
+        assert!(error.contains("invalid base64 length"));
+    }
 }

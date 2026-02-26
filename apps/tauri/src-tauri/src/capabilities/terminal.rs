@@ -300,6 +300,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resize_requires_cols_and_rows() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.resize",
+                &json!({
+                    "id": 1
+                }),
+            )
+            .await
+            .expect_err("missing cols/rows should fail");
+        assert!(error.contains("missing numeric param 'cols'"));
+    }
+
+    #[tokio::test]
+    async fn write_unknown_session_id_fails() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.write",
+                &json!({
+                    "id": 999,
+                    "data": "echo hello\n"
+                }),
+            )
+            .await
+            .expect_err("unknown session id should fail");
+        assert!(error.contains("terminal.write unknown session id"));
+    }
+
+    #[tokio::test]
+    async fn kill_unknown_session_id_fails() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.kill",
+                &json!({
+                    "id": 999
+                }),
+            )
+            .await
+            .expect_err("unknown session id should fail");
+        assert!(error.contains("terminal.kill unknown session id"));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryTerminalCapability::new();
         let result = capability

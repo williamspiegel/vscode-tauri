@@ -138,6 +138,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_item_in_folder_requires_path_param() {
+        let capability = RustPrimaryOsCapability;
+        let error = capability
+            .invoke("os.showItemInFolder", &json!({}))
+            .await
+            .expect_err("missing path should return an error");
+        assert!(error.contains("missing string param 'path'"));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryOsCapability;
         let result = capability

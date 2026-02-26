@@ -146,6 +146,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_echoes_requested_channel() {
+        let capability = RustPrimaryUpdateCapability::new();
+        let result = capability
+            .invoke("update.check", &json!({ "channel": "insiders" }))
+            .await
+            .expect("update.check should succeed")
+            .expect("update.check should return payload");
+        assert_eq!(result["channel"], json!("insiders"));
+    }
+
+    #[tokio::test]
+    async fn download_without_version_uses_unknown_fallback() {
+        let capability = RustPrimaryUpdateCapability::new();
+        let result = capability
+            .invoke("update.download", &json!({}))
+            .await
+            .expect("update.download should succeed")
+            .expect("update.download should return payload");
+        assert_eq!(result["downloaded"], json!(false));
+        assert_eq!(result["version"], json!("unknown"));
+    }
+
+    #[tokio::test]
+    async fn install_without_downloaded_version_reports_stable_reason() {
+        let capability = RustPrimaryUpdateCapability::new();
+        let result = capability
+            .invoke("update.install", &json!({}))
+            .await
+            .expect("update.install should succeed")
+            .expect("update.install should return payload");
+        assert_eq!(result["scheduled"], json!(false));
+        assert_eq!(result["installed"], json!(false));
+        assert_eq!(result["reason"], json!("no downloaded update is available"));
+    }
+
+    #[tokio::test]
+    async fn install_with_explicit_version_returns_stable_payload() {
+        let capability = RustPrimaryUpdateCapability::new();
+        let result = capability
+            .invoke("update.install", &json!({ "version": "1.2.3" }))
+            .await
+            .expect("update.install should succeed")
+            .expect("update.install should return payload");
+        assert_eq!(result["scheduled"], json!(false));
+        assert_eq!(result["installed"], json!(false));
+        assert_eq!(result["version"], json!("1.2.3"));
+        assert_eq!(result["handledBy"], json!("rust-primary"));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryUpdateCapability::new();
         let result = capability

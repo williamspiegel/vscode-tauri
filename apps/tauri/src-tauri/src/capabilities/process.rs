@@ -572,6 +572,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_spawn_rejects_non_string_env_values() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke(
+                "process.spawn",
+                &json!({
+                    "command": "echo",
+                    "env": { "FOO": 1 }
+                }),
+            )
+            .await
+            .expect_err("non-string env values should fail validation");
+        assert!(error.contains("env override 'FOO' must be a string"));
+    }
+
+    #[tokio::test]
+    async fn process_kill_requires_pid() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke("process.kill", &json!({}))
+            .await
+            .expect_err("process.kill without pid should fail");
+        assert!(error.contains("missing numeric param 'pid'"));
+    }
+
+    #[tokio::test]
+    async fn process_wait_unknown_pid_reports_not_known() {
+        let capability = RustPrimaryProcessCapability::new();
+        let result = capability
+            .invoke(
+                "process.wait",
+                &json!({
+                    "pid": 999999,
+                    "timeoutMs": 1
+                }),
+            )
+            .await
+            .expect("process.wait should succeed for unknown pid")
+            .expect("process.wait should return payload");
+        assert_eq!(result["exited"], json!(false));
+        assert_eq!(result["running"], json!(false));
+        assert_eq!(result["known"], json!(false));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryProcessCapability::new();
         let result = capability
