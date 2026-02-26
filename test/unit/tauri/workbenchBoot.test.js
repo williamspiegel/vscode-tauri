@@ -21,6 +21,7 @@ suite('Tauri Workbench Boot', () => {
 	 * @param {{
 	 * 	href?: string;
 	 * 	desktopChannelCall?: (channel: string, method: string, args: unknown[]) => Promise<unknown>;
+	 * 	getWorkbenchCssModules?: () => Promise<string[]>;
 	 * 	onCreate?: (domElement: HTMLElement, options: Record<string, unknown>) => void;
 	 * }} [options]
 	 */
@@ -119,21 +120,22 @@ suite('Tauri Workbench Boot', () => {
 		};
 		global.document = documentStub;
 
-		const host = {
-			getWorkbenchCssModules: async () => [],
-			desktopChannelCall: options.desktopChannelCall || (async () => ({ canceled: true }))
-		};
+			const host = {
+				getWorkbenchCssModules: options.getWorkbenchCssModules || (async () => []),
+				desktopChannelCall: options.desktopChannelCall || (async () => ({ canceled: true }))
+			};
 
 		await workbenchBootModule.bootWorkbench(/** @type {HTMLElement} */({}), host);
 		assert.ok(capturedCreateOptions, 'workbench create options should be captured');
 		assert.ok(Array.isArray(capturedCreateOptions.commands), 'commands should be registered');
 
-		return {
-			createOptions: capturedCreateOptions,
-			getOpenedUrl: () => openedUrl,
-			getLocationHref: () => global.window.location.href
-		};
-	}
+			return {
+				createOptions: capturedCreateOptions,
+				getOpenedUrl: () => openedUrl,
+				getLocationHref: () => global.window.location.href,
+				getHeadChildren: () => headChildren.slice()
+			};
+		}
 
 	setup(() => {
 		const compiledUiRoot = process.env.TAURI_UI_TEST_BUILD_DIR;
@@ -170,6 +172,66 @@ suite('Tauri Workbench Boot', () => {
 		});
 		assert.deepStrictEqual(workspaceProvider.payload, { source: 'test' });
 		assert.strictEqual(workspaceProvider.trusted, true);
+	});
+
+	test('bootWorkbench parses workspace URI query and invalid payload fallback', async () => {
+		const { createOptions } = await boot({
+			href: 'http://127.0.0.1:1420/?workspace=https%3A%2F%2Fexample.test%2Fdemo.code-workspace%3Fa%3D1%23frag&payload=not-json'
+		});
+
+		const workspaceProvider = createOptions.workspaceProvider;
+		assert.deepStrictEqual(workspaceProvider.workspace, {
+			workspaceUri: {
+				scheme: 'https',
+				authority: 'example.test',
+				path: '/demo.code-workspace',
+				query: 'a=1',
+				fragment: 'frag'
+			}
+		});
+		assert.deepStrictEqual(workspaceProvider.payload, {});
+	});
+
+	test('workspaceProvider.open short-circuits when reusing same workspace without payload', async () => {
+		const booted = await boot({
+			href: 'http://127.0.0.1:1420/?folder=%2Ftmp%2Freuse-me'
+		});
+		const workspaceProvider = booted.createOptions.workspaceProvider;
+
+		const opened = await workspaceProvider.open({
+			folderUri: {
+				scheme: 'file',
+				authority: '',
+				path: '/tmp/reuse-me'
+			}
+		}, { reuse: true });
+
+		assert.strictEqual(opened, true);
+		assert.strictEqual(booted.getOpenedUrl(), undefined);
+		assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/?folder=%2Ftmp%2Freuse-me');
+	});
+
+	test('workspaceProvider.open encodes workspace target and payload for new window flow', async () => {
+		const booted = await boot({
+			href: 'http://127.0.0.1:1420/'
+		});
+		const workspaceProvider = booted.createOptions.workspaceProvider;
+
+		const opened = await workspaceProvider.open({
+			workspaceUri: {
+				scheme: 'file',
+				authority: '',
+				path: '/tmp/demo.code-workspace'
+			}
+		}, {
+			reuse: false,
+			payload: { source: 'unit-test' }
+		});
+
+		assert.strictEqual(opened, true);
+		assert.match(booted.getOpenedUrl(), /\?workspace=file%3A%2F%2F%2Ftmp%2Fdemo\.code-workspace/);
+		assert.match(booted.getOpenedUrl(), /&payload=%7B%22source%22%3A%22unit-test%22%7D$/);
+		assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/');
 	});
 
 	test('open-folder command uses nativeHost picker and reuses current window', async () => {
@@ -230,5 +292,33 @@ suite('Tauri Workbench Boot', () => {
 
 		assert.match(getOpenedUrl(), /\?folder=file%3A%2F%2F%2Ftmp%2Fnew-folder$/);
 		assert.strictEqual(getLocationHref(), 'http://127.0.0.1:1420/');
+	});
+
+	test('open-folder-in-new-window command reuses current window when forceReuseWindow is set', async () => {
+		const { createOptions, getOpenedUrl, getLocationHref } = await boot({
+			href: 'http://127.0.0.1:1420/',
+			desktopChannelCall: async () => ({ canceled: false, filePaths: ['/tmp/reused-folder'] })
+		});
+
+		const openInNewWindowCommand = createOptions.commands.find(command => command.id === 'workbench.action.files.openFolderInNewWindow');
+		await openInNewWindowCommand.handler({ forceReuseWindow: true });
+
+		assert.strictEqual(getOpenedUrl(), undefined);
+		assert.match(getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Freused-folder$/);
+	});
+
+	test('bootWorkbench installs import map entries for css modules', async () => {
+		const { getHeadChildren } = await boot({
+			getWorkbenchCssModules: async () => ['vs/workbench/workbench.desktop.main.css', '/custom.css']
+		});
+
+		const importMapNode = getHeadChildren().find(
+			/** @param {any} node */
+			node => node && node.tagName === 'script' && node.dataset?.vscodeCssImportMap === '1'
+		);
+		assert.ok(importMapNode, 'import map node should be created');
+		const importMap = JSON.parse(importMapNode.textContent);
+		assert.ok(importMap.imports['http://127.0.0.1:1420/out/vs/workbench/workbench.desktop.main.css']);
+		assert.ok(importMap.imports['http://127.0.0.1:1420/custom.css']);
 	});
 });
