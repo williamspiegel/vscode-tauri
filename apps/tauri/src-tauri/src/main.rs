@@ -4,11 +4,14 @@ mod capabilities;
 mod protocol;
 mod router;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use protocol::{
     error_response, ok_response, HandshakeRequest, HandshakeResponse, JsonRpcRequest,
     PROTOCOL_VERSION,
 };
 use router::CapabilityRouter;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -16,7 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::LogicalPosition;
 use tauri::{Emitter, Listener, Manager, State};
@@ -68,6 +71,28 @@ struct AppState {
     context_menu_runtime: Mutex<ContextMenuRuntimeState>,
     next_subscription_id: AtomicU64,
     cached_window_config: Mutex<Option<Value>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostHttpRequestParams {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    body_base64: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostHttpResponsePayload {
+    status_code: u16,
+    headers: BTreeMap<String, Value>,
+    body_base64: String,
 }
 
 impl AppState {
@@ -593,6 +618,231 @@ impl AppState {
     }
 }
 
+fn should_forward_host_request_header(name: &str) -> bool {
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-length" | "host"
+    )
+}
+
+fn append_response_header_value(headers: &mut BTreeMap<String, Value>, key: String, value: String) {
+    match headers.get_mut(&key) {
+        Some(existing) => match existing {
+            Value::String(current) => {
+                let first = std::mem::take(current);
+                *existing = Value::Array(vec![Value::String(first), Value::String(value)]);
+            }
+            Value::Array(values) => values.push(Value::String(value)),
+            _ => {
+                *existing = Value::String(value);
+            }
+        },
+        None => {
+            headers.insert(key, Value::String(value));
+        }
+    }
+}
+
+fn should_trace_host_http_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("marketplace.visualstudio.com")
+        || lower.contains("/_apis/public/gallery")
+        || lower.contains("extensionquery")
+        || lower.contains("open-vsx.org")
+}
+
+async fn perform_host_http_request(params: HostHttpRequestParams) -> Result<Value, String> {
+    let trace = should_trace_host_http_url(&params.url);
+    let started_at = Instant::now();
+    let header_count = params
+        .headers
+        .as_ref()
+        .map(|headers| headers.len())
+        .unwrap_or(0);
+    let has_body = params
+        .body_base64
+        .as_ref()
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    if trace {
+        eprintln!(
+            "[host.httpRequest] request method={} url={} timeoutMs={:?} headerCount={} hasBody={}",
+            params.method.as_deref().unwrap_or("GET"),
+            params.url,
+            params.timeout_ms,
+            header_count,
+            has_body
+        );
+    }
+
+    let parsed_url = match reqwest::Url::parse(&params.url) {
+        Ok(value) => value,
+        Err(error) => {
+            if trace {
+                eprintln!("[host.httpRequest] invalid url error={error}");
+            }
+            return Err(format!(
+                "host.httpRequest invalid url '{}': {error}",
+                params.url
+            ));
+        }
+    };
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        if trace {
+            eprintln!(
+                "[host.httpRequest] unsupported scheme scheme={}",
+                parsed_url.scheme()
+            );
+        }
+        return Err(format!(
+            "host.httpRequest supports only http/https urls (got '{}')",
+            parsed_url.scheme()
+        ));
+    }
+
+    let method_raw = params.method.unwrap_or_else(|| "GET".to_string());
+    let method = match reqwest::Method::from_bytes(method_raw.as_bytes()) {
+        Ok(value) => value,
+        Err(error) => {
+            if trace {
+                eprintln!(
+                    "[host.httpRequest] invalid method method={} error={error}",
+                    method_raw
+                );
+            }
+            return Err(format!(
+                "host.httpRequest invalid method '{}': {error}",
+                method_raw
+            ));
+        }
+    };
+
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(timeout_ms) = params.timeout_ms {
+        if timeout_ms > 0 {
+            client_builder = client_builder.timeout(Duration::from_millis(timeout_ms));
+        }
+    }
+    let client = match client_builder.build() {
+        Ok(value) => value,
+        Err(error) => {
+            if trace {
+                eprintln!("[host.httpRequest] failed to create client error={error}");
+            }
+            return Err(format!("host.httpRequest failed to create client: {error}"));
+        }
+    };
+
+    let mut request_builder = client.request(method, parsed_url);
+    if let Some(headers) = params.headers {
+        for (name, raw_value) in headers {
+            if !should_forward_host_request_header(&name) {
+                continue;
+            }
+            let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            match raw_value {
+                Value::String(value) => {
+                    if let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value) {
+                        request_builder = request_builder.header(header_name.clone(), header_value);
+                    }
+                }
+                Value::Array(values) => {
+                    for entry in values {
+                        let Some(value) = entry.as_str() else {
+                            continue;
+                        };
+                        if let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) {
+                            request_builder =
+                                request_builder.header(header_name.clone(), header_value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(body_base64) = params.body_base64 {
+        if !body_base64.is_empty() {
+            let bytes = match BASE64_STANDARD.decode(body_base64.as_bytes()) {
+                Ok(value) => value,
+                Err(error) => {
+                    if trace {
+                        eprintln!("[host.httpRequest] invalid bodyBase64 error={error}");
+                    }
+                    return Err(format!("host.httpRequest invalid bodyBase64: {error}"));
+                }
+            };
+            request_builder = request_builder.body(bytes);
+        }
+    }
+
+    let response = match request_builder.send().await {
+        Ok(value) => value,
+        Err(error) => {
+            if trace {
+                eprintln!(
+                    "[host.httpRequest] request failed elapsedMs={} error={error}",
+                    started_at.elapsed().as_millis()
+                );
+            }
+            return Err(format!("host.httpRequest request failed: {error}"));
+        }
+    };
+
+    let status_code = response.status().as_u16();
+    let mut response_headers = BTreeMap::new();
+    for (name, value) in response.headers() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        append_response_header_value(
+            &mut response_headers,
+            name.as_str().to_string(),
+            value.to_string(),
+        );
+    }
+    let body_bytes = match response.bytes().await {
+        Ok(value) => value,
+        Err(error) => {
+            if trace {
+                eprintln!("[host.httpRequest] failed to read response body error={error}");
+            }
+            return Err(format!(
+                "host.httpRequest failed to read response body: {error}"
+            ));
+        }
+    };
+    if trace {
+        eprintln!(
+            "[host.httpRequest] response status={} bodyBytes={} elapsedMs={}",
+            status_code,
+            body_bytes.len(),
+            started_at.elapsed().as_millis()
+        );
+    }
+    let payload = HostHttpResponsePayload {
+        status_code,
+        headers: response_headers,
+        body_base64: BASE64_STANDARD.encode(body_bytes),
+    };
+
+    match serde_json::to_value(payload) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if trace {
+                eprintln!("[host.httpRequest] failed to serialize response error={error}");
+            }
+            Err(format!(
+                "host.httpRequest failed to serialize response: {error}"
+            ))
+        }
+    }
+}
+
 #[tauri::command]
 async fn host_invoke(
     request: JsonRpcRequest,
@@ -665,6 +915,30 @@ async fn host_invoke(
     if request.method == "host.cssModules" {
         return match workbench_css_modules(&state.repo_root) {
             Ok(modules) => Ok(ok_response(request.id, json!({ "modules": modules }))),
+            Err(error) => Ok(error_response(request.id, -32603, error)),
+        };
+    }
+
+    if request.method == "host.httpRequest" {
+        let params = match serde_json::from_value::<HostHttpRequestParams>(request.params.clone()) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(error_response(
+                    request.id,
+                    -32602,
+                    format!("Invalid host.httpRequest params: {error}"),
+                ));
+            }
+        };
+        if params.url.trim().is_empty() {
+            return Ok(error_response(
+                request.id,
+                -32602,
+                "host.httpRequest requires a non-empty url",
+            ));
+        }
+        return match perform_host_http_request(params).await {
+            Ok(response) => Ok(ok_response(request.id, response)),
             Err(error) => Ok(error_response(request.id, -32603, error)),
         };
     }
@@ -798,6 +1072,12 @@ const IPC_CONTEXT_MENU_CHANNEL: &str = "vscode:contextmenu";
 const IPC_CONTEXT_MENU_CLOSE_CHANNEL: &str = "vscode:onCloseContextMenu";
 const IPC_EVENT_CHANNEL: &str = "__ipc";
 const IPC_EVENT_NAME: &str = "event";
+
+const DEFAULT_EXTENSIONS_GALLERY_SERVICE_URL: &str = "https://open-vsx.org/vscode/gallery";
+const DEFAULT_EXTENSIONS_GALLERY_ITEM_URL: &str = "https://open-vsx.org/extension";
+const DEFAULT_EXTENSIONS_GALLERY_PUBLISHER_URL: &str = "https://open-vsx.org/publisher";
+const DEFAULT_EXTENSIONS_GALLERY_RESOURCE_URL_TEMPLATE: &str =
+    "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}";
 
 fn value_as_i64(value: &Value) -> Option<i64> {
     value
@@ -1042,9 +1322,90 @@ fn remove_context_menu_runtime_entries(
     true
 }
 
+fn env_flag_true(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn apply_default_extensions_gallery_config(product: &mut Value) {
+    let Some(product_object) = product.as_object_mut() else {
+        return;
+    };
+
+    let has_gallery = product_object
+        .get("extensionsGallery")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("serviceUrl"))
+        .and_then(Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if has_gallery {
+        return;
+    }
+
+    if env_flag_true("VSCODE_TAURI_DISABLE_DEFAULT_EXTENSIONS_GALLERY") {
+        eprintln!(
+            "[tauri.extensionsGallery] default gallery injection disabled by VSCODE_TAURI_DISABLE_DEFAULT_EXTENSIONS_GALLERY"
+        );
+        return;
+    }
+
+    let service_url = std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_SERVICE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EXTENSIONS_GALLERY_SERVICE_URL.to_string());
+    let item_url = std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_ITEM_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EXTENSIONS_GALLERY_ITEM_URL.to_string());
+    let publisher_url = std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_PUBLISHER_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EXTENSIONS_GALLERY_PUBLISHER_URL.to_string());
+    let resource_url_template =
+        std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_RESOURCE_URL_TEMPLATE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_EXTENSIONS_GALLERY_RESOURCE_URL_TEMPLATE.to_string());
+    let extension_url_template =
+        std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_EXTENSION_URL_TEMPLATE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| resource_url_template.clone());
+    let control_url = std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_CONTROL_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| service_url.clone());
+    let nls_base_url = std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_NLS_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| service_url.clone());
+
+    product_object.insert(
+        "extensionsGallery".to_string(),
+        json!({
+            "serviceUrl": service_url,
+            "itemUrl": item_url,
+            "publisherUrl": publisher_url,
+            "resourceUrlTemplate": resource_url_template,
+            "extensionUrlTemplate": extension_url_template,
+            "controlUrl": control_url,
+            "nlsBaseUrl": nls_base_url
+        }),
+    );
+    eprintln!("[tauri.extensionsGallery] injected default extensionsGallery config");
+}
+
 fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     let nls_messages = read_nls_messages(repo_root)?;
-    let product = read_json_file(&repo_root.join("product.json"))?;
+    let mut product = read_json_file(&repo_root.join("product.json"))?;
+    apply_default_extensions_gallery_config(&mut product);
     let css_modules = workbench_css_modules(repo_root)?;
     let workbench_bootstrap = resolve_workbench_bootstrap_config(repo_root, &product);
 
@@ -1070,7 +1431,10 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
 
     ensure_user_data_default_file(&profile_location.join("settings.json"), "{}\n");
     ensure_user_data_default_file(&profile_location.join("keybindings.json"), "[]\n");
-    ensure_user_data_default_file(&profile_location.join("tasks.json"), "{\"version\":\"2.0.0\",\"tasks\":[]}\n");
+    ensure_user_data_default_file(
+        &profile_location.join("tasks.json"),
+        "{\"version\":\"2.0.0\",\"tasks\":[]}\n",
+    );
     ensure_user_data_default_file(&profile_location.join("extensions.json"), "[]\n");
     ensure_user_data_default_file(&profile_location.join("mcp.json"), "{}\n");
     ensure_user_data_default_file(&profile_location.join("chatLanguageModels.json"), "[]\n");
@@ -1182,7 +1546,8 @@ fn ensure_user_data_default_file(path: &Path, contents: &str) {
     let _ = fs::write(path, contents);
 }
 
-const LEGACY_WORKBENCH_BOOTSTRAP_PATH: &str = "/out/vs/code/electron-browser/workbench/workbench.js";
+const LEGACY_WORKBENCH_BOOTSTRAP_PATH: &str =
+    "/out/vs/code/electron-browser/workbench/workbench.js";
 const MIN_WORKBENCH_BOOTSTRAP_PATH: &str =
     "/out-vscode-min/vs/code/electron-browser/workbench/workbench.js";
 
