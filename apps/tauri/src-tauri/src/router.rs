@@ -5998,6 +5998,308 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspaces_identifier_dirty_and_recent_entries_edge_cases_are_stable() {
+        let repo_root = temp_repo_root("workspaces-edge-cases");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let dirty = router
+            .dispatch_channel("workspaces", "getDirtyWorkspaces", &json!([]))
+            .await
+            .expect("getDirtyWorkspaces should succeed");
+        assert_eq!(dirty, json!([]));
+
+        let workspace_identifier = router
+            .dispatch_channel(
+                "workspaces",
+                "getWorkspaceIdentifier",
+                &json!([{
+                    "path": "/tmp/project.code-workspace"
+                }]),
+            )
+            .await
+            .expect("getWorkspaceIdentifier should succeed");
+        assert_eq!(
+            workspace_identifier["configPath"]["path"],
+            json!("/tmp/project.code-workspace")
+        );
+
+        let entered_workspace = router
+            .dispatch_channel(
+                "workspaces",
+                "enterWorkspace",
+                &json!([{
+                    "path": "/tmp/workspace-folder"
+                }]),
+            )
+            .await
+            .expect("enterWorkspace should succeed");
+        assert_eq!(
+            entered_workspace["workspace"]["configPath"]["path"],
+            json!("/tmp/workspace-folder")
+        );
+
+        router
+            .dispatch_channel(
+                "workspaces",
+                "addRecentlyOpened",
+                &json!([[
+                    "invalid-entry",
+                    {
+                        "workspace": {
+                            "id": "ws-1",
+                            "configPath": {
+                                "scheme": "file",
+                                "authority": "",
+                                "path": "/tmp/ws-1.code-workspace"
+                            }
+                        }
+                    },
+                    {
+                        "fileUri": {
+                            "scheme": "file",
+                            "authority": "",
+                            "path": "/tmp/note.md"
+                        }
+                    }
+                ]]),
+            )
+            .await
+            .expect("addRecentlyOpened should succeed");
+
+        let before_remove = router
+            .dispatch_channel("workspaces", "getRecentlyOpened", &json!([]))
+            .await
+            .expect("getRecentlyOpened should succeed");
+        assert_eq!(
+            before_remove["workspaces"]
+                .as_array()
+                .expect("workspaces should be array")
+                .len(),
+            1
+        );
+        assert_eq!(
+            before_remove["files"]
+                .as_array()
+                .expect("files should be array")
+                .len(),
+            1
+        );
+
+        router
+            .dispatch_channel(
+                "workspaces",
+                "removeRecentlyOpened",
+                &json!([[
+                    {
+                        "path": "/tmp/ws-1.code-workspace"
+                    },
+                    {
+                        "path": "/tmp/note.md"
+                    }
+                ]]),
+            )
+            .await
+            .expect("removeRecentlyOpened should succeed");
+
+        let after_remove = router
+            .dispatch_channel("workspaces", "getRecentlyOpened", &json!([]))
+            .await
+            .expect("getRecentlyOpened after remove should succeed");
+        assert_eq!(
+            after_remove["workspaces"]
+                .as_array()
+                .expect("workspaces should be array")
+                .len(),
+            0
+        );
+        assert_eq!(
+            after_remove["files"]
+                .as_array()
+                .expect("files should be array")
+                .len(),
+            0
+        );
+
+        let untitled = router
+            .dispatch_channel("workspaces", "createUntitledWorkspace", &json!([]))
+            .await
+            .expect("createUntitledWorkspace should succeed");
+        let untitled_path = extract_fs_path(
+            untitled
+                .get("configPath")
+                .expect("untitled workspace should include configPath"),
+        )
+        .expect("configPath should be a file URI/path");
+        assert!(untitled_path.exists());
+
+        let untitled_contents = fs::read_to_string(&untitled_path)
+            .expect("untitled workspace file should be readable");
+        assert!(untitled_contents.contains("\"folders\": []"));
+
+        router
+            .dispatch_channel(
+                "workspaces",
+                "deleteUntitledWorkspace",
+                &json!([{ "path": untitled_path }]),
+            )
+            .await
+            .expect("deleteUntitledWorkspace should succeed");
+    }
+
+    #[tokio::test]
+    async fn native_host_additional_static_contracts_are_stable() {
+        let repo_root = temp_repo_root("native-host-additional");
+        let router = CapabilityRouter::new(repo_root);
+
+        let virtual_machine_hint = router
+            .dispatch_channel("nativeHost", "getOSVirtualMachineHint", &json!([]))
+            .await
+            .expect("getOSVirtualMachineHint should succeed");
+        assert_eq!(virtual_machine_hint, json!(0));
+
+        let os_properties = router
+            .dispatch_channel("nativeHost", "getOSProperties", &json!([]))
+            .await
+            .expect("getOSProperties should succeed");
+        assert_eq!(os_properties["type"], json!(std::env::consts::OS));
+        assert_eq!(
+            os_properties["arch"],
+            json!(std::env::consts::ARCH)
+        );
+        assert_eq!(
+            os_properties["platform"],
+            json!(std::env::consts::OS)
+        );
+        assert_eq!(os_properties["cpus"], json!([]));
+
+        let system_idle_state = router
+            .dispatch_channel("nativeHost", "getSystemIdleState", &json!([]))
+            .await
+            .expect("getSystemIdleState should succeed");
+        assert_eq!(system_idle_state, json!("active"));
+
+        let system_idle_time = router
+            .dispatch_channel("nativeHost", "getSystemIdleTime", &json!([]))
+            .await
+            .expect("getSystemIdleTime should succeed");
+        assert_eq!(system_idle_time, json!(0));
+
+        let thermal_state = router
+            .dispatch_channel("nativeHost", "getCurrentThermalState", &json!([]))
+            .await
+            .expect("getCurrentThermalState should succeed");
+        assert_eq!(thermal_state, json!("nominal"));
+
+        let blocker_id = router
+            .dispatch_channel("nativeHost", "startPowerSaveBlocker", &json!([]))
+            .await
+            .expect("startPowerSaveBlocker should succeed");
+        assert_eq!(blocker_id, json!(1));
+
+        let is_blocker_started = router
+            .dispatch_channel("nativeHost", "isPowerSaveBlockerStarted", &json!([]))
+            .await
+            .expect("isPowerSaveBlockerStarted should succeed");
+        assert_eq!(is_blocker_started, json!(false));
+
+        let stop_blocker = router
+            .dispatch_channel("nativeHost", "stopPowerSaveBlocker", &json!([]))
+            .await
+            .expect("stopPowerSaveBlocker should succeed");
+        assert_eq!(stop_blocker, json!(true));
+
+        let process_id = router
+            .dispatch_channel("nativeHost", "getProcessId", &json!([]))
+            .await
+            .expect("getProcessId should succeed")
+            .as_u64()
+            .expect("getProcessId should return number");
+        assert!(process_id > 0);
+
+        let open_external_without_args = router
+            .dispatch_channel("nativeHost", "openExternal", &json!([]))
+            .await
+            .expect("openExternal without args should succeed");
+        assert_eq!(open_external_without_args, json!(false));
+    }
+
+    #[tokio::test]
+    async fn extension_host_starter_and_local_pty_state_paths_are_stable() {
+        let repo_root = temp_repo_root("extension-host-local-pty");
+        let router = CapabilityRouter::new(repo_root);
+
+        let host1 = router
+            .dispatch_channel("extensionHostStarter", "createExtensionHost", &json!([]))
+            .await
+            .expect("createExtensionHost should succeed");
+        let host2 = router
+            .dispatch_channel("extensionHostStarter", "createExtensionHost", &json!([]))
+            .await
+            .expect("second createExtensionHost should succeed");
+        assert_ne!(host1["id"], host2["id"]);
+
+        let inspect_port = router
+            .dispatch_channel("extensionHostStarter", "enableInspectPort", &json!([]))
+            .await
+            .expect("enableInspectPort should succeed");
+        assert_eq!(inspect_port, json!(false));
+
+        let kill = router
+            .dispatch_channel("extensionHostStarter", "kill", &json!([]))
+            .await
+            .expect("kill should succeed");
+        assert_eq!(kill, Value::Null);
+
+        let default_layout = router
+            .dispatch_channel("localPty", "getTerminalLayoutInfo", &json!([]))
+            .await
+            .expect("getTerminalLayoutInfo without args should succeed");
+        assert_eq!(default_layout, Value::Null);
+
+        router
+            .dispatch_channel(
+                "localPty",
+                "setTerminalLayoutInfo",
+                &json!([{
+                    "tabs": [{ "name": "first" }]
+                }]),
+            )
+            .await
+            .expect("setTerminalLayoutInfo without workspaceId should succeed");
+
+        let loaded_default_layout = router
+            .dispatch_channel(
+                "localPty",
+                "getTerminalLayoutInfo",
+                &json!([{ "workspaceId": "default" }]),
+            )
+            .await
+            .expect("getTerminalLayoutInfo default workspace should succeed");
+        assert_eq!(
+            loaded_default_layout["tabs"][0]["name"],
+            json!("first")
+        );
+    }
+
+    #[tokio::test]
+    async fn checksum_and_default_backed_has_methods_are_stable() {
+        let repo_root = temp_repo_root("checksum-default-has");
+        let router = CapabilityRouter::new(repo_root);
+
+        let checksum_invalid_resource = router
+            .dispatch_channel("checksum", "checksum", &json!([{}]))
+            .await
+            .expect_err("checksum with invalid resource should fail");
+        assert!(checksum_invalid_resource.contains("checksum.checksum expected file URI/path"));
+
+        let unknown_has = router
+            .dispatch_channel("unknownChannel", "hasSomething", &json!([]))
+            .await
+            .expect("unknown has method should succeed");
+        assert_eq!(unknown_has, json!(false));
+    }
+
+    #[tokio::test]
     async fn menubar_update_validates_payload_and_requires_app_handle() {
         let repo_root = temp_repo_root("menubar-update");
         let router = CapabilityRouter::new(repo_root);
