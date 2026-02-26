@@ -5073,6 +5073,278 @@ mod tests {
         assert_eq!(missing_url_result, json!(false));
     }
 
+    #[test]
+    fn default_by_method_name_returns_expected_defaults() {
+        assert_eq!(default_by_method_name("isEnabled"), json!(false));
+        assert_eq!(default_by_method_name("hasValue"), json!(false));
+        assert_eq!(default_by_method_name("getValue"), Value::Null);
+        assert_eq!(default_by_method_name("setValue"), Value::Null);
+    }
+
+    #[test]
+    fn should_emit_fallback_event_matches_sampling_policy() {
+        assert_eq!(should_emit_fallback_event(1), true);
+        assert_eq!(should_emit_fallback_event(3), true);
+        assert_eq!(should_emit_fallback_event(4), false);
+        assert_eq!(should_emit_fallback_event(5), true);
+        assert_eq!(should_emit_fallback_event(10), true);
+        assert_eq!(should_emit_fallback_event(11), false);
+        assert_eq!(should_emit_fallback_event(500), true);
+    }
+
+    #[test]
+    fn storage_scope_key_prefers_workspace_then_profile_then_application() {
+        let workspace_scope = storage_scope_key(Some(&json!({
+            "workspace": { "id": "workspace-123" },
+            "profile": { "id": "profile-123" }
+        })));
+        assert_eq!(workspace_scope, "workspace:workspace-123");
+
+        let profile_scope = storage_scope_key(Some(&json!({
+            "profile": { "id": "profile-123" }
+        })));
+        assert_eq!(profile_scope, "profile:profile-123");
+
+        let application_scope = storage_scope_key(Some(&json!({})));
+        assert_eq!(application_scope, "application:default");
+    }
+
+    #[test]
+    fn workspace_identifier_from_value_normalizes_config_path() {
+        let workspace = workspace_identifier_from_value(&json!({
+            "id": "workspace-id",
+            "configPath": "/tmp/my-workspace.code-workspace"
+        }));
+        assert_eq!(workspace["id"], json!("workspace-id"));
+        assert_eq!(workspace["configPath"]["scheme"], json!("file"));
+        assert_eq!(
+            workspace["configPath"]["path"],
+            json!("/tmp/my-workspace.code-workspace")
+        );
+    }
+
+    #[test]
+    fn extract_url_from_any_handles_structured_values() {
+        let url = extract_url_from_any(&json!({
+            "scheme": "https",
+            "authority": "example.com",
+            "path": "/resource",
+            "query": "a=1",
+            "fragment": "part"
+        }));
+        assert_eq!(url.as_deref(), Some("https://example.com/resource?a=1#part"));
+    }
+
+    #[test]
+    fn remove_path_force_handles_missing_and_non_recursive_directory_failures() {
+        let root = temp_repo_root("remove-path-force");
+        let missing_path = root.join("missing");
+        remove_path_force(&missing_path, false).expect("missing paths should be ignored");
+
+        let non_empty_dir = root.join("non-empty");
+        fs::create_dir_all(&non_empty_dir).expect("dir should be created");
+        fs::write(non_empty_dir.join("file.txt"), b"x").expect("file should be created");
+        let err = remove_path_force(&non_empty_dir, false).expect_err("non-recursive delete should fail for non-empty dir");
+        assert_eq!(err.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+
+        remove_path_force(&non_empty_dir, true).expect("recursive delete should succeed");
+        assert!(!non_empty_dir.exists());
+    }
+
+    #[test]
+    fn copy_path_recursive_respects_overwrite_behavior() {
+        let root = temp_repo_root("copy-path-recursive");
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).expect("source dir should exist");
+        fs::write(source.join("hello.txt"), b"hello").expect("source file should exist");
+
+        copy_path_recursive(&source, &target, false).expect("initial copy should succeed");
+        assert_eq!(
+            fs::read(target.join("hello.txt")).expect("target file should exist"),
+            b"hello"
+        );
+
+        let error = copy_path_recursive(&source, &target, false)
+            .expect_err("copy without overwrite should fail if target exists");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+
+        fs::write(source.join("hello.txt"), b"updated").expect("source file should update");
+        copy_path_recursive(&source, &target, true).expect("copy with overwrite should succeed");
+        assert_eq!(
+            fs::read(target.join("hello.txt")).expect("target file should exist"),
+            b"updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_copy_without_overwrite_fails_when_target_exists() {
+        let repo_root = temp_repo_root("localfs-copy-overwrite");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let source = repo_root.join("source.txt");
+        let target = repo_root.join("target.txt");
+        fs::write(&source, b"source").expect("source should exist");
+        fs::write(&target, b"target").expect("target should exist");
+
+        let error = router
+            .dispatch_channel(
+                "localFilesystem",
+                "copy",
+                &json!([
+                    { "path": source },
+                    { "path": target },
+                    { "overwrite": false }
+                ]),
+            )
+            .await
+            .expect_err("copy without overwrite should fail");
+        assert!(error.contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_rename_with_overwrite_replaces_target_contents() {
+        let repo_root = temp_repo_root("localfs-rename-overwrite");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let source = repo_root.join("source.txt");
+        let target = repo_root.join("target.txt");
+        fs::write(&source, b"new").expect("source should exist");
+        fs::write(&target, b"old").expect("target should exist");
+
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "rename",
+                &json!([
+                    { "path": source.clone() },
+                    { "path": target.clone() },
+                    { "overwrite": true }
+                ]),
+            )
+            .await
+            .expect("rename with overwrite should succeed");
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(target).expect("target should exist"), b"new");
+    }
+
+    #[tokio::test]
+    async fn workspaces_identifier_and_enter_workspace_normalize_paths() {
+        let repo_root = temp_repo_root("workspaces-identifiers");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let config_path = repo_root.join("project.code-workspace");
+        fs::write(&config_path, "{}").expect("workspace config should exist");
+
+        let identifier = router
+            .dispatch_channel(
+                "workspaces",
+                "getWorkspaceIdentifier",
+                &json!([{ "path": config_path.clone() }]),
+            )
+            .await
+            .expect("getWorkspaceIdentifier should succeed");
+        assert_eq!(identifier["configPath"]["scheme"], json!("file"));
+
+        let entered = router
+            .dispatch_channel(
+                "workspaces",
+                "enterWorkspace",
+                &json!([{ "path": config_path }]),
+            )
+            .await
+            .expect("enterWorkspace should succeed");
+        assert_eq!(entered["workspace"]["configPath"]["scheme"], json!("file"));
+    }
+
+    #[tokio::test]
+    async fn user_data_profiles_set_profile_for_workspace_ignores_unknown_profile() {
+        let repo_root = temp_repo_root("profiles-unknown-map");
+        let router = CapabilityRouter::new(repo_root);
+
+        router
+            .dispatch_channel(
+                "userDataProfiles",
+                "setProfileForWorkspace",
+                &json!([{ "id": "workspace-z" }, "profile-missing"]),
+            )
+            .await
+            .expect("setProfileForWorkspace should succeed");
+
+        let state = router
+            .user_data_profiles_state
+            .lock()
+            .expect("user profile state should lock");
+        assert!(state.workspace_profiles.get("workspace-z").is_none());
+    }
+
+    #[tokio::test]
+    async fn user_data_profiles_cleanup_removes_stale_workspace_mappings() {
+        let repo_root = temp_repo_root("profiles-cleanup");
+        let router = CapabilityRouter::new(repo_root);
+
+        {
+            let mut state = router
+                .user_data_profiles_state
+                .lock()
+                .expect("user profile state should lock");
+            state
+                .workspace_profiles
+                .insert("workspace-a".to_string(), "missing-profile".to_string());
+        }
+
+        router
+            .dispatch_channel("userDataProfiles", "cleanUp", &json!([]))
+            .await
+            .expect("cleanUp should succeed");
+
+        let state = router
+            .user_data_profiles_state
+            .lock()
+            .expect("user profile state should lock");
+        assert!(state.workspace_profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_related_channels_return_stable_payload_shapes() {
+        let repo_root = temp_repo_root("sync-related");
+        let router = CapabilityRouter::new(repo_root);
+
+        let account_initial = router
+            .dispatch_channel("userDataSyncAccount", "_getInitialData", &json!([]))
+            .await
+            .expect("userDataSyncAccount._getInitialData should succeed");
+        assert_eq!(account_initial, Value::Null);
+
+        let machines = router
+            .dispatch_channel("userDataSyncMachines", "getMachines", &json!([]))
+            .await
+            .expect("userDataSyncMachines.getMachines should succeed");
+        assert_eq!(machines, json!([]));
+
+        let initial_sync_data = router
+            .dispatch_channel("userDataSync", "_getInitialData", &json!([]))
+            .await
+            .expect("userDataSync._getInitialData should succeed");
+        assert_eq!(initial_sync_data, json!(["uninitialized", [], Value::Null]));
+    }
+
+    #[tokio::test]
+    async fn dispatch_channel_for_unknown_domain_uses_default_result_shape() {
+        let repo_root = temp_repo_root("unknown-channel-default");
+        let router = CapabilityRouter::new(repo_root);
+
+        let unknown_get = router
+            .dispatch_channel("unknownChannel", "getSomething", &json!([]))
+            .await
+            .expect("unknown get should succeed");
+        assert_eq!(unknown_get, Value::Null);
+
+        let unknown_is = router
+            .dispatch_channel("unknownChannel", "isSomething", &json!([]))
+            .await
+            .expect("unknown is should succeed");
+        assert_eq!(unknown_is, json!(false));
+    }
+
     #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
