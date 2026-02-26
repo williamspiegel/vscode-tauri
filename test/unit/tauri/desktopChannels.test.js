@@ -91,6 +91,40 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(syncStore.url.path, '/.vscode-tauri/user-data/sync');
 	});
 
+	test('call normalizes externalTerminal defaults and localFilesystem stat/readFile fallbacks', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'getDefaultTerminalForPlatforms') {
+					return { linux: 42 };
+				}
+				if (method === 'stat') {
+					return {};
+				}
+				if (method === 'readFile') {
+					return null;
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const defaults = await registry.call('externalTerminal', 'getDefaultTerminalForPlatforms', []);
+		assert.deepStrictEqual(defaults, {
+			windows: 'cmd.exe',
+			linux: 'xterm',
+			osx: 'Terminal.app'
+		});
+
+		const stat = await registry.call('localFilesystem', 'stat', [{ path: '/tmp/example.txt' }]);
+		assert.strictEqual(stat.type, 1);
+		assert.strictEqual(stat.size, 0);
+
+		const readFile = await registry.call('localFilesystem', 'readFile', [{ path: '/tmp/missing.bin' }]);
+		assert.strictEqual(readFile.buffer instanceof Uint8Array, true);
+		assert.strictEqual(readFile.buffer.byteLength, 0);
+	});
+
 	test('call maps localFilesystem host errors to FileSystemError names', async () => {
 		const host = {
 			desktopChannelCall: async () => {
@@ -258,5 +292,12 @@ suite('Tauri Desktop Channels', () => {
 		});
 		listeners[2]({ base64: 'aGk=' });
 		assert.deepStrictEqual(Array.from(messagePortFrame), [104, 105]);
+
+		let dynamicExit;
+		await registry.listen('extensionHostStarter', 'onDynamicExit', undefined, payload => {
+			dynamicExit = payload;
+		});
+		listeners[3]({ signal: 9 });
+		assert.deepStrictEqual(dynamicExit, { code: 0, signal: '' });
 	});
 });

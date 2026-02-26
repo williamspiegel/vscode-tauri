@@ -4446,6 +4446,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_filesystem_fd_roundtrip_and_unknown_fd_close_error() {
+        let repo_root = temp_repo_root("localfs-fd");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let file_path = repo_root.join("localfs-fd.txt");
+
+        let fd_write = router
+            .dispatch_channel(
+                "localFilesystem",
+                "open",
+                &json!([{ "path": file_path }, { "create": true }]),
+            )
+            .await
+            .expect("open(create) should succeed")
+            .as_u64()
+            .expect("open should return numeric file descriptor");
+
+        let bytes_written = router
+            .dispatch_channel(
+                "localFilesystem",
+                "write",
+                &json!([fd_write, 0, [72, 105]]),
+            )
+            .await
+            .expect("write should succeed")
+            .as_u64()
+            .expect("write should return number");
+        assert_eq!(bytes_written, 2);
+
+        router
+            .dispatch_channel("localFilesystem", "close", &json!([fd_write]))
+            .await
+            .expect("close should succeed");
+
+        let fd_read = router
+            .dispatch_channel("localFilesystem", "open", &json!([{ "path": file_path }]))
+            .await
+            .expect("open(read) should succeed")
+            .as_u64()
+            .expect("open should return numeric file descriptor");
+
+        let read_result = router
+            .dispatch_channel("localFilesystem", "read", &json!([fd_read, 0, 16]))
+            .await
+            .expect("read should succeed");
+        assert_eq!(read_result[1], json!(2));
+        assert_eq!(read_result[0]["buffer"], json!([72, 105]));
+
+        router
+            .dispatch_channel("localFilesystem", "close", &json!([fd_read]))
+            .await
+            .expect("close should succeed");
+
+        let error = router
+            .dispatch_channel("localFilesystem", "close", &json!([fd_read]))
+            .await
+            .expect_err("closing unknown descriptor should fail");
+        assert!(error.contains("unknown file descriptor"));
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_write_rejects_invalid_offset() {
+        let repo_root = temp_repo_root("localfs-invalid-offset");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let file_path = repo_root.join("invalid-offset.txt");
+
+        let fd = router
+            .dispatch_channel(
+                "localFilesystem",
+                "open",
+                &json!([{ "path": file_path }, { "create": true }]),
+            )
+            .await
+            .expect("open(create) should succeed")
+            .as_u64()
+            .expect("open should return numeric file descriptor");
+
+        let error = router
+            .dispatch_channel(
+                "localFilesystem",
+                "write",
+                &json!([fd, 0, [1, 2], 5, 1]),
+            )
+            .await
+            .expect_err("invalid offset should fail");
+        assert!(error.contains("invalid offset"));
+
+        router
+            .dispatch_channel("localFilesystem", "close", &json!([fd]))
+            .await
+            .expect("close should succeed");
+    }
+
+    #[tokio::test]
+    async fn watcher_set_verbose_logging_updates_state() {
+        let repo_root = temp_repo_root("watcher-verbose");
+        let router = CapabilityRouter::new(repo_root);
+
+        assert_eq!(router.watcher_verbose_logging(), false);
+
+        router
+            .dispatch_channel("watcher", "setVerboseLogging", &json!([true]))
+            .await
+            .expect("setVerboseLogging should succeed");
+        assert_eq!(router.watcher_verbose_logging(), true);
+
+        router
+            .dispatch_channel("watcher", "setVerboseLogging", &json!([false]))
+            .await
+            .expect("setVerboseLogging should succeed");
+        assert_eq!(router.watcher_verbose_logging(), false);
+    }
+
+    #[test]
+    fn watcher_changes_from_filesystem_event_includes_correlation_id() {
+        let repo_root = temp_repo_root("watcher-correlation");
+        let router = CapabilityRouter::new(repo_root);
+
+        {
+            let mut state = router
+                .watcher_state
+                .lock()
+                .expect("watcher state should lock");
+            state.watch_requests.insert(
+                "watcher:42".to_string(),
+                WatcherWatchRequestState {
+                    correlation_id: Some(777),
+                },
+            );
+        }
+
+        let payload = router
+            .watcher_changes_from_filesystem_event("watcher:42", "/tmp/demo.txt", "created")
+            .expect("watch payload should be present");
+        assert_eq!(payload[0]["type"], json!(1));
+        assert_eq!(payload[0]["cId"], json!(777));
+        assert_eq!(payload[0]["resource"]["scheme"], json!("file"));
+        assert_eq!(
+            router.watcher_changes_from_filesystem_event("watcher:missing", "/tmp/demo.txt", "created"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_watch_requires_requests_array_argument() {
+        let repo_root = temp_repo_root("watcher-watch-args");
+        let router = CapabilityRouter::new(repo_root);
+
+        let error = router
+            .dispatch_channel("watcher", "watch", &json!({}))
+            .await
+            .expect_err("watcher.watch without requests should fail");
+        assert!(error.contains("watcher.watch expected requests array argument"));
+    }
+
+    #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
         let router = CapabilityRouter::new(repo_root.clone());
