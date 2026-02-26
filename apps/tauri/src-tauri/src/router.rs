@@ -4248,6 +4248,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_data_profiles_workspace_mapping_tracks_profile_lifecycle() {
+        let repo_root = temp_repo_root("profiles");
+        let router = CapabilityRouter::new(repo_root);
+        let workspace = json!({ "id": "workspace-1" });
+
+        let created = router
+            .dispatch_channel(
+                "userDataProfiles",
+                "createNamedProfile",
+                &json!(["Dev", { "transient": false }, workspace.clone()]),
+            )
+            .await
+            .expect("createNamedProfile should succeed");
+        let created_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("profile should include id")
+            .to_string();
+
+        {
+            let state = router
+                .user_data_profiles_state
+                .lock()
+                .expect("user profile state should lock");
+            assert_eq!(
+                state.workspace_profiles.get("workspace-1"),
+                Some(&created_id)
+            );
+            assert!(state.profiles.contains_key(&created_id));
+        }
+
+        router
+            .dispatch_channel("userDataProfiles", "resetWorkspaces", &json!([]))
+            .await
+            .expect("resetWorkspaces should succeed");
+        {
+            let state = router
+                .user_data_profiles_state
+                .lock()
+                .expect("user profile state should lock");
+            assert!(state.workspace_profiles.is_empty());
+        }
+
+        router
+            .dispatch_channel(
+                "userDataProfiles",
+                "setProfileForWorkspace",
+                &json!([workspace.clone(), created_id.clone()]),
+            )
+            .await
+            .expect("setProfileForWorkspace should succeed");
+
+        let transient = router
+            .dispatch_channel(
+                "userDataProfiles",
+                "createTransientProfile",
+                &json!([]),
+            )
+            .await
+            .expect("createTransientProfile should succeed");
+        let transient_id = transient
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("transient profile should include id")
+            .to_string();
+        assert_eq!(transient["isTransient"], json!(true));
+
+        router
+            .dispatch_channel("userDataProfiles", "cleanUpTransientProfiles", &json!([]))
+            .await
+            .expect("cleanUpTransientProfiles should succeed");
+        {
+            let state = router
+                .user_data_profiles_state
+                .lock()
+                .expect("user profile state should lock");
+            assert!(!state.profiles.contains_key(&transient_id));
+            assert_eq!(
+                state.workspace_profiles.get("workspace-1"),
+                Some(&created_id)
+            );
+        }
+
+        router
+            .dispatch_channel(
+                "userDataProfiles",
+                "removeProfile",
+                &json!([created_id.clone()]),
+            )
+            .await
+            .expect("removeProfile should succeed");
+        {
+            let state = router
+                .user_data_profiles_state
+                .lock()
+                .expect("user profile state should lock");
+            assert!(!state.profiles.contains_key(&created_id));
+            assert!(state.workspace_profiles.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn workspaces_recently_opened_can_be_added_removed_and_cleared() {
+        let repo_root = temp_repo_root("workspaces-recents");
+        let router = CapabilityRouter::new(repo_root);
+
+        let folder_recent = json!({
+            "folderUri": {
+                "scheme": "file",
+                "authority": "",
+                "path": "/tmp/workspace-folder"
+            }
+        });
+        let file_recent = json!({
+            "fileUri": {
+                "scheme": "file",
+                "authority": "",
+                "path": "/tmp/readme.md"
+            }
+        });
+
+        router
+            .dispatch_channel(
+                "workspaces",
+                "addRecentlyOpened",
+                &json!([[folder_recent.clone(), file_recent.clone()]]),
+            )
+            .await
+            .expect("addRecentlyOpened should succeed");
+
+        let recently_opened = router
+            .dispatch_channel("workspaces", "getRecentlyOpened", &json!([]))
+            .await
+            .expect("getRecentlyOpened should succeed");
+        let workspaces = recently_opened
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .expect("workspaces should be an array");
+        let files = recently_opened
+            .get("files")
+            .and_then(Value::as_array)
+            .expect("files should be an array");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(files.len(), 1);
+
+        router
+            .dispatch_channel(
+                "workspaces",
+                "removeRecentlyOpened",
+                &json!([[{ "path": "/tmp/workspace-folder" }]]),
+            )
+            .await
+            .expect("removeRecentlyOpened should succeed");
+
+        let after_remove = router
+            .dispatch_channel("workspaces", "getRecentlyOpened", &json!([]))
+            .await
+            .expect("getRecentlyOpened should succeed after remove");
+        assert_eq!(
+            after_remove["workspaces"]
+                .as_array()
+                .expect("workspaces should be an array")
+                .len(),
+            0
+        );
+        assert_eq!(
+            after_remove["files"]
+                .as_array()
+                .expect("files should be an array")
+                .len(),
+            1
+        );
+
+        router
+            .dispatch_channel("workspaces", "clearRecentlyOpened", &json!([]))
+            .await
+            .expect("clearRecentlyOpened should succeed");
+        let after_clear = router
+            .dispatch_channel("workspaces", "getRecentlyOpened", &json!([]))
+            .await
+            .expect("getRecentlyOpened should succeed after clear");
+        assert_eq!(
+            after_clear["workspaces"]
+                .as_array()
+                .expect("workspaces should be an array")
+                .len(),
+            0
+        );
+        assert_eq!(
+            after_clear["files"]
+                .as_array()
+                .expect("files should be an array")
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
         let router = CapabilityRouter::new(repo_root.clone());

@@ -65,6 +65,32 @@ suite('Tauri Desktop Channels', () => {
 		assert.deepStrictEqual(updateInitialState, { type: 'uninitialized' });
 	});
 
+	test('call normalizes userDataSync and store management fallback payloads', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === '_getInitialData') {
+					return ['bad-state', 'not-an-array', 'not-a-number'];
+				}
+				if (method === 'getPreviousUserDataSyncStore') {
+					return { invalid: true };
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const initialData = await registry.call('userDataSync', '_getInitialData', []);
+		assert.deepStrictEqual(initialData, ['bad-state', [], undefined]);
+
+		const syncStore = await registry.call('userDataSyncStoreManagement', 'getPreviousUserDataSyncStore', []);
+		assert.strictEqual(syncStore.type, 'stable');
+		assert.strictEqual(syncStore.canSwitch, false);
+		assert.deepStrictEqual(syncStore.authenticationProviders, {});
+		assert.strictEqual(syncStore.url.scheme, 'file');
+		assert.strictEqual(syncStore.url.path, '/.vscode-tauri/user-data/sync');
+	});
+
 	test('call maps localFilesystem host errors to FileSystemError names', async () => {
 		const host = {
 			desktopChannelCall: async () => {
@@ -195,5 +221,42 @@ suite('Tauri Desktop Channels', () => {
 
 		assert.strictEqual(seen.length, 1);
 		assert.strictEqual(seen[0].name, 'EntryNotFound (FileSystemError)');
+	});
+
+	test('listen normalizes watcher and extension host events', async () => {
+		/** @type {((payload: unknown) => void)[]} */
+		const listeners = [];
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				listeners.push(onEvent);
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		let watcherLog;
+		await registry.listen('watcher', 'onDidLogMessage', undefined, payload => {
+			watcherLog = payload;
+		});
+		listeners[0]('from-host-string');
+		assert.deepStrictEqual(watcherLog, { type: 'trace', message: 'from-host-string' });
+
+		let watcherError;
+		await registry.listen('watcher', 'onDidError', undefined, payload => {
+			watcherError = payload;
+		});
+		listeners[1]({ message: 'watch failed', request: { path: '/tmp/watched' } });
+		assert.deepStrictEqual(watcherError, {
+			error: 'watch failed',
+			request: { path: '/tmp/watched' }
+		});
+
+		let messagePortFrame;
+		await registry.listen('extensionHostStarter', 'onDynamicMessagePortFrame', undefined, payload => {
+			messagePortFrame = payload;
+		});
+		listeners[2]({ base64: 'aGk=' });
+		assert.deepStrictEqual(Array.from(messagePortFrame), [104, 105]);
 	});
 });

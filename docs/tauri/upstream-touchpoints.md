@@ -28,7 +28,7 @@ This ledger tracks edits outside the preferred fork-only directories.
 | `test/unit/tauri/index.js` | Added Node/Mocha Tauri unit harness with UI-module transpile pre-step. |
 | `test/unit/tauri/hostProtocol.test.js` | Added protocol contract behavior tests for Tauri UI host protocol helpers. |
 | `test/unit/tauri/desktopSandbox.test.js` | Added Tauri sandbox global bridge tests for `window.vscode` shims. |
-| `test/unit/tauri/desktopChannels.test.js` | Added Tauri desktop channel adapter normalization and filesystem error mapping tests. |
+| `test/unit/tauri/desktopChannels.test.js` | Added Tauri desktop channel adapter normalization tests (filesystem payload/stream handling, watcher + extension-host events, sync/store fallback shapes). |
 | `test/unit/tauri/renderer.html` | Added browser harness scaffold for Tauri renderer-side unit tests. |
 | `test/unit/tauri/renderer.js` | Added browser harness scaffold test bootstrap for Tauri renderer tests. |
 | `scripts/test-tauri-unit.sh` | Added POSIX Tauri unit suite runner (`tauri:test-unit`). |
