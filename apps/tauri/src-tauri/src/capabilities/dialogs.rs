@@ -311,4 +311,20 @@ mod tests {
             assert_eq!(result["handledBy"], json!("rust-primary-non-macos"));
         }
     }
+
+    #[tokio::test]
+    async fn show_message_rejects_non_string_buttons() {
+        let capability = RustPrimaryDialogsCapability;
+        let error = capability
+            .invoke(
+                "dialogs.showMessage",
+                &json!({
+                    "message": "hello",
+                    "buttons": ["ok", 1]
+                }),
+            )
+            .await
+            .expect_err("non-string buttons should fail validation");
+        assert!(error.contains("buttons must contain only strings"));
+    }
 }

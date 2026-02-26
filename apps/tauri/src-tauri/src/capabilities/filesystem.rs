@@ -750,4 +750,66 @@ mod tests {
             .expect("unwatch should return payload");
         assert_eq!(unwatch_result["stopped"], json!(false));
     }
+
+    #[tokio::test]
+    async fn write_file_rejects_unknown_encoding() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("encoding");
+        let error = capability
+            .invoke(
+                "filesystem.writeFile",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "contents": "hello",
+                    "encoding": "utf16"
+                }),
+            )
+            .await
+            .expect_err("unsupported encoding should fail");
+        assert!(error.contains("unsupported encoding 'utf16'"));
+    }
+
+    #[tokio::test]
+    async fn write_base64_roundtrips_through_read() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("base64");
+        let original_base64 = "AP8R";
+
+        capability
+            .invoke(
+                "filesystem.writeFile",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "contents": original_base64,
+                    "encoding": "base64"
+                }),
+            )
+            .await
+            .expect("base64 write should succeed");
+
+        let read_result = capability
+            .invoke(
+                "filesystem.readFile",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect("base64 read should succeed")
+            .expect("read should return payload");
+        assert_eq!(read_result["encoding"], json!("base64"));
+        assert_eq!(read_result["contents"], json!(original_base64));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn unwatch_requires_watch_id() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let error = capability
+            .invoke("filesystem.unwatch", &json!({}))
+            .await
+            .expect_err("missing watchId should fail");
+        assert!(error.contains("missing param 'watchId'"));
+    }
 }

@@ -267,6 +267,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resize_unknown_session_id_fails() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.resize",
+                &json!({
+                    "id": 999,
+                    "cols": 80,
+                    "rows": 24
+                }),
+            )
+            .await
+            .expect_err("unknown session id should fail");
+        assert!(error.contains("terminal.resize unknown session id"));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_non_array_args() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.create",
+                &json!({
+                    "shell": "/bin/sh",
+                    "args": "not-an-array"
+                }),
+            )
+            .await
+            .expect_err("non-array args should fail validation");
+        assert!(error.contains("args must be an array of strings"));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryTerminalCapability::new();
         let result = capability

@@ -546,6 +546,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_wait_requires_pid() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke("process.wait", &json!({}))
+            .await
+            .expect_err("process.wait without pid should fail");
+        assert!(error.contains("missing numeric param 'pid'"));
+    }
+
+    #[tokio::test]
+    async fn process_spawn_rejects_non_array_args() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke(
+                "process.spawn",
+                &json!({
+                    "command": "echo",
+                    "args": "not-an-array"
+                }),
+            )
+            .await
+            .expect_err("non-array args should fail validation");
+        assert!(error.contains("args must be an array of strings"));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryProcessCapability::new();
         let result = capability

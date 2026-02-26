@@ -4222,6 +4222,31 @@ mod tests {
         assert_eq!(local["isApplicationScoped"], json!(false));
     }
 
+    #[test]
+    fn unique_profile_id_sanitizes_and_deduplicates() {
+        let mut existing = BTreeMap::new();
+        existing.insert("profile".to_string(), json!({}));
+        existing.insert("profile-1".to_string(), json!({}));
+
+        let profile_id = unique_profile_id(&existing, " profile!? ".to_string());
+        assert_eq!(profile_id, "profile-2");
+    }
+
+    #[test]
+    fn profile_id_from_value_accepts_object_id_and_location_path() {
+        let from_id = profile_id_from_value(&json!({ "id": "named-profile" }));
+        assert_eq!(from_id.as_deref(), Some("named-profile"));
+
+        let from_location = profile_id_from_value(&json!({
+            "location": {
+                "scheme": "file",
+                "authority": "",
+                "path": "/tmp/user-data/User/profiles/location-profile"
+            }
+        }));
+        assert_eq!(from_location.as_deref(), Some("location-profile"));
+    }
+
     #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
