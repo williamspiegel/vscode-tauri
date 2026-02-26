@@ -1,0 +1,58 @@
+import { parentPort, workerData } from 'node:worker_threads';
+
+if (!parentPort) {
+  throw new Error('extension-host-worker requires parentPort');
+}
+
+Object.defineProperty(process, 'parentPort', {
+  configurable: true,
+  enumerable: false,
+  writable: true,
+  value: parentPort,
+});
+
+if (Array.isArray(workerData?.env)) {
+  for (const entry of workerData.env) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+
+    const key = typeof entry.key === 'string' ? entry.key : undefined;
+    if (!key) {
+      continue;
+    }
+
+    const value = entry.value;
+    if (typeof value === 'string') {
+      process.env[key] = value;
+    } else {
+      delete process.env[key];
+    }
+  }
+}
+
+if (Array.isArray(workerData?.execArgv)) {
+  Object.defineProperty(process, 'execArgv', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: [...workerData.execArgv],
+  });
+}
+
+if (Array.isArray(workerData?.args)) {
+  const entry = typeof workerData.entryPoint === 'string' ? workerData.entryPoint : 'extensionHostProcess.js';
+  Object.defineProperty(process, 'argv', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: [process.argv[0] ?? 'node', entry, ...workerData.args],
+  });
+}
+
+const entryPoint = typeof workerData?.entryPoint === 'string' ? workerData.entryPoint : undefined;
+if (!entryPoint) {
+  throw new Error('extension-host-worker missing entryPoint');
+}
+
+await import(entryPoint);

@@ -17,13 +17,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::LogicalPosition;
 use tauri::{Emitter, Listener, Manager, State};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as TokioCommand;
+use tokio::sync::Mutex as AsyncMutex;
 
 struct ChannelSubscription {
     channel: String,
@@ -48,6 +51,28 @@ struct ChannelRuntimeState {
 }
 
 #[derive(Default)]
+struct ExtensionHostRuntimeState {
+    sessions_by_id: HashMap<String, ExtensionHostSession>,
+    id_by_nonce: HashMap<String, String>,
+}
+
+struct ExtensionHostSession {
+    nonce: Option<String>,
+    pid: Option<u32>,
+    stdin: Option<Arc<AsyncMutex<tokio::process::ChildStdin>>>,
+}
+
+impl ExtensionHostSession {
+    fn new() -> Self {
+        Self {
+            nonce: None,
+            pid: None,
+            stdin: None,
+        }
+    }
+}
+
+#[derive(Default)]
 struct ContextMenuRuntimeState {
     active_by_context_menu_id: HashMap<i64, ActiveContextMenu>,
     item_by_native_menu_id: HashMap<String, ActiveContextMenuItem>,
@@ -67,7 +92,9 @@ struct ActiveContextMenuItem {
 struct AppState {
     router: CapabilityRouter,
     repo_root: PathBuf,
-    channel_runtime: Mutex<ChannelRuntimeState>,
+    channel_runtime: Arc<Mutex<ChannelRuntimeState>>,
+    extension_host_runtime: Arc<Mutex<ExtensionHostRuntimeState>>,
+    next_extension_host_id: AtomicU64,
     context_menu_runtime: Mutex<ContextMenuRuntimeState>,
     next_subscription_id: AtomicU64,
     cached_window_config: Mutex<Option<Value>>,
@@ -93,6 +120,21 @@ struct HostHttpResponsePayload {
     status_code: u16,
     headers: BTreeMap<String, Value>,
     body_base64: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtensionHostBridgeConfig {
+    entry_point: String,
+    args: Vec<String>,
+    exec_argv: Vec<String>,
+    env: Vec<ExtensionHostBridgeEnvEntry>,
+}
+
+#[derive(Serialize)]
+struct ExtensionHostBridgeEnvEntry {
+    key: String,
+    value: Option<String>,
 }
 
 impl AppState {
@@ -392,6 +434,813 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    fn subscription_arg_matches(arg: &Value, expected: &str) -> bool {
+        if let Some(value) = arg.as_str() {
+            return value == expected;
+        }
+        if let Some(value) = arg.as_u64() {
+            return value.to_string() == expected;
+        }
+        if let Some(value) = arg.as_i64() {
+            return value.to_string() == expected;
+        }
+        if let Some(items) = arg.as_array() {
+            return items
+                .first()
+                .map(|value| Self::subscription_arg_matches(value, expected))
+                .unwrap_or(false);
+        }
+        if let Some(object) = arg.as_object() {
+            for key in ["id", "nonce", "sessionId"] {
+                if let Some(value) = object.get(key) {
+                    if Self::subscription_arg_matches(value, expected) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn emit_dynamic_subscription_event(
+        channel_runtime: &Arc<Mutex<ChannelRuntimeState>>,
+        channel: &str,
+        event: &str,
+        dynamic_arg: &str,
+        payload: Value,
+    ) {
+        let subscription_ids = match channel_runtime.lock() {
+            Ok(guard) => guard
+                .subscriptions
+                .iter()
+                .filter_map(|(id, subscription)| {
+                    if subscription.channel == channel
+                        && subscription.event == event
+                        && Self::subscription_arg_matches(&subscription.arg, dynamic_arg)
+                    {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => Vec::new(),
+        };
+
+        for subscription_id in subscription_ids {
+            Self::emit_channel_event(&subscription_id, channel, event, payload.clone());
+        }
+    }
+
+    fn default_extensions_profile_location(&self) -> Value {
+        file_uri_components(
+            &self
+                .repo_root
+                .join(".vscode-tauri")
+                .join("user-data")
+                .join("User")
+                .join("profiles")
+                .join("default")
+                .join("extensions.json"),
+        )
+    }
+
+    fn profile_location_from_extension_args(
+        &self,
+        args: &Value,
+        options_index: usize,
+        profile_index: usize,
+    ) -> Value {
+        if let Some(options_path) = nth_arg(args, options_index)
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("profileLocation"))
+            .and_then(|value| value.get("path"))
+            .and_then(Value::as_str)
+        {
+            return file_uri_components(Path::new(options_path));
+        }
+        if let Some(profile_path) = nth_arg(args, profile_index)
+            .and_then(|value| value.get("path"))
+            .and_then(Value::as_str)
+        {
+            return file_uri_components(Path::new(profile_path));
+        }
+        self.default_extensions_profile_location()
+    }
+
+    fn extension_identifier_from_value(value: &Value) -> Value {
+        if let Some(identifier) = value.get("identifier").cloned() {
+            return identifier;
+        }
+        let manifest = value.get("manifest").and_then(Value::as_object);
+        let publisher = manifest
+            .and_then(|entry| entry.get("publisher"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let name = manifest
+            .and_then(|entry| entry.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        json!({ "id": format!("{publisher}.{name}") })
+    }
+
+    async fn emit_extension_management_events(
+        &self,
+        method: &str,
+        args: &Value,
+        result: &Value,
+    ) -> Result<(), String> {
+        match method {
+            "install" | "installFromLocation" | "installFromGallery" => {
+                let profile_location = self.profile_location_from_extension_args(args, 1, 1);
+                let identifier = Self::extension_identifier_from_value(result);
+                let source = nth_arg(args, 0).cloned().unwrap_or(Value::Null);
+                let application_scoped = result
+                    .get("isApplicationScoped")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let install_event = json!({
+                    "identifier": identifier,
+                    "source": source,
+                    "profileLocation": profile_location,
+                    "applicationScoped": application_scoped,
+                    "workspaceScoped": false
+                });
+                self.emit_to_subscriptions(
+                    "extensions",
+                    "onInstallExtension",
+                    install_event.clone(),
+                    |_| true,
+                )?;
+                self.emit_to_subscriptions(
+                    "extensions",
+                    "onDidInstallExtensions",
+                    json!([{
+                        "identifier": install_event["identifier"].clone(),
+                        "operation": 2,
+                        "source": install_event["source"].clone(),
+                        "local": result.clone(),
+                        "profileLocation": install_event["profileLocation"].clone(),
+                        "applicationScoped": application_scoped,
+                        "workspaceScoped": false
+                    }]),
+                    |_| true,
+                )?;
+            }
+            "installGalleryExtensions" | "installExtensionsFromProfile" => {
+                let profile_location = self.default_extensions_profile_location();
+                let mut install_results = Vec::new();
+                if let Some(items) = result.as_array() {
+                    for entry in items {
+                        let local = entry.get("local").cloned().unwrap_or_else(|| entry.clone());
+                        let identifier = entry
+                            .get("identifier")
+                            .cloned()
+                            .unwrap_or_else(|| Self::extension_identifier_from_value(&local));
+                        let source = entry.get("source").cloned().unwrap_or(Value::Null);
+                        let application_scoped = local
+                            .get("isApplicationScoped")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        self.emit_to_subscriptions(
+                            "extensions",
+                            "onInstallExtension",
+                            json!({
+                                "identifier": identifier,
+                                "source": source,
+                                "profileLocation": profile_location,
+                                "applicationScoped": application_scoped,
+                                "workspaceScoped": false
+                            }),
+                            |_| true,
+                        )?;
+                        install_results.push(json!({
+                            "identifier": identifier,
+                            "operation": 2,
+                            "source": source,
+                            "local": local,
+                            "profileLocation": profile_location,
+                            "applicationScoped": application_scoped,
+                            "workspaceScoped": false
+                        }));
+                    }
+                }
+                if !install_results.is_empty() {
+                    self.emit_to_subscriptions(
+                        "extensions",
+                        "onDidInstallExtensions",
+                        Value::Array(install_results),
+                        |_| true,
+                    )?;
+                }
+            }
+            "uninstall" => {
+                let profile_location = self.profile_location_from_extension_args(args, 1, 1);
+                let extension = nth_arg(args, 0).cloned().unwrap_or(Value::Null);
+                let identifier = Self::extension_identifier_from_value(&extension);
+                let application_scoped = extension
+                    .get("isApplicationScoped")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.emit_to_subscriptions(
+                    "extensions",
+                    "onUninstallExtension",
+                    json!({
+                        "identifier": identifier,
+                        "profileLocation": profile_location,
+                        "applicationScoped": application_scoped,
+                        "workspaceScoped": false
+                    }),
+                    |_| true,
+                )?;
+                self.emit_to_subscriptions(
+                    "extensions",
+                    "onDidUninstallExtension",
+                    json!({
+                        "identifier": identifier,
+                        "profileLocation": profile_location,
+                        "applicationScoped": application_scoped,
+                        "workspaceScoped": false
+                    }),
+                    |_| true,
+                )?;
+            }
+            "uninstallExtensions" => {
+                if let Some(items) = nth_arg(args, 0).and_then(Value::as_array) {
+                    for entry in items {
+                        let extension = entry
+                            .get("extension")
+                            .cloned()
+                            .unwrap_or_else(|| Value::Null);
+                        let identifier = Self::extension_identifier_from_value(&extension);
+                        let application_scoped = extension
+                            .get("isApplicationScoped")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let profile_location = entry
+                            .get("options")
+                            .and_then(Value::as_object)
+                            .and_then(|value| value.get("profileLocation"))
+                            .cloned()
+                            .unwrap_or_else(|| self.default_extensions_profile_location());
+                        self.emit_to_subscriptions(
+                            "extensions",
+                            "onUninstallExtension",
+                            json!({
+                                "identifier": identifier,
+                                "profileLocation": profile_location,
+                                "applicationScoped": application_scoped,
+                                "workspaceScoped": false
+                            }),
+                            |_| true,
+                        )?;
+                        self.emit_to_subscriptions(
+                            "extensions",
+                            "onDidUninstallExtension",
+                            json!({
+                                "identifier": identifier,
+                                "profileLocation": profile_location,
+                                "applicationScoped": application_scoped,
+                                "workspaceScoped": false
+                            }),
+                            |_| true,
+                        )?;
+                    }
+                }
+            }
+            "updateMetadata"
+            | "toggleApplicationScope"
+            | "resetPinnedStateForAllUserExtensions" => {
+                if method == "resetPinnedStateForAllUserExtensions" {
+                    if let Some(installed) = self
+                        .router
+                        .dispatch_channel("extensions", "getInstalled", &json!([1, Value::Null]))
+                        .await
+                        .ok()
+                        .and_then(|value| value.as_array().cloned())
+                    {
+                        for local in installed {
+                            self.emit_to_subscriptions(
+                                "extensions",
+                                "onDidUpdateExtensionMetadata",
+                                json!({
+                                    "profileLocation": self.default_extensions_profile_location(),
+                                    "local": local
+                                }),
+                                |_| true,
+                            )?;
+                        }
+                    }
+                } else {
+                    self.emit_to_subscriptions(
+                        "extensions",
+                        "onDidUpdateExtensionMetadata",
+                        json!({
+                            "profileLocation": self.profile_location_from_extension_args(args, 2, 1),
+                            "local": result.clone()
+                        }),
+                        |_| true,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_extension_host_debug_channel_call(
+        &self,
+        method: &str,
+        args: &Value,
+    ) -> Result<Value, String> {
+        match method {
+            "reload" => {
+                let session_id = nth_arg(args, 0).and_then(Value::as_str).unwrap_or_default();
+                self.emit_to_subscriptions(
+                    "extensionhostdebugservice",
+                    "reload",
+                    json!({ "sessionId": session_id }),
+                    |_| true,
+                )?;
+                Ok(Value::Null)
+            }
+            "close" => {
+                let session_id = nth_arg(args, 0).and_then(Value::as_str).unwrap_or_default();
+                self.emit_to_subscriptions(
+                    "extensionhostdebugservice",
+                    "close",
+                    json!({ "sessionId": session_id }),
+                    |_| true,
+                )?;
+                Ok(Value::Null)
+            }
+            "attach" => {
+                let session_id = nth_arg(args, 0).and_then(Value::as_str).unwrap_or_default();
+                let port = nth_arg(args, 1).and_then(Value::as_u64).unwrap_or(0);
+                let sub_id = nth_arg(args, 2).and_then(Value::as_str);
+                self.emit_to_subscriptions(
+                    "extensionhostdebugservice",
+                    "attach",
+                    json!({
+                        "sessionId": session_id,
+                        "port": port,
+                        "subId": sub_id
+                    }),
+                    |_| true,
+                )?;
+                Ok(Value::Null)
+            }
+            "terminate" => {
+                let session_id = nth_arg(args, 0).and_then(Value::as_str).unwrap_or_default();
+                let sub_id = nth_arg(args, 1).and_then(Value::as_str);
+                self.emit_to_subscriptions(
+                    "extensionhostdebugservice",
+                    "terminate",
+                    json!({
+                        "sessionId": session_id,
+                        "subId": sub_id
+                    }),
+                    |_| true,
+                )?;
+                Ok(Value::Null)
+            }
+            "openExtensionDevelopmentHostWindow" | "attachToCurrentWindowRenderer" => {
+                Ok(json!({ "success": false }))
+            }
+            _ => Err(format!(
+                "Unsupported extensionhostdebugservice method '{method}'"
+            )),
+        }
+    }
+
+    async fn handle_extension_host_starter_channel_call(
+        &self,
+        method: &str,
+        args: &Value,
+    ) -> Result<Value, String> {
+        match method {
+            "createExtensionHost" => {
+                let id = format!(
+                    "tauri-extension-host-{}",
+                    self.next_extension_host_id.fetch_add(1, Ordering::Relaxed)
+                );
+                let mut runtime = self
+                    .extension_host_runtime
+                    .lock()
+                    .map_err(|_| "extension host runtime lock poisoned".to_string())?;
+                runtime
+                    .sessions_by_id
+                    .entry(id.clone())
+                    .or_insert_with(ExtensionHostSession::new);
+                Ok(json!({ "id": id }))
+            }
+            "start" => self.start_extension_host_bridge(args).await,
+            "enableInspectPort" => Ok(json!(false)),
+            "kill" => self.kill_extension_host_bridge(args).await,
+            "writeMessagePortFrame" => self.write_extension_host_message_port_frame(args).await,
+            "closeMessagePortFrame" => self.close_extension_host_message_port_frame(args),
+            _ => Err(format!(
+                "Unsupported extensionHostStarter method '{method}'"
+            )),
+        }
+    }
+
+    async fn start_extension_host_bridge(&self, args: &Value) -> Result<Value, String> {
+        let id = nth_arg(args, 0)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "extensionHostStarter.start expected extension host id".to_string())?;
+        let opts = nth_arg(args, 1)
+            .and_then(Value::as_object)
+            .ok_or_else(|| "extensionHostStarter.start expected options object".to_string())?;
+        let response_nonce = opts
+            .get("responseNonce")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "extensionHostStarter.start options.responseNonce is required".to_string()
+            })?;
+        let exec_argv = opts
+            .get("execArgv")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let env_entries = opts
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|(key, value)| ExtensionHostBridgeEnvEntry {
+                        key: key.clone(),
+                        value: value.as_str().map(ToOwned::to_owned),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let entry_point = [
+            self.repo_root
+                .join("out/vs/workbench/api/node/extensionHostProcess.js"),
+            self.repo_root
+                .join("out-vscode-min/vs/workbench/api/node/extensionHostProcess.js"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            "extensionHostStarter.start could not find extensionHostProcess.js output".to_string()
+        })?;
+        let bridge_script = self
+            .repo_root
+            .join("apps/tauri/node/extension-host-bridge.mjs");
+        if !bridge_script.is_file() {
+            return Err(format!(
+                "extensionHostStarter.start missing bridge script {}",
+                bridge_script.display()
+            ));
+        }
+
+        let config = ExtensionHostBridgeConfig {
+            entry_point: entry_point.to_string_lossy().to_string(),
+            args: vec!["--skipWorkspaceStorageLock".to_string()],
+            exec_argv,
+            env: env_entries,
+        };
+        let encoded =
+            BASE64_STANDARD.encode(serde_json::to_vec(&config).map_err(|error| error.to_string())?);
+        let node_binary =
+            std::env::var("VSCODE_TAURI_NODE_BINARY").unwrap_or_else(|_| "node".to_string());
+
+        let mut command = TokioCommand::new(node_binary);
+        command
+            .arg(bridge_script)
+            .arg("--config-base64")
+            .arg(encoded)
+            .current_dir(&self.repo_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = command.spawn().map_err(|error| {
+            format!("extensionHostStarter.start failed to spawn bridge: {error}")
+        })?;
+        let pid = child.id();
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "extensionHostStarter.start missing bridge stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "extensionHostStarter.start missing bridge stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "extensionHostStarter.start missing bridge stderr".to_string())?;
+
+        {
+            let mut runtime = self
+                .extension_host_runtime
+                .lock()
+                .map_err(|_| "extension host runtime lock poisoned".to_string())?;
+            let existing_nonce = runtime
+                .sessions_by_id
+                .get(id)
+                .and_then(|session| session.nonce.clone());
+            if let Some(existing_nonce) = existing_nonce {
+                runtime.id_by_nonce.remove(&existing_nonce);
+            }
+            let session = runtime
+                .sessions_by_id
+                .entry(id.to_string())
+                .or_insert_with(ExtensionHostSession::new);
+            session.nonce = Some(response_nonce.to_string());
+            session.pid = pid;
+            session.stdin = Some(Arc::new(AsyncMutex::new(stdin)));
+            runtime
+                .id_by_nonce
+                .insert(response_nonce.to_string(), id.to_string());
+        }
+
+        let channel_runtime_for_frames = self.channel_runtime.clone();
+        let channel_runtime_for_stderr = self.channel_runtime.clone();
+        let channel_runtime_for_exit = self.channel_runtime.clone();
+        let extension_runtime_for_exit = self.extension_host_runtime.clone();
+        let id_for_frames = id.to_string();
+        let id_for_stderr = id.to_string();
+        let id_for_exit = id.to_string();
+        let nonce_for_frames = response_nonce.to_string();
+        let nonce_for_exit = response_nonce.to_string();
+
+        tokio::spawn(async move {
+            Self::forward_extension_host_frames(
+                channel_runtime_for_frames,
+                id_for_frames,
+                nonce_for_frames,
+                stdout,
+            )
+            .await;
+        });
+        tokio::spawn(async move {
+            Self::forward_extension_host_stderr_lines(
+                channel_runtime_for_stderr,
+                id_for_stderr,
+                stderr,
+            )
+            .await;
+        });
+        tokio::spawn(async move {
+            Self::wait_for_extension_host_exit(
+                channel_runtime_for_exit,
+                extension_runtime_for_exit,
+                id_for_exit,
+                nonce_for_exit,
+                child,
+            )
+            .await;
+        });
+
+        Ok(json!({ "pid": pid }))
+    }
+
+    async fn kill_extension_host_bridge(&self, args: &Value) -> Result<Value, String> {
+        let id = nth_arg(args, 0)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "extensionHostStarter.kill expected extension host id".to_string())?;
+        let pid = {
+            let mut runtime = self
+                .extension_host_runtime
+                .lock()
+                .map_err(|_| "extension host runtime lock poisoned".to_string())?;
+            let session = runtime.sessions_by_id.get_mut(id);
+            if let Some(session) = session {
+                session.stdin = None;
+                session.pid
+            } else {
+                None
+            }
+        };
+        if let Some(pid) = pid {
+            let _ = TokioCommand::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status()
+                .await;
+        }
+        Ok(Value::Null)
+    }
+
+    async fn write_extension_host_message_port_frame(&self, args: &Value) -> Result<Value, String> {
+        let nonce = nth_arg(args, 0)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "extensionHostStarter.writeMessagePortFrame expected nonce argument".to_string()
+            })?
+            .to_string();
+        let frame_value = nth_arg(args, 1).ok_or_else(|| {
+            "extensionHostStarter.writeMessagePortFrame expected frame argument".to_string()
+        })?;
+        let stdin = {
+            let runtime = self
+                .extension_host_runtime
+                .lock()
+                .map_err(|_| "extension host runtime lock poisoned".to_string())?;
+            let id = runtime.id_by_nonce.get(&nonce).ok_or_else(|| {
+                format!("extensionHostStarter.writeMessagePortFrame unknown nonce '{nonce}'")
+            })?;
+            runtime
+                .sessions_by_id
+                .get(id)
+                .and_then(|session| session.stdin.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "extensionHostStarter.writeMessagePortFrame no stdin for extension host '{id}'"
+                    )
+                })?
+        };
+
+        let frame = decode_message_port_frame_payload(frame_value);
+        let frame_length = u32::try_from(frame.len()).map_err(|_| {
+            "extensionHostStarter.writeMessagePortFrame frame too large".to_string()
+        })?;
+        let mut packet = Vec::with_capacity(frame.len() + 4);
+        packet.extend_from_slice(&frame_length.to_le_bytes());
+        packet.extend_from_slice(&frame);
+
+        let mut guard = stdin.lock().await;
+        guard.write_all(&packet).await.map_err(|error| {
+            format!("extensionHostStarter.writeMessagePortFrame failed to write frame: {error}")
+        })?;
+        guard.flush().await.map_err(|error| {
+            format!("extensionHostStarter.writeMessagePortFrame failed to flush frame: {error}")
+        })?;
+        Ok(Value::Null)
+    }
+
+    fn close_extension_host_message_port_frame(&self, args: &Value) -> Result<Value, String> {
+        let nonce = nth_arg(args, 0)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "extensionHostStarter.closeMessagePortFrame expected nonce argument".to_string()
+            })?
+            .to_string();
+        let mut runtime = self
+            .extension_host_runtime
+            .lock()
+            .map_err(|_| "extension host runtime lock poisoned".to_string())?;
+        if let Some(id) = runtime.id_by_nonce.remove(&nonce) {
+            if let Some(session) = runtime.sessions_by_id.get_mut(&id) {
+                if session.nonce.as_deref() == Some(nonce.as_str()) {
+                    session.nonce = None;
+                }
+                session.stdin = None;
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    async fn forward_extension_host_frames(
+        channel_runtime: Arc<Mutex<ChannelRuntimeState>>,
+        extension_host_id: String,
+        nonce: String,
+        mut stdout: tokio::process::ChildStdout,
+    ) {
+        let mut raw_buffer = Vec::<u8>::new();
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let read = match stdout.read(&mut chunk).await {
+                Ok(read) => read,
+                Err(_) => break,
+            };
+            if read == 0 {
+                break;
+            }
+            raw_buffer.extend_from_slice(&chunk[..read]);
+
+            loop {
+                if raw_buffer.len() < 4 {
+                    break;
+                }
+                let frame_length = u32::from_le_bytes([
+                    raw_buffer[0],
+                    raw_buffer[1],
+                    raw_buffer[2],
+                    raw_buffer[3],
+                ]) as usize;
+                if raw_buffer.len() < frame_length + 4 {
+                    break;
+                }
+                let frame = raw_buffer[4..(4 + frame_length)].to_vec();
+                raw_buffer.drain(..(4 + frame_length));
+
+                Self::emit_dynamic_subscription_event(
+                    &channel_runtime,
+                    "extensionHostStarter",
+                    "onDynamicMessagePortFrame",
+                    &nonce,
+                    json!(frame),
+                );
+                Self::emit_dynamic_subscription_event(
+                    &channel_runtime,
+                    "extensionHostStarter",
+                    "onDynamicMessage",
+                    &extension_host_id,
+                    json!(frame),
+                );
+            }
+        }
+    }
+
+    async fn forward_extension_host_stderr_lines(
+        channel_runtime: Arc<Mutex<ChannelRuntimeState>>,
+        extension_host_id: String,
+        stderr: tokio::process::ChildStderr,
+    ) {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(stripped) = line.strip_prefix("[ext-host:stdout] ") {
+                Self::emit_dynamic_subscription_event(
+                    &channel_runtime,
+                    "extensionHostStarter",
+                    "onDynamicStdout",
+                    &extension_host_id,
+                    Value::String(stripped.to_string()),
+                );
+                continue;
+            }
+            if let Some(stripped) = line.strip_prefix("[ext-host:stderr] ") {
+                Self::emit_dynamic_subscription_event(
+                    &channel_runtime,
+                    "extensionHostStarter",
+                    "onDynamicStderr",
+                    &extension_host_id,
+                    Value::String(stripped.to_string()),
+                );
+                continue;
+            }
+
+            Self::emit_dynamic_subscription_event(
+                &channel_runtime,
+                "extensionHostStarter",
+                "onDynamicStderr",
+                &extension_host_id,
+                Value::String(line),
+            );
+        }
+    }
+
+    async fn wait_for_extension_host_exit(
+        channel_runtime: Arc<Mutex<ChannelRuntimeState>>,
+        extension_runtime: Arc<Mutex<ExtensionHostRuntimeState>>,
+        extension_host_id: String,
+        nonce: String,
+        mut child: tokio::process::Child,
+    ) {
+        let exit_payload = match child.wait().await {
+            Ok(status) => {
+                #[cfg(unix)]
+                let signal = std::os::unix::process::ExitStatusExt::signal(&status)
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+                #[cfg(not(unix))]
+                let signal = String::new();
+                json!({
+                    "code": status.code().unwrap_or(0),
+                    "signal": signal
+                })
+            }
+            Err(error) => json!({
+                "code": 1,
+                "signal": "",
+                "error": error.to_string()
+            }),
+        };
+
+        Self::emit_dynamic_subscription_event(
+            &channel_runtime,
+            "extensionHostStarter",
+            "onDynamicExit",
+            &extension_host_id,
+            exit_payload,
+        );
+
+        if let Ok(mut runtime) = extension_runtime.lock() {
+            runtime.sessions_by_id.remove(&extension_host_id);
+            if runtime.id_by_nonce.get(&nonce).map(|value| value.as_str())
+                == Some(extension_host_id.as_str())
+            {
+                runtime.id_by_nonce.remove(&nonce);
+            }
+        }
     }
 
     fn handle_filesystem_changed(&self, payload_json: &str) -> Result<(), String> {
@@ -984,6 +1833,48 @@ async fn host_invoke(
             };
         }
 
+        if channel == "extensionHostStarter" {
+            return match state
+                .handle_extension_host_starter_channel_call(&method, &args)
+                .await
+            {
+                Ok(value) => Ok(ok_response(request.id, value)),
+                Err(error) => Ok(error_response(request.id, 1003, error)),
+            };
+        }
+
+        if channel == "extensionhostdebugservice" {
+            return match state
+                .handle_extension_host_debug_channel_call(&method, &args)
+                .await
+            {
+                Ok(value) => Ok(ok_response(request.id, value)),
+                Err(error) => Ok(error_response(request.id, 1003, error)),
+            };
+        }
+
+        if channel == "extensions" {
+            return match state
+                .router
+                .dispatch_channel(&channel, &method, &args)
+                .await
+            {
+                Ok(value) => {
+                    if let Err(error) = state
+                        .emit_extension_management_events(&method, &args, &value)
+                        .await
+                    {
+                        eprintln!(
+                            "[desktop.channelCall.extensions.events.error] method={} error={}",
+                            method, error
+                        );
+                    }
+                    Ok(ok_response(request.id, value))
+                }
+                Err(error) => Ok(error_response(request.id, 1003, error)),
+            };
+        }
+
         return match state
             .router
             .dispatch_channel(&channel, &method, &args)
@@ -1066,6 +1957,36 @@ fn required_string_param(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("missing string param '{key}'"))
+}
+
+fn nth_arg(args: &Value, index: usize) -> Option<&Value> {
+    args.as_array().and_then(|items| items.get(index))
+}
+
+fn decode_message_port_frame_payload(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| item.as_u64().unwrap_or(0) as u8)
+            .collect::<Vec<_>>(),
+        Value::Object(object) => {
+            if let Some(data) = object.get("data").and_then(Value::as_array) {
+                return data
+                    .iter()
+                    .map(|item| item.as_u64().unwrap_or(0) as u8)
+                    .collect::<Vec<_>>();
+            }
+            if let Some(buffer) = object.get("buffer") {
+                return decode_message_port_frame_payload(buffer);
+            }
+            if let Some(base64) = object.get("base64").and_then(Value::as_str) {
+                return BASE64_STANDARD.decode(base64).unwrap_or_default();
+            }
+            Vec::new()
+        }
+        Value::String(text) => BASE64_STANDARD.decode(text).unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 const IPC_CONTEXT_MENU_CHANNEL: &str = "vscode:contextmenu";
@@ -1527,7 +2448,8 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         "os": {
             "release": os_release(),
             "hostname": std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string()),
-            "arch": std::env::consts::ARCH
+            "platform": node_platform(),
+            "arch": node_arch()
         },
         "isSessionsWindow": false
     });
@@ -1607,9 +2529,12 @@ fn file_uri_components(path: &Path) -> Value {
     };
 
     json!({
+        "$mid": 1,
         "scheme": "file",
         "authority": "",
-        "path": path
+        "path": path,
+        "query": "",
+        "fragment": ""
     })
 }
 
@@ -1863,6 +2788,24 @@ fn os_release() -> String {
     "0.0.0".to_string()
 }
 
+fn node_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        "linux" => "linux",
+        _ => std::env::consts::OS,
+    }
+}
+
+fn node_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" | "amd64" => "x64",
+        "aarch64" => "arm64",
+        "armv7l" | "armhf" => "arm",
+        value => value,
+    }
+}
+
 fn workbench_css_modules(repo_root: &Path) -> Result<Vec<String>, String> {
     let out_root = repo_root.join("out");
     let vs_root = out_root.join("vs");
@@ -2095,9 +3038,11 @@ fn main() {
     let app_state = AppState {
         router: CapabilityRouter::new(repo_root.clone()),
         repo_root,
-        channel_runtime: Mutex::new(ChannelRuntimeState {
+        channel_runtime: Arc::new(Mutex::new(ChannelRuntimeState {
             subscriptions: HashMap::new(),
-        }),
+        })),
+        extension_host_runtime: Arc::new(Mutex::new(ExtensionHostRuntimeState::default())),
+        next_extension_host_id: AtomicU64::new(1),
         context_menu_runtime: Mutex::new(ContextMenuRuntimeState::default()),
         next_subscription_id: AtomicU64::new(1),
         cached_window_config: Mutex::new(None),

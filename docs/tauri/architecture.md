@@ -12,7 +12,29 @@
 - Sandbox Globals: `window.vscode` shim is installed from `apps/tauri/ui/src/desktopSandbox.ts` before desktop bootstrap import.
 - Renderer IPC Bridge: Electron-style channel calls are proxied through renderer-side channel adapters in `apps/tauri/ui/src/desktopChannels.ts`.
 - Host Control Plane: Rust/Tauri app controls lifecycle and protocol routing.
-- Data Plane: Rust capability handlers execute first, then Node fallback handles missing capability/channel methods.
+- Data Plane: Rust capability/channel handlers are primary; fallback defaults remain only for non-implemented surfaces.
+
+## Extension Runtime Bridge
+
+- Entry point creation/start now runs through `extensionHostStarter` in Rust host (`apps/tauri/src-tauri/src/main.rs`).
+- The host spawns `apps/tauri/node/extension-host-bridge.mjs`, which starts a worker for `out/vs/workbench/api/node/extensionHostProcess.js`.
+- Message-port transport is real (not emulated):
+  - renderer `ipcMessagePort.acquire` creates a `MessageChannel` and posts `port1` to `window.postMessage(nonce, '*', [port1])`.
+  - `port2` frames are forwarded via `extensionHostStarter.writeMessagePortFrame`.
+  - host bridge frames are published via `extensionHostStarter.onDynamicMessagePortFrame` and routed back to `port2`.
+- Dynamic extension-host lifecycle events are emitted with Electron-compatible semantics:
+  - `onDynamicStdout`
+  - `onDynamicStderr`
+  - `onDynamicExit`
+
+## Extension Management Channel
+
+- `extensions` channel methods are Rust-primary in `apps/tauri/src-tauri/src/router.rs`.
+- Implemented flows include:
+  - archive install (`install`, `installFromLocation`, `installFromGallery`, `installGalleryExtensions`, `download`)
+  - metadata/state operations (`updateMetadata`, `toggleApplicationScope`, `resetPinnedStateForAllUserExtensions`, `cleanUp`)
+  - local inspection (`getInstalled`, `getManifest`, `zip`, `getTargetPlatform`, `getExtensionsControlManifest`)
+- Archive handling enforces path traversal checks before extraction.
 
 ## Protocol Shape
 

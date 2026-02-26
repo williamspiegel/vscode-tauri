@@ -579,7 +579,16 @@ function toUint8Array(payload: unknown): Uint8Array {
 function parsePlatform(config: Record<string, unknown>): string {
   const os = config.os as { type?: string; platform?: string } | undefined;
   if (typeof os?.platform === 'string') {
-    return os.platform;
+    const normalized = os.platform.toLowerCase();
+    if (normalized === 'darwin' || normalized === 'macos' || normalized === 'mac') {
+      return 'darwin';
+    }
+    if (normalized === 'win32' || normalized === 'windows' || normalized === 'win') {
+      return 'win32';
+    }
+    if (normalized === 'linux') {
+      return 'linux';
+    }
   }
 
   if (typeof os?.type === 'string') {
@@ -593,6 +602,27 @@ function parsePlatform(config: Record<string, unknown>): string {
   }
 
   return 'darwin';
+}
+
+function parseArch(config: Record<string, unknown>): string {
+  const rawArch = typeof (config.os as { arch?: unknown } | undefined)?.arch === 'string'
+    ? String((config.os as { arch?: string }).arch).toLowerCase()
+    : '';
+
+  if (rawArch === 'x64' || rawArch === 'x86_64' || rawArch === 'amd64') {
+    return 'x64';
+  }
+  if (rawArch === 'arm64' || rawArch === 'aarch64') {
+    return 'arm64';
+  }
+  if (rawArch === 'arm' || rawArch === 'armv7l' || rawArch === 'armhf') {
+    return 'arm';
+  }
+  if (rawArch === 'ia32' || rawArch === 'x86') {
+    return 'ia32';
+  }
+
+  return 'x64';
 }
 
 export async function installDesktopSandbox(host: HostClient): Promise<void> {
@@ -646,15 +676,20 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
   processEnv.VSCODE_DESKTOP_RUNTIME = 'electrobun';
   processEnv.VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT = 'true';
   processEnv.VSCODE_CWD = processEnv.VSCODE_CWD || '/';
+  if (!processEnv.VSCODE_TAURI_WEBVIEW_EXTERNAL_ENDPOINT) {
+    const origin = window.location.origin;
+    if (origin && origin !== 'null') {
+      processEnv.VSCODE_TAURI_WEBVIEW_EXTERNAL_ENDPOINT =
+        `${origin.replace(/\/+$/, '')}/out/vs/workbench/contrib/webview/browser/pre/`;
+    }
+  }
 
   const processPlatform = parsePlatform(configuration);
-  const processArch =
-    typeof (configuration.os as { arch?: unknown } | undefined)?.arch === 'string'
-      ? String((configuration.os as { arch?: string }).arch)
-      : 'x64';
+  const processArch = parseArch(configuration);
   const execPath =
     typeof configuration.execPath === 'string' ? configuration.execPath : '/Applications/Code Tauri.app';
   const processListeners = new Map<string, Set<(...args: unknown[]) => void>>();
+  const messagePortBridgeStops = new Map<string, () => Promise<void>>();
 
   const processOn = (type: string, callback: (...args: unknown[]) => void): void => {
     const listeners = processListeners.get(type) ?? new Set<(...args: unknown[]) => void>();
@@ -701,21 +736,70 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
           throw new Error(`Unsupported event IPC channel '${responseChannel}'`);
         }
 
-        // Minimal emulation for extension host message-port startup:
-        // send `Ready` (2), then after receiving init payload send `Initialized` (1).
         if (responseChannel === 'vscode:startExtensionHostMessagePortResult') {
           const channel = new MessageChannel();
-          channel.port2.postMessage(Uint8Array.of(2));
-          let sentInitialized = false;
-          channel.port2.onmessage = () => {
-            if (sentInitialized) {
+          let closed = false;
+          const existingStop = messagePortBridgeStops.get(nonce);
+          if (existingStop) {
+            void existingStop();
+            messagePortBridgeStops.delete(nonce);
+          }
+
+          const closeBridge = () => {
+            if (closed) {
               return;
             }
-            sentInitialized = true;
-            channel.port2.postMessage(Uint8Array.of(1));
+            closed = true;
             channel.port2.onmessage = null;
+            channel.port2.close();
+            const stop = messagePortBridgeStops.get(nonce);
+            if (stop) {
+              messagePortBridgeStops.delete(nonce);
+              void stop();
+            }
+            void host.desktopChannelCall('extensionHostStarter', 'closeMessagePortFrame', [nonce]).catch(error => {
+              console.warn('[desktopSandbox] failed to close extension host message port frame', { nonce, error });
+            });
           };
+
+          channel.port2.onmessage = event => {
+            if (closed) {
+              return;
+            }
+            const frame = Array.from(toUint8Array(event.data));
+            void host
+              .desktopChannelCall('extensionHostStarter', 'writeMessagePortFrame', [nonce, frame])
+              .catch(error => {
+                console.warn('[desktopSandbox] failed to forward extension host message port frame', { nonce, error });
+                closeBridge();
+              });
+          };
+          channel.port2.onmessageerror = () => closeBridge();
           channel.port2.start();
+
+          void host
+            .desktopChannelListen('extensionHostStarter', 'onDynamicMessagePortFrame', nonce, payload => {
+              if (closed) {
+                return;
+              }
+              const frame = toUint8Array(payload);
+              if (frame.byteLength === 0) {
+                return;
+              }
+              channel.port2.postMessage(frame);
+            })
+            .then(stop => {
+              if (closed) {
+                void stop();
+                return;
+              }
+              messagePortBridgeStops.set(nonce, stop);
+            })
+            .catch(error => {
+              console.warn('[desktopSandbox] failed to subscribe to extension host message port frames', { nonce, error });
+              closeBridge();
+            });
+
           window.postMessage(nonce, '*', [channel.port1]);
           return;
         }

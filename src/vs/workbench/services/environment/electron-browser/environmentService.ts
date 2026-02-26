@@ -109,7 +109,18 @@ export class NativeWorkbenchEnvironmentService extends AbstractNativeEnvironment
 	get extHostLogsPath(): URI { return joinPath(this.windowLogsPath, 'exthost'); }
 
 	@memoize
-	get webviewExternalEndpoint(): string { return `${Schemas.vscodeWebview}://{{uuid}}`; }
+	get webviewExternalEndpoint(): string {
+		// Tauri runtime cannot load custom protocols from sandboxed iframes.
+		if (process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun') {
+			const endpointTemplate = process.env['VSCODE_TAURI_WEBVIEW_EXTERNAL_ENDPOINT']
+				|| this.productService.webviewContentExternalBaseUrlTemplate
+				|| 'https://{{uuid}}.vscode-cdn.net/{{quality}}/{{commit}}/out/vs/workbench/contrib/webview/browser/pre/';
+			return endpointTemplate
+				.replace('{{quality}}', this.productService.quality ?? 'insider')
+				.replace('{{commit}}', this.productService.commit ?? 'ef65ac1ba57f57f2a3961bfe94aa20481caca4c6');
+		}
+		return `${Schemas.vscodeWebview}://{{uuid}}`;
+	}
 
 	@memoize
 	get skipReleaseNotes(): boolean { return !!this.args['skip-release-notes']; }

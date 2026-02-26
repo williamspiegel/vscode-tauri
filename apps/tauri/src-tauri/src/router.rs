@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -110,12 +111,10 @@ impl CapabilityRouter {
         workspaces_state.next_untitled_id = 1;
 
         let mut user_data_profiles_state = UserDataProfilesRuntimeState::default();
-        user_data_profiles_state
-            .profiles
-            .insert(
-                "default".to_string(),
-                profile_descriptor(&user_data_dir, "default", "Default", true, false),
-            );
+        user_data_profiles_state.profiles.insert(
+            "default".to_string(),
+            profile_descriptor(&user_data_dir, "default", "Default", true, false),
+        );
         user_data_profiles_state.next_profile_id = 1;
         user_data_profiles_state.next_transient_id = 1;
 
@@ -259,6 +258,313 @@ impl CapabilityRouter {
 
     fn user_data_dir(&self) -> PathBuf {
         self.repo_root.join(".vscode-tauri").join("user-data")
+    }
+
+    fn user_extensions_dir(&self) -> PathBuf {
+        self.user_data_dir().join("extensions")
+    }
+
+    fn builtin_extensions_dir(&self) -> PathBuf {
+        self.repo_root.join("extensions")
+    }
+
+    fn extensions_cache_dir(&self) -> PathBuf {
+        self.user_data_dir().join("CachedExtensionVSIXs")
+    }
+
+    fn default_extensions_profile_location(&self) -> Value {
+        file_uri_value_from_path(
+            &self
+                .user_data_dir()
+                .join("User")
+                .join("profiles")
+                .join("default")
+                .join("extensions.json"),
+        )
+    }
+
+    fn extensions_profile_location_from_arg(
+        &self,
+        options: Option<&Value>,
+        fallback: Option<&Value>,
+    ) -> Value {
+        if let Some(path) = options
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("profileLocation"))
+            .and_then(extract_fs_path)
+        {
+            return file_uri_value_from_path(&path);
+        }
+        if let Some(path) = fallback.and_then(extract_fs_path) {
+            return file_uri_value_from_path(&path);
+        }
+        self.default_extensions_profile_location()
+    }
+
+    async fn handle_extensions_channel(&self, method: &str, args: &Value) -> Result<Value, String> {
+        let user_extensions_dir = self.user_extensions_dir();
+        let builtin_extensions_dir = self.builtin_extensions_dir();
+        fs::create_dir_all(&user_extensions_dir).map_err(|error| {
+            format!(
+                "extensions failed to create user extensions dir {}: {error}",
+                user_extensions_dir.display()
+            )
+        })?;
+
+        match method {
+            "getInstalled" => {
+                let extension_type = nth_arg(args, 0).and_then(Value::as_u64);
+                let extensions = collect_installed_extensions(
+                    &builtin_extensions_dir,
+                    &user_extensions_dir,
+                    extension_type,
+                )?;
+                Ok(Value::Array(extensions))
+            }
+            "getManifest" => {
+                let archive = nth_arg(args, 0).and_then(extract_fs_path).ok_or_else(|| {
+                    "extensions.getManifest expected archive URI/path".to_string()
+                })?;
+                read_manifest_from_archive(&archive)
+            }
+            "zip" => {
+                let extension_location = nth_arg(args, 0)
+                    .and_then(|value| value.get("location"))
+                    .and_then(extract_fs_path)
+                    .ok_or_else(|| "extensions.zip expected extension.location".to_string())?;
+                let zip_path = zip_extension_directory(
+                    &extension_location,
+                    &self.extensions_cache_dir(),
+                    "extension",
+                )?;
+                Ok(file_uri_value_from_path(&zip_path))
+            }
+            "install" => {
+                let archive = nth_arg(args, 0)
+                    .and_then(extract_fs_path)
+                    .ok_or_else(|| "extensions.install expected archive URI/path".to_string())?;
+                let metadata = json!({
+                    "source": "vsix",
+                    "installedTimestamp": epoch_millis(),
+                    "targetPlatform": current_target_platform()
+                });
+                install_from_archive(
+                    &archive,
+                    &user_extensions_dir,
+                    &self.extensions_cache_dir(),
+                    &metadata,
+                )
+            }
+            "installFromLocation" => {
+                let location = nth_arg(args, 0).and_then(extract_fs_path).ok_or_else(|| {
+                    "extensions.installFromLocation expected location URI/path".to_string()
+                })?;
+                let metadata = json!({
+                    "source": "resource",
+                    "installedTimestamp": epoch_millis(),
+                    "targetPlatform": current_target_platform()
+                });
+                if location.is_file() {
+                    install_from_archive(
+                        &location,
+                        &user_extensions_dir,
+                        &self.extensions_cache_dir(),
+                        &metadata,
+                    )
+                } else {
+                    install_from_directory(&location, &user_extensions_dir, &metadata)
+                }
+            }
+            "installFromGallery" => {
+                let gallery = nth_arg(args, 0).ok_or_else(|| {
+                    "extensions.installFromGallery expected extension payload".to_string()
+                })?;
+                let download_url = gallery_download_url(gallery).ok_or_else(|| {
+                    "extensions.installFromGallery missing download url in extension assets"
+                        .to_string()
+                })?;
+                let identifier = gallery
+                    .get("identifier")
+                    .and_then(Value::as_object)
+                    .and_then(|value| value.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("gallery-extension");
+                let archive_path = self.extensions_cache_dir().join(format!(
+                    "{}-{}-{}.vsix",
+                    sanitize_extension_segment(identifier),
+                    epoch_millis(),
+                    stable_short_hex_id(identifier)
+                ));
+                download_to_file(&download_url, &archive_path).await?;
+                let metadata = gallery_extension_metadata(gallery);
+                install_from_archive(
+                    &archive_path,
+                    &user_extensions_dir,
+                    &self.extensions_cache_dir(),
+                    &metadata,
+                )
+            }
+            "installGalleryExtensions" => {
+                let mut results = Vec::new();
+                let Some(installs) = nth_arg(args, 0).and_then(Value::as_array) else {
+                    return Ok(Value::Array(results));
+                };
+                for install in installs {
+                    let extension = install.get("extension").ok_or_else(|| {
+                        "extensions.installGalleryExtensions expected extension payload".to_string()
+                    })?;
+                    let download_url = gallery_download_url(extension).ok_or_else(|| {
+                        "extensions.installGalleryExtensions missing download url".to_string()
+                    })?;
+                    let identifier = extension
+                        .get("identifier")
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("gallery-extension");
+                    let archive_path = self.extensions_cache_dir().join(format!(
+                        "{}-{}-{}.vsix",
+                        sanitize_extension_segment(identifier),
+                        epoch_millis(),
+                        stable_short_hex_id(identifier)
+                    ));
+                    download_to_file(&download_url, &archive_path).await?;
+                    let local = install_from_archive(
+                        &archive_path,
+                        &user_extensions_dir,
+                        &self.extensions_cache_dir(),
+                        &gallery_extension_metadata(extension),
+                    )?;
+                    let local_identifier = local
+                        .get("identifier")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "id": identifier }));
+                    let profile_location =
+                        self.extensions_profile_location_from_arg(install.get("options"), None);
+                    results.push(json!({
+                        "identifier": local_identifier,
+                        "operation": 2,
+                        "source": extension.clone(),
+                        "local": local,
+                        "profileLocation": profile_location
+                    }));
+                }
+                Ok(Value::Array(results))
+            }
+            "installExtensionsFromProfile" => {
+                let requested = nth_arg(args, 0)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let installed = collect_installed_extensions(
+                    &builtin_extensions_dir,
+                    &user_extensions_dir,
+                    Some(1),
+                )?;
+                let mut requested_ids = requested
+                    .iter()
+                    .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                    .map(|value| value.to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                requested_ids.sort();
+                requested_ids.dedup();
+                let mut result = Vec::new();
+                for local in installed {
+                    let Some(id) = local
+                        .get("identifier")
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get("id"))
+                        .and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if requested_ids
+                        .binary_search(&id.to_ascii_lowercase())
+                        .is_ok()
+                    {
+                        result.push(local);
+                    }
+                }
+                Ok(Value::Array(result))
+            }
+            "download" => {
+                let extension = nth_arg(args, 0)
+                    .ok_or_else(|| "extensions.download expected extension payload".to_string())?;
+                let download_url = gallery_download_url(extension)
+                    .ok_or_else(|| "extensions.download missing download url".to_string())?;
+                let identifier = extension
+                    .get("identifier")
+                    .and_then(Value::as_object)
+                    .and_then(|value| value.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("gallery-extension");
+                let archive_path = self.extensions_cache_dir().join(format!(
+                    "{}-{}-download.vsix",
+                    sanitize_extension_segment(identifier),
+                    stable_short_hex_id(identifier)
+                ));
+                download_to_file(&download_url, &archive_path).await?;
+                Ok(file_uri_value_from_path(&archive_path))
+            }
+            "uninstall" => {
+                let extension = nth_arg(args, 0).ok_or_else(|| {
+                    "extensions.uninstall expected local extension payload".to_string()
+                })?;
+                uninstall_local_extension(extension, &user_extensions_dir)?;
+                Ok(Value::Null)
+            }
+            "uninstallExtensions" => {
+                if let Some(items) = nth_arg(args, 0).and_then(Value::as_array) {
+                    for entry in items {
+                        if let Some(extension) = entry.get("extension") {
+                            uninstall_local_extension(extension, &user_extensions_dir)?;
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "toggleApplicationScope" => {
+                let extension = nth_arg(args, 0).ok_or_else(|| {
+                    "extensions.toggleApplicationScope expected local extension payload".to_string()
+                })?;
+                let updated = update_local_extension_metadata(
+                    extension,
+                    &json!({ "isApplicationScoped": !extension.get("isApplicationScoped").and_then(Value::as_bool).unwrap_or(false) }),
+                )?;
+                Ok(updated)
+            }
+            "updateMetadata" => {
+                let extension = nth_arg(args, 0).ok_or_else(|| {
+                    "extensions.updateMetadata expected local extension payload".to_string()
+                })?;
+                let metadata = nth_arg(args, 1).cloned().unwrap_or_else(|| json!({}));
+                update_local_extension_metadata(extension, &metadata)
+            }
+            "resetPinnedStateForAllUserExtensions" => {
+                let pinned = nth_arg(args, 0).and_then(Value::as_bool).unwrap_or(false);
+                for extension in collect_installed_extensions(
+                    &builtin_extensions_dir,
+                    &user_extensions_dir,
+                    Some(1),
+                )? {
+                    let _ =
+                        update_local_extension_metadata(&extension, &json!({ "pinned": pinned }));
+                }
+                Ok(Value::Null)
+            }
+            "copyExtensions" => Ok(Value::Null),
+            "cleanUp" => {
+                let cache_dir = self.extensions_cache_dir();
+                let _ = fs::remove_dir_all(&cache_dir);
+                let _ = fs::create_dir_all(&cache_dir);
+                Ok(Value::Null)
+            }
+            "getTargetPlatform" => Ok(json!(current_target_platform())),
+            "getExtensionsControlManifest" => {
+                load_extensions_control_manifest(&self.repo_root).await
+            }
+            _ => Ok(default_by_method_name(method)),
+        }
     }
 
     pub fn watcher_verbose_logging(&self) -> bool {
@@ -628,13 +934,15 @@ impl CapabilityRouter {
                         profile_descriptor(&user_data_dir, &profile_id, &name, false, is_transient);
                     state.profiles.insert(profile_id.clone(), profile.clone());
                     if let Some(workspace_identifier) = workspace_identifier_key(workspace) {
-                        state.workspace_profiles.insert(workspace_identifier, profile_id);
+                        state
+                            .workspace_profiles
+                            .insert(workspace_identifier, profile_id);
                     }
                     Ok(Some(profile))
                 }
                 "createProfile" => {
-                    let requested_id =
-                        extract_string_arg(nth_arg(args, 0)).unwrap_or_else(|| "profile".to_string());
+                    let requested_id = extract_string_arg(nth_arg(args, 0))
+                        .unwrap_or_else(|| "profile".to_string());
                     let name = extract_string_arg(nth_arg(args, 1))
                         .unwrap_or_else(|| "Profile".to_string());
                     let workspace = nth_arg(args, 3);
@@ -653,7 +961,9 @@ impl CapabilityRouter {
                         profile_descriptor(&user_data_dir, &profile_id, &name, false, is_transient);
                     state.profiles.insert(profile_id.clone(), profile.clone());
                     if let Some(workspace_identifier) = workspace_identifier_key(workspace) {
-                        state.workspace_profiles.insert(workspace_identifier, profile_id);
+                        state
+                            .workspace_profiles
+                            .insert(workspace_identifier, profile_id);
                     }
                     Ok(Some(profile))
                 }
@@ -666,16 +976,13 @@ impl CapabilityRouter {
                         .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
                     let profile_id = format!("transient-{}", state.next_transient_id);
                     state.next_transient_id += 1;
-                    let profile = profile_descriptor(
-                        &user_data_dir,
-                        &profile_id,
-                        "Transient",
-                        false,
-                        true,
-                    );
+                    let profile =
+                        profile_descriptor(&user_data_dir, &profile_id, "Transient", false, true);
                     state.profiles.insert(profile_id.clone(), profile.clone());
                     if let Some(workspace_identifier) = workspace_identifier_key(workspace) {
-                        state.workspace_profiles.insert(workspace_identifier, profile_id);
+                        state
+                            .workspace_profiles
+                            .insert(workspace_identifier, profile_id);
                     }
                     Ok(Some(profile))
                 }
@@ -698,13 +1005,9 @@ impl CapabilityRouter {
                         unique_profile_id(&state.profiles, requested_id.to_string())
                     };
 
-                    let current = state
-                        .profiles
-                        .get(&profile_id)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            profile_descriptor(&user_data_dir, &profile_id, "Profile", false, false)
-                        });
+                    let current = state.profiles.get(&profile_id).cloned().unwrap_or_else(|| {
+                        profile_descriptor(&user_data_dir, &profile_id, "Profile", false, false)
+                    });
                     let mut next = current.clone();
                     if let Some(name) = update_options
                         .and_then(|options| options.get("name"))
@@ -749,7 +1052,9 @@ impl CapabilityRouter {
                             .lock()
                             .map_err(|_| "userDataProfiles state lock poisoned".to_string())?;
                         if state.profiles.contains_key(&profile_id) {
-                            state.workspace_profiles.insert(workspace_identifier, profile_id);
+                            state
+                                .workspace_profiles
+                                .insert(workspace_identifier, profile_id);
                         }
                     }
                     Ok(Some(Value::Null))
@@ -915,8 +1220,11 @@ impl CapabilityRouter {
             },
             "extensionHostStarter" => match method {
                 "createExtensionHost" => {
-                    let extension_host_id = self.next_extension_host_id.fetch_add(1, Ordering::Relaxed);
-                    Ok(Some(json!({ "id": format!("tauri-extension-host-{extension_host_id}") })))
+                    let extension_host_id =
+                        self.next_extension_host_id.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(
+                        json!({ "id": format!("tauri-extension-host-{extension_host_id}") }),
+                    ))
                 }
                 "start" => Ok(Some(json!({ "pid": -1 }))),
                 "enableInspectPort" => Ok(Some(json!(false))),
@@ -953,9 +1261,11 @@ impl CapabilityRouter {
                 "getDefaultSystemShell" => Ok(Some(json!(
                     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
                 ))),
-                "getEnvironment" | "getShellEnvironment" => Ok(Some(json!(
-                    std::env::vars().collect::<BTreeMap<String, String>>()
-                ))),
+                "getEnvironment" | "getShellEnvironment" => {
+                    Ok(Some(json!(
+                        std::env::vars().collect::<BTreeMap<String, String>>()
+                    )))
+                }
                 "getTerminalLayoutInfo" => {
                     let workspace_id = nth_arg(args, 0)
                         .and_then(Value::as_object)
@@ -1035,11 +1345,7 @@ impl CapabilityRouter {
                         )
                     })?;
 
-                    Ok(Some(json!({
-                        "scheme": "file",
-                        "authority": "",
-                        "path": to_forward_slash_path(&resolved)
-                    })))
+                    Ok(Some(file_uri_value_from_path(&resolved)))
                 }
                 "readdir" => {
                     let resource = nth_arg(args, 0).ok_or_else(|| {
@@ -1756,12 +2062,19 @@ impl CapabilityRouter {
                 }
                 _ => Ok(None),
             },
+            "webview" => match method {
+                "setIgnoreMenuShortcuts" | "findInFrame" | "stopFindInFrame" => {
+                    Ok(Some(Value::Null))
+                }
+                _ => Ok(None),
+            },
             "extensionTipsService" => match method {
                 "getConfigBasedTips"
                 | "getImportantExecutableBasedTips"
                 | "getOtherExecutableBasedTips" => Ok(Some(json!([]))),
                 _ => Ok(None),
             },
+            "extensions" => self.handle_extensions_channel(method, args).await.map(Some),
             "userDataSyncAccount" => match method {
                 "_getInitialData" | "updateAccount" => Ok(Some(Value::Null)),
                 _ => Ok(None),
@@ -2459,9 +2772,12 @@ fn normalize_file_uri_path(raw: &str) -> PathBuf {
 
 fn file_uri_value_from_path(path: &Path) -> Value {
     json!({
+        "$mid": 1,
         "scheme": "file",
         "authority": "",
-        "path": to_forward_slash_path(path)
+        "path": to_forward_slash_path(path),
+        "query": "",
+        "fragment": ""
     })
 }
 
@@ -2695,6 +3011,832 @@ fn copy_path_recursive(source: &Path, target: &Path, overwrite: bool) -> std::io
     Ok(())
 }
 
+fn current_target_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "x86_64") => "darwin-x64",
+        ("macos", "aarch64") => "darwin-arm64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("linux", "arm") => "linux-armhf",
+        ("windows", "x86_64") => "win32-x64",
+        ("windows", "aarch64") => "win32-arm64",
+        _ => "unknown",
+    }
+}
+
+fn sanitize_extension_segment(input: &str) -> String {
+    let mut sanitized = input
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while sanitized.contains("--") {
+        sanitized = sanitized.replace("--", "-");
+    }
+    sanitized.trim_matches('-').to_string()
+}
+
+fn extension_directory_size(path: &Path) -> u64 {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(_) => return 0,
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    let mut total = 0u64;
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        total = total.saturating_add(extension_directory_size(&entry.path()));
+    }
+    total
+}
+
+fn merge_json_objects(
+    target: &mut serde_json::Map<String, Value>,
+    patch: &serde_json::Map<String, Value>,
+) {
+    for (key, value) in patch {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
+fn ensure_extension_root(path: &Path) -> Option<PathBuf> {
+    if path.join("package.json").is_file() {
+        return Some(path.to_path_buf());
+    }
+    let extension_subdir = path.join("extension");
+    if extension_subdir.join("package.json").is_file() {
+        return Some(extension_subdir);
+    }
+
+    let entries = fs::read_dir(path).ok()?;
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if entry.path().join("package.json").is_file() {
+            return Some(entry.path());
+        }
+        let nested_extension = entry.path().join("extension");
+        if nested_extension.join("package.json").is_file() {
+            return Some(nested_extension);
+        }
+    }
+    None
+}
+
+fn load_manifest_and_metadata(extension_root: &Path) -> Result<(Value, Value), String> {
+    let package_json = extension_root.join("package.json");
+    let bytes = fs::read(&package_json).map_err(|error| {
+        format!(
+            "extensions failed to read {}: {error}",
+            package_json.display()
+        )
+    })?;
+    let mut manifest: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "extensions failed to parse manifest {}: {error}",
+            package_json.display()
+        )
+    })?;
+    let object = manifest.as_object_mut().ok_or_else(|| {
+        format!(
+            "extensions invalid manifest object {}",
+            package_json.display()
+        )
+    })?;
+    let mut metadata = object
+        .remove("__metadata")
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    if !metadata.is_object() {
+        metadata = Value::Object(serde_json::Map::new());
+    }
+    if object
+        .get("publisher")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        object.insert(
+            "publisher".to_string(),
+            Value::String("undefined_publisher".to_string()),
+        );
+    }
+    if object.get("name").and_then(Value::as_str).is_none() {
+        return Err(format!(
+            "extensions manifest missing 'name' in {}",
+            package_json.display()
+        ));
+    }
+    if object.get("version").and_then(Value::as_str).is_none() {
+        return Err(format!(
+            "extensions manifest missing 'version' in {}",
+            package_json.display()
+        ));
+    }
+    Ok((Value::Object(object.clone()), metadata))
+}
+
+fn write_manifest_metadata(extension_root: &Path, metadata_patch: &Value) -> Result<(), String> {
+    let package_json = extension_root.join("package.json");
+    let bytes = fs::read(&package_json).map_err(|error| {
+        format!(
+            "extensions failed to read {}: {error}",
+            package_json.display()
+        )
+    })?;
+    let mut manifest: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "extensions failed to parse {}: {error}",
+            package_json.display()
+        )
+    })?;
+    let object = manifest.as_object_mut().ok_or_else(|| {
+        format!(
+            "extensions invalid manifest object {}",
+            package_json.display()
+        )
+    })?;
+    let metadata = object
+        .entry("__metadata".to_string())
+        .or_insert_with(|| json!({}));
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    let metadata_object = metadata
+        .as_object_mut()
+        .ok_or_else(|| "extensions metadata object unavailable".to_string())?;
+    if let Some(patch) = metadata_patch.as_object() {
+        merge_json_objects(metadata_object, patch);
+    }
+
+    metadata_object
+        .entry("installedTimestamp".to_string())
+        .or_insert_with(|| json!(epoch_millis()));
+    metadata_object
+        .entry("targetPlatform".to_string())
+        .or_insert_with(|| json!(current_target_platform()));
+    metadata_object
+        .entry("isMachineScoped".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("isApplicationScoped".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("isPreReleaseVersion".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("hasPreReleaseVersion".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("private".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("preRelease".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("updated".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("pinned".to_string())
+        .or_insert_with(|| json!(false));
+    metadata_object
+        .entry("source".to_string())
+        .or_insert_with(|| json!("resource"));
+    metadata_object
+        .entry("size".to_string())
+        .or_insert_with(|| json!(extension_directory_size(extension_root)));
+
+    if let Some(parent) = package_json.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let serialized = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("extensions failed to serialize manifest: {error}"))?;
+    fs::write(&package_json, serialized).map_err(|error| {
+        format!(
+            "extensions failed to write {}: {error}",
+            package_json.display()
+        )
+    })
+}
+
+fn build_local_extension_value(
+    extension_root: &Path,
+    extension_type: u64,
+    is_builtin: bool,
+    manifest: &Value,
+    metadata: &Value,
+) -> Value {
+    let manifest_object = manifest.as_object();
+    let metadata_object = metadata.as_object();
+    let publisher = manifest_object
+        .and_then(|value| value.get("publisher"))
+        .and_then(Value::as_str)
+        .unwrap_or("undefined_publisher");
+    let name = manifest_object
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("extension");
+    let identifier = format!("{publisher}.{name}");
+    let readme_path = extension_root.join("README.md");
+    let changelog_path = extension_root.join("CHANGELOG.md");
+    let source = metadata_object
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or(if is_builtin { "resource" } else { "vsix" });
+
+    json!({
+        "type": extension_type,
+        "isBuiltin": is_builtin,
+        "identifier": {
+            "id": identifier,
+            "uuid": metadata_object.and_then(|value| value.get("id")).and_then(Value::as_str)
+        },
+        "manifest": manifest,
+        "location": file_uri_value_from_path(extension_root),
+        "targetPlatform": metadata_object
+            .and_then(|value| value.get("targetPlatform"))
+            .and_then(Value::as_str)
+            .unwrap_or("undefined"),
+        "publisherDisplayName": metadata_object
+            .and_then(|value| value.get("publisherDisplayName"))
+            .and_then(Value::as_str),
+        "readmeUrl": if readme_path.is_file() {
+            file_uri_value_from_path(&readme_path)
+        } else {
+            Value::Null
+        },
+        "changelogUrl": if changelog_path.is_file() {
+            file_uri_value_from_path(&changelog_path)
+        } else {
+            Value::Null
+        },
+        "isValid": true,
+        "validations": [],
+        "preRelease": metadata_object
+            .and_then(|value| value.get("preRelease"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+
+        "isWorkspaceScoped": false,
+        "isMachineScoped": metadata_object
+            .and_then(|value| value.get("isMachineScoped"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "isApplicationScoped": metadata_object
+            .and_then(|value| value.get("isApplicationScoped"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "publisherId": metadata_object
+            .and_then(|value| value.get("publisherId"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "installedTimestamp": metadata_object
+            .and_then(|value| value.get("installedTimestamp"))
+            .cloned()
+            .unwrap_or_else(|| json!(epoch_millis())),
+        "isPreReleaseVersion": metadata_object
+            .and_then(|value| value.get("isPreReleaseVersion"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "hasPreReleaseVersion": metadata_object
+            .and_then(|value| value.get("hasPreReleaseVersion"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "private": metadata_object
+            .and_then(|value| value.get("private"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "updated": metadata_object
+            .and_then(|value| value.get("updated"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "pinned": metadata_object
+            .and_then(|value| value.get("pinned"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "source": source,
+        "size": metadata_object
+            .and_then(|value| value.get("size"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| extension_directory_size(extension_root)),
+    })
+}
+
+fn scan_extension_install_root(
+    root: &Path,
+    extension_type: u64,
+    is_builtin: bool,
+) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    if !root.is_dir() {
+        return Ok(out);
+    }
+
+    if let Some(extension_root) = ensure_extension_root(root) {
+        let (manifest, metadata) = load_manifest_and_metadata(&extension_root)?;
+        out.push(build_local_extension_value(
+            &extension_root,
+            extension_type,
+            is_builtin,
+            &manifest,
+            &metadata,
+        ));
+        return Ok(out);
+    }
+
+    for entry in fs::read_dir(root).map_err(|error| {
+        format!(
+            "extensions failed to read install root {}: {error}",
+            root.display()
+        )
+    })? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(extension_root) = ensure_extension_root(&entry.path()) else {
+            continue;
+        };
+        let (manifest, metadata) = match load_manifest_and_metadata(&extension_root) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        out.push(build_local_extension_value(
+            &extension_root,
+            extension_type,
+            is_builtin,
+            &manifest,
+            &metadata,
+        ));
+    }
+
+    Ok(out)
+}
+
+fn collect_installed_extensions(
+    builtin_extensions_dir: &Path,
+    user_extensions_dir: &Path,
+    extension_type: Option<u64>,
+) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    if extension_type != Some(1) {
+        out.extend(scan_extension_install_root(
+            builtin_extensions_dir,
+            0,
+            true,
+        )?);
+    }
+    if extension_type != Some(0) {
+        out.extend(scan_extension_install_root(user_extensions_dir, 1, false)?);
+    }
+    out.sort_by(|a, b| {
+        let a_id = a
+            .get("identifier")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let b_id = b
+            .get("identifier")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        a_id.cmp(&b_id)
+    });
+    Ok(out)
+}
+
+fn zip_entry_is_safe(entry: &str) -> bool {
+    if entry.trim().is_empty() || entry.starts_with('/') || entry.starts_with('\\') {
+        return false;
+    }
+    let path = Path::new(entry);
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn list_archive_entries(archive: &Path) -> Result<Vec<String>, String> {
+    let output = Command::new("unzip")
+        .arg("-Z1")
+        .arg(archive)
+        .output()
+        .map_err(|error| {
+            format!(
+                "extensions failed to list archive {}: {error}",
+                archive.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "extensions failed to list archive {}: {}",
+            archive.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let entries = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Err(format!("extensions archive {} is empty", archive.display()));
+    }
+    for entry in &entries {
+        if !zip_entry_is_safe(entry) {
+            return Err(format!(
+                "extensions archive {} has unsafe entry '{}'",
+                archive.display(),
+                entry
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+fn read_manifest_from_archive(archive: &Path) -> Result<Value, String> {
+    let entries = list_archive_entries(archive)?;
+    let manifest_entry = entries
+        .iter()
+        .find(|entry| entry.ends_with("/package.json") || entry.as_str() == "package.json")
+        .ok_or_else(|| {
+            format!(
+                "extensions archive {} is missing package.json",
+                archive.display()
+            )
+        })?
+        .to_string();
+    let output = Command::new("unzip")
+        .arg("-p")
+        .arg(archive)
+        .arg(&manifest_entry)
+        .output()
+        .map_err(|error| {
+            format!(
+                "extensions failed to extract manifest from {}: {error}",
+                archive.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "extensions failed to read manifest from {}: {}",
+            archive.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut manifest: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "extensions failed to parse manifest from {}: {error}",
+            archive.display()
+        )
+    })?;
+    if let Some(object) = manifest.as_object_mut() {
+        object.remove("__metadata");
+    }
+    Ok(manifest)
+}
+
+fn extract_archive_to_dir(archive: &Path, destination: &Path) -> Result<(), String> {
+    let status = Command::new("unzip")
+        .arg("-q")
+        .arg("-o")
+        .arg(archive)
+        .arg("-d")
+        .arg(destination)
+        .status()
+        .map_err(|error| {
+            format!(
+                "extensions failed to extract archive {}: {error}",
+                archive.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "extensions failed to extract archive {} (status={})",
+            archive.display(),
+            status
+        ));
+    }
+    Ok(())
+}
+
+fn install_from_directory(
+    source: &Path,
+    user_extensions_dir: &Path,
+    metadata_patch: &Value,
+) -> Result<Value, String> {
+    let source_root = ensure_extension_root(source)
+        .ok_or_else(|| format!("extensions install source {} is invalid", source.display()))?;
+    let (manifest, _) = load_manifest_and_metadata(&source_root)?;
+    let publisher = manifest
+        .get("publisher")
+        .and_then(Value::as_str)
+        .unwrap_or("undefined_publisher");
+    let name = manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("extension");
+    let version = manifest
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("0.0.0");
+    let install_dir = user_extensions_dir.join(format!(
+        "{}.{}-{}",
+        sanitize_extension_segment(publisher),
+        sanitize_extension_segment(name),
+        sanitize_extension_segment(version)
+    ));
+    fs::create_dir_all(user_extensions_dir).map_err(|error| {
+        format!(
+            "extensions failed to create user install dir {}: {error}",
+            user_extensions_dir.display()
+        )
+    })?;
+    copy_path_recursive(&source_root, &install_dir, true).map_err(|error| {
+        format!(
+            "extensions failed to copy {} to {}: {error}",
+            source_root.display(),
+            install_dir.display()
+        )
+    })?;
+    write_manifest_metadata(&install_dir, metadata_patch)?;
+    let (installed_manifest, metadata) = load_manifest_and_metadata(&install_dir)?;
+    Ok(build_local_extension_value(
+        &install_dir,
+        1,
+        false,
+        &installed_manifest,
+        &metadata,
+    ))
+}
+
+fn install_from_archive(
+    archive: &Path,
+    user_extensions_dir: &Path,
+    cache_dir: &Path,
+    metadata_patch: &Value,
+) -> Result<Value, String> {
+    list_archive_entries(archive)?;
+    fs::create_dir_all(cache_dir).map_err(|error| {
+        format!(
+            "extensions failed to create cache dir {}: {error}",
+            cache_dir.display()
+        )
+    })?;
+    let extract_dir = cache_dir.join(format!(
+        "extract-{}-{}",
+        epoch_millis(),
+        stable_short_hex_id(&archive.to_string_lossy())
+    ));
+    fs::create_dir_all(&extract_dir).map_err(|error| {
+        format!(
+            "extensions failed to create extract dir {}: {error}",
+            extract_dir.display()
+        )
+    })?;
+    let result = (|| {
+        extract_archive_to_dir(archive, &extract_dir)?;
+        install_from_directory(&extract_dir, user_extensions_dir, metadata_patch)
+    })();
+    let _ = fs::remove_dir_all(&extract_dir);
+    result
+}
+
+fn zip_extension_directory(
+    extension_dir: &Path,
+    cache_dir: &Path,
+    prefix: &str,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(cache_dir).map_err(|error| {
+        format!(
+            "extensions failed to create cache dir {}: {error}",
+            cache_dir.display()
+        )
+    })?;
+    let zip_path = cache_dir.join(format!(
+        "{}-{}-{}.zip",
+        sanitize_extension_segment(prefix),
+        epoch_millis(),
+        stable_short_hex_id(&extension_dir.to_string_lossy())
+    ));
+    let status = Command::new("zip")
+        .arg("-q")
+        .arg("-r")
+        .arg(&zip_path)
+        .arg(".")
+        .current_dir(extension_dir)
+        .status()
+        .map_err(|error| {
+            format!(
+                "extensions failed to zip extension dir {}: {error}",
+                extension_dir.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "extensions failed to zip extension dir {} (status={})",
+            extension_dir.display(),
+            status
+        ));
+    }
+    Ok(zip_path)
+}
+
+fn gallery_download_url(gallery: &Value) -> Option<String> {
+    gallery
+        .get("assets")
+        .and_then(Value::as_object)
+        .and_then(|assets| assets.get("download"))
+        .and_then(Value::as_object)
+        .and_then(|download| {
+            download
+                .get("uri")
+                .and_then(Value::as_str)
+                .or_else(|| download.get("fallbackUri").and_then(Value::as_str))
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn gallery_extension_metadata(gallery: &Value) -> Value {
+    let is_pre_release = gallery
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("isPreReleaseVersion"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    json!({
+        "id": gallery.get("identifier").and_then(Value::as_object).and_then(|value| value.get("uuid")).and_then(Value::as_str),
+        "publisherId": gallery.get("publisherId").and_then(Value::as_str),
+        "publisherDisplayName": gallery.get("publisherDisplayName").and_then(Value::as_str),
+        "private": gallery.get("private").and_then(Value::as_bool).unwrap_or(false),
+        "isPreReleaseVersion": is_pre_release,
+        "hasPreReleaseVersion": gallery.get("hasPreReleaseVersion").and_then(Value::as_bool).unwrap_or(false),
+        "preRelease": is_pre_release,
+        "targetPlatform": gallery
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("targetPlatform"))
+            .and_then(Value::as_str)
+            .unwrap_or("undefined"),
+        "source": "gallery",
+        "installedTimestamp": epoch_millis()
+    })
+}
+
+async fn download_to_file(url: &str, destination: &Path) -> Result<(), String> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|error| format!("extensions download failed for {url}: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "extensions download failed for {url} with status {}",
+            response.status()
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("extensions download body failed for {url}: {error}"))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "extensions failed to create download destination {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(destination, &bytes).map_err(|error| {
+        format!(
+            "extensions failed to write download {}: {error}",
+            destination.display()
+        )
+    })
+}
+
+fn uninstall_local_extension(extension: &Value, user_extensions_dir: &Path) -> Result<(), String> {
+    let location = extension
+        .get("location")
+        .and_then(extract_fs_path)
+        .or_else(|| extract_fs_path(extension))
+        .ok_or_else(|| "extensions.uninstall missing local extension location".to_string())?;
+    let normalized_location = location.canonicalize().unwrap_or_else(|_| location.clone());
+    let normalized_user_root = user_extensions_dir
+        .canonicalize()
+        .unwrap_or_else(|_| user_extensions_dir.to_path_buf());
+    if !normalized_location.starts_with(&normalized_user_root) {
+        return Err(format!(
+            "extensions.uninstall refused to remove non-user extension path {}",
+            normalized_location.display()
+        ));
+    }
+    remove_path_force(&normalized_location, true).map_err(|error| {
+        format!(
+            "extensions.uninstall failed to remove {}: {error}",
+            normalized_location.display()
+        )
+    })
+}
+
+fn update_local_extension_metadata(extension: &Value, metadata: &Value) -> Result<Value, String> {
+    let location = extension
+        .get("location")
+        .and_then(extract_fs_path)
+        .or_else(|| extract_fs_path(extension))
+        .ok_or_else(|| "extensions.updateMetadata missing local extension location".to_string())?;
+    write_manifest_metadata(&location, metadata)?;
+    let (manifest, extension_metadata) = load_manifest_and_metadata(&location)?;
+    let extension_type = extension.get("type").and_then(Value::as_u64).unwrap_or(1);
+    let is_builtin = extension
+        .get("isBuiltin")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(build_local_extension_value(
+        &location,
+        extension_type,
+        is_builtin,
+        &manifest,
+        &extension_metadata,
+    ))
+}
+
+async fn load_extensions_control_manifest(repo_root: &Path) -> Result<Value, String> {
+    let default_manifest = json!({
+        "malicious": [],
+        "deprecated": {},
+        "search": [],
+        "autoUpdate": {}
+    });
+
+    let control_url_from_env = std::env::var("VSCODE_TAURI_EXTENSIONS_GALLERY_CONTROL_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let control_url = if let Some(url) = control_url_from_env {
+        Some(url)
+    } else {
+        let product_path = repo_root.join("product.json");
+        let product_contents = fs::read_to_string(&product_path).ok();
+        product_contents
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .and_then(|product| {
+                product
+                    .get("extensionsGallery")
+                    .and_then(Value::as_object)
+                    .and_then(|gallery| gallery.get("controlUrl"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .filter(|value| !value.trim().is_empty())
+    };
+
+    let Some(control_url) = control_url else {
+        return Ok(default_manifest);
+    };
+
+    let response = match reqwest::get(control_url.clone()).await {
+        Ok(response) => response,
+        Err(_) => return Ok(default_manifest),
+    };
+    if !response.status().is_success() {
+        return Ok(default_manifest);
+    }
+    let payload_bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(default_manifest),
+    };
+    let payload: Value = match serde_json::from_slice(&payload_bytes) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(default_manifest),
+    };
+    let object = payload.as_object().cloned().unwrap_or_default();
+    Ok(json!({
+        "malicious": object.get("malicious").cloned().unwrap_or_else(|| json!([])),
+        "deprecated": object.get("deprecated").cloned().unwrap_or_else(|| json!({})),
+        "search": object.get("search").cloned().unwrap_or_else(|| json!([])),
+        "autoUpdate": object.get("autoUpdate").cloned().unwrap_or_else(|| json!({}))
+    }))
+}
+
 fn stable_short_hex_id(input: &str) -> String {
     let mut hash: i32 = 0;
     hash = hash
@@ -2911,9 +4053,7 @@ fn profile_descriptor(
 fn read_fallback_counts(path: &Path) -> Result<BTreeMap<String, u64>, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BTreeMap::new())
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(error) => {
             return Err(format!(
                 "failed to read fallback metrics {}: {error}",
@@ -3055,6 +4195,33 @@ mod tests {
         assert_eq!(file_change_type_from_kind("anything-else"), 0);
     }
 
+    #[test]
+    fn extension_archive_paths_reject_traversal() {
+        assert!(zip_entry_is_safe("extension/package.json"));
+        assert!(zip_entry_is_safe("publisher.name/package.json"));
+        assert!(!zip_entry_is_safe("../package.json"));
+        assert!(!zip_entry_is_safe("/absolute/package.json"));
+        assert!(!zip_entry_is_safe("extension/../../package.json"));
+    }
+
+    #[test]
+    fn extension_metadata_builder_sets_expected_defaults() {
+        let manifest = json!({
+            "publisher": "example",
+            "name": "hello",
+            "version": "1.0.0",
+            "engines": { "vscode": "*" }
+        });
+        let metadata = json!({});
+        let location = std::env::temp_dir().join("vscode-tauri-extension-metadata-test");
+        let local = build_local_extension_value(&location, 1, false, &manifest, &metadata);
+
+        assert_eq!(local["identifier"]["id"], json!("example.hello"));
+        assert_eq!(local["type"], json!(1));
+        assert_eq!(local["source"], json!("vsix"));
+        assert_eq!(local["isApplicationScoped"], json!(false));
+    }
+
     #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
@@ -3125,7 +4292,11 @@ mod tests {
             "background": null
         });
         router
-            .dispatch_channel("localPty", "setTerminalLayoutInfo", &json!([expected_layout]))
+            .dispatch_channel(
+                "localPty",
+                "setTerminalLayoutInfo",
+                &json!([expected_layout]),
+            )
             .await
             .expect("setTerminalLayoutInfo should succeed");
         let loaded_layout = router

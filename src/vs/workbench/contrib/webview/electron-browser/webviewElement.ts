@@ -89,6 +89,9 @@ export class ElectronWebviewElement extends WebviewElement {
 	}
 
 	protected override webviewContentEndpoint(iframeId: string): string {
+		if (process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun') {
+			return super.webviewContentEndpoint(iframeId);
+		}
 		return `${Schemas.vscodeWebview}://${iframeId}`;
 	}
 

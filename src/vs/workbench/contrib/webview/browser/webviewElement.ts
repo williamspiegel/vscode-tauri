@@ -402,7 +402,10 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
 		const element = document.createElement('iframe');
 		element.name = this.id;
 		element.className = `webview ${options.customClasses || ''}`;
-		element.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-pointer-lock', 'allow-downloads');
+		const sandboxRules = ['allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-pointer-lock', 'allow-downloads'];
+		// Set the full sandbox attribute explicitly (instead of mutating token-by-token)
+		// to avoid platform-specific DOMTokenList inconsistencies.
+		element.setAttribute('sandbox', sandboxRules.join(' '));
 
 		const allowRules = ['cross-origin-isolated', 'autoplay', 'local-network-access'];
 		if (!isFirefox) {
@@ -444,6 +447,10 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
 
 		if (options.purpose) {
 			params.purpose = options.purpose;
+		}
+
+		if (process.env['VSCODE_DESKTOP_RUNTIME'] === 'electrobun') {
+			params.tauriPathEndpoint = 'true';
 		}
 
 		COI.addSearchParam(params, true, true);

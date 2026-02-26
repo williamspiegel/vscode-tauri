@@ -62,6 +62,7 @@ const BOOT_CRITICAL_CHANNELS = [
   'menubar',
   'externalTerminal',
   'extensionhostdebugservice',
+  'webview',
   'extensionHostStarter',
   'extensions',
   'mcpManagement',
@@ -103,7 +104,6 @@ function fallbackUri(path: string): { scheme: string; authority: string; path: s
 }
 
 const DEFAULT_SYNC_STORE_PATH = '/.vscode-tauri/user-data/sync';
-let fallbackExtensionHostCounter = 0;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
@@ -461,17 +461,20 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
     new Map<string, ResultNormalizer>([
       [
         'createExtensionHost',
-        result =>
-          typeof asRecord(result).id === 'string'
-            ? result
-            : { id: `tauri-extension-host-${++fallbackExtensionHostCounter}` }
+        result => {
+          const objectResult = asRecord(result);
+          if (typeof objectResult.id === 'string' && objectResult.id.length > 0) {
+            return { id: objectResult.id };
+          }
+          return result;
+        }
       ],
       [
         'start',
         result => {
           const objectResult = asRecord(result);
           return {
-            pid: typeof objectResult.pid === 'number' ? objectResult.pid : -1
+            pid: typeof objectResult.pid === 'number' ? objectResult.pid : undefined
           };
         }
       ]
@@ -706,7 +709,59 @@ const EVENT_NORMALIZERS = new Map<string, Map<string, EventNormalizer>>([
   [
     'extensionHostStarter',
     new Map<string, EventNormalizer>([
-      ['onDynamicExit', payload => (payload && typeof payload === 'object' ? payload : { code: 0, signal: '' })]
+      ['onDynamicStdout', payload => (typeof payload === 'string' ? payload : '')],
+      ['onDynamicStderr', payload => (typeof payload === 'string' ? payload : '')],
+      ['onDynamicMessage', payload => payload],
+      [
+        'onDynamicMessagePortFrame',
+        payload => {
+          const objectPayload = asRecord(payload);
+          return (
+            toUint8Array(payload) ??
+            toUint8Array(objectPayload.frame) ??
+            toUint8Array(objectPayload.buffer) ??
+            toUint8Array(objectPayload.data) ??
+            decodeBase64ToUint8Array(objectPayload.base64) ??
+            new Uint8Array(0)
+          );
+        }
+      ],
+      [
+        'onDynamicExit',
+        payload => {
+          const event = asRecord(payload);
+          return {
+            code: typeof event.code === 'number' ? event.code : 0,
+            signal: typeof event.signal === 'string' ? event.signal : ''
+          };
+        }
+      ]
+    ])
+  ],
+  [
+    'extensionhostdebugservice',
+    new Map<string, EventNormalizer>([
+      ['reload', payload => (payload && typeof payload === 'object' ? payload : { sessionId: '' })],
+      ['close', payload => (payload && typeof payload === 'object' ? payload : { sessionId: '' })],
+      ['attach', payload => (payload && typeof payload === 'object' ? payload : { sessionId: '', port: 0 })],
+      ['terminate', payload => (payload && typeof payload === 'object' ? payload : { sessionId: '' })]
+    ])
+  ],
+  [
+    'webview',
+    new Map<string, EventNormalizer>([
+      [
+        'onFoundInFrame',
+        payload => {
+          const event = asRecord(payload);
+          return {
+            requestId: typeof event.requestId === 'number' ? event.requestId : 0,
+            activeMatchOrdinal: typeof event.activeMatchOrdinal === 'number' ? event.activeMatchOrdinal : 0,
+            matches: typeof event.matches === 'number' ? event.matches : 0,
+            finalUpdate: typeof event.finalUpdate === 'boolean' ? event.finalUpdate : true
+          };
+        }
+      ]
     ])
   ],
   [

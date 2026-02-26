@@ -791,6 +791,9 @@ function resolveWorkbenchBootstrapCandidates(
 ): string[] {
 	const searchParams = new URLSearchParams(window.location.search);
 	const bundleOverride = searchParams.get(WORKBENCH_BOOTSTRAP_QUERY_KEY);
+	const runtime =
+		(windowConfig.userEnv as Record<string, unknown> | undefined)
+			?.VSCODE_DESKTOP_RUNTIME;
 	const hostBootstrap = resolveHostWorkbenchBootstrapConfig(windowConfig);
 	const buildId = hostBootstrap.buildId ?? "unknown";
 	startupBootstrapBuildId = buildId;
@@ -811,6 +814,12 @@ function resolveWorkbenchBootstrapCandidates(
 	);
 	const dedupe = (values: string[]): string[] => [...new Set(values)];
 
+	if (runtime === "electrobun") {
+		// Always prefer the transpiled legacy bundle in Tauri runtime.
+		// This avoids stale out-vscode-min assets that can lag source patches.
+		return dedupe([...legacyCandidates, ...minCandidates]);
+	}
+
 	if (bundleOverride === "legacy") {
 		return dedupe([...legacyCandidates, ...minCandidates]);
 	}
@@ -824,12 +833,15 @@ function resolveWorkbenchBootstrapCandidates(
 		...legacyCandidates,
 		...minCandidates,
 	]);
-	const state = readBootstrapState();
-	if (state.buildId === buildId && typeof state.lastGoodPath === "string") {
-		candidates = moveCandidateToFront(candidates, state.lastGoodPath);
-	}
-	if (state.buildId === buildId && typeof state.failedPath === "string") {
-		candidates = moveCandidateToBack(candidates, state.failedPath);
+	const shouldApplyStateReordering = runtime !== "electrobun";
+	if (shouldApplyStateReordering) {
+		const state = readBootstrapState();
+		if (state.buildId === buildId && typeof state.lastGoodPath === "string") {
+			candidates = moveCandidateToFront(candidates, state.lastGoodPath);
+		}
+		if (state.buildId === buildId && typeof state.failedPath === "string") {
+			candidates = moveCandidateToBack(candidates, state.failedPath);
+		}
 	}
 	return candidates;
 }

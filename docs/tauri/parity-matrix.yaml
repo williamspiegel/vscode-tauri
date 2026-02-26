@@ -1,5 +1,5 @@
 version: 1
-updated_at: 2026-02-22
+updated_at: 2026-02-26
 platform_focus: macos
 protocol_version: 1.0.0
 
@@ -77,6 +77,18 @@ channel_adapters:
   keyboardLayout:
     status: in-progress
     backend: node-fallback
+  extensionHostStarter:
+    status: in-progress
+    backend: rust+node-bridge
+    notes: Real local extension host bridge with dynamic stdout/stderr/exit and message-port frame transport.
+  extensions:
+    status: in-progress
+    backend: rust
+    notes: Install/uninstall/getInstalled/metadata/download/manifest/zip/target-platform/control-manifest implemented in Rust.
+  extensionhostdebugservice:
+    status: in-progress
+    backend: rust
+    notes: reload/close/attach/terminate now broadcast to subscribed listeners.
 
 test_coverage:
   contract:
