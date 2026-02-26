@@ -202,6 +202,18 @@ suite('Tauri Desktop Sandbox', () => {
 		assert.strictEqual(mock.getResolveCount(), 1);
 	});
 
+	test('process platform falls back from os.type and arch falls back to x64', async () => {
+		createWindow('');
+		const mock = createHost({
+			os: { type: 'Windows_NT', arch: 'mips64' }
+		});
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		assert.strictEqual(vscode.process.platform, 'win32');
+		assert.strictEqual(vscode.process.arch, 'x64');
+	});
+
 	test('context.resolveConfiguration keeps zoom level in sync with webFrame setter', async () => {
 		createWindow('');
 		const mock = createHost({

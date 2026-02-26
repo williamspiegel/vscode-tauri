@@ -4895,6 +4895,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_filesystem_resource_and_path_validation_branches_are_stable() {
+        let repo_root = temp_repo_root("localfs-resource-path-validation");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let stat_missing_resource = router
+            .dispatch_channel("localFilesystem", "stat", &json!([]))
+            .await
+            .expect_err("stat without resource should fail");
+        assert!(stat_missing_resource.contains("localFilesystem.stat expected resource argument"));
+
+        let stat_invalid_resource = router
+            .dispatch_channel("localFilesystem", "stat", &json!([{}]))
+            .await
+            .expect_err("stat with invalid resource should fail");
+        assert!(stat_invalid_resource.contains("localFilesystem.stat expected file URI/path argument"));
+
+        let realpath_missing_resource = router
+            .dispatch_channel("localFilesystem", "realpath", &json!([]))
+            .await
+            .expect_err("realpath without resource should fail");
+        assert!(realpath_missing_resource
+            .contains("localFilesystem.realpath expected resource argument"));
+
+        let readdir_missing_resource = router
+            .dispatch_channel("localFilesystem", "readdir", &json!([]))
+            .await
+            .expect_err("readdir without resource should fail");
+        assert!(readdir_missing_resource.contains("localFilesystem.readdir expected resource argument"));
+
+        let readfile_missing_resource = router
+            .dispatch_channel("localFilesystem", "readFile", &json!([]))
+            .await
+            .expect_err("readFile without resource should fail");
+        assert!(readfile_missing_resource.contains("localFilesystem.readFile expected resource argument"));
+
+        let open_missing_resource = router
+            .dispatch_channel("localFilesystem", "open", &json!([]))
+            .await
+            .expect_err("open without resource should fail");
+        assert!(open_missing_resource.contains("localFilesystem.open expected resource argument"));
+
+        let writefile_missing_resource = router
+            .dispatch_channel("localFilesystem", "writeFile", &json!([]))
+            .await
+            .expect_err("writeFile without resource should fail");
+        assert!(writefile_missing_resource
+            .contains("localFilesystem.writeFile expected resource argument"));
+
+        let writefile_missing_content = router
+            .dispatch_channel(
+                "localFilesystem",
+                "writeFile",
+                &json!([{ "path": repo_root.join("missing-content.txt") }]),
+            )
+            .await
+            .expect_err("writeFile without content should fail");
+        assert!(writefile_missing_content
+            .contains("localFilesystem.writeFile expected content argument"));
+
+        let mkdir_missing_resource = router
+            .dispatch_channel("localFilesystem", "mkdir", &json!([]))
+            .await
+            .expect_err("mkdir without resource should fail");
+        assert!(mkdir_missing_resource.contains("localFilesystem.mkdir expected resource argument"));
+
+        let delete_missing_resource = router
+            .dispatch_channel("localFilesystem", "delete", &json!([]))
+            .await
+            .expect_err("delete without resource should fail");
+        assert!(delete_missing_resource.contains("localFilesystem.delete expected resource argument"));
+
+        let rename_missing_source = router
+            .dispatch_channel("localFilesystem", "rename", &json!([]))
+            .await
+            .expect_err("rename without source should fail");
+        assert!(rename_missing_source.contains("localFilesystem.rename expected source path"));
+
+        let rename_missing_target = router
+            .dispatch_channel(
+                "localFilesystem",
+                "rename",
+                &json!([{ "path": "/tmp/source.txt" }]),
+            )
+            .await
+            .expect_err("rename without target should fail");
+        assert!(rename_missing_target.contains("localFilesystem.rename expected target path"));
+
+        let copy_missing_source = router
+            .dispatch_channel("localFilesystem", "copy", &json!([]))
+            .await
+            .expect_err("copy without source should fail");
+        assert!(copy_missing_source.contains("localFilesystem.copy expected source path"));
+
+        let copy_missing_target = router
+            .dispatch_channel(
+                "localFilesystem",
+                "copy",
+                &json!([{ "path": "/tmp/source.txt" }]),
+            )
+            .await
+            .expect_err("copy without target should fail");
+        assert!(copy_missing_target.contains("localFilesystem.copy expected target path"));
+
+        let clone_missing_source = router
+            .dispatch_channel("localFilesystem", "cloneFile", &json!([]))
+            .await
+            .expect_err("cloneFile without source should fail");
+        assert!(clone_missing_source.contains("localFilesystem.cloneFile expected source path"));
+
+        let clone_missing_target = router
+            .dispatch_channel(
+                "localFilesystem",
+                "cloneFile",
+                &json!([{ "path": "/tmp/source.txt" }]),
+            )
+            .await
+            .expect_err("cloneFile without target should fail");
+        assert!(clone_missing_target.contains("localFilesystem.cloneFile expected target path"));
+
+        let close_missing_fd = router
+            .dispatch_channel("localFilesystem", "close", &json!([]))
+            .await
+            .expect_err("close without descriptor should fail");
+        assert!(close_missing_fd.contains("localFilesystem.close expected file descriptor argument"));
+
+        let read_missing_position = router
+            .dispatch_channel("localFilesystem", "read", &json!([1]))
+            .await
+            .expect_err("read without position should fail");
+        assert!(read_missing_position.contains("localFilesystem.read expected position argument"));
+
+        let read_missing_length = router
+            .dispatch_channel("localFilesystem", "read", &json!([1, 0]))
+            .await
+            .expect_err("read without length should fail");
+        assert!(read_missing_length.contains("localFilesystem.read expected length argument"));
+
+        let write_missing_position = router
+            .dispatch_channel("localFilesystem", "write", &json!([1]))
+            .await
+            .expect_err("write without position should fail");
+        assert!(write_missing_position.contains("localFilesystem.write expected position argument"));
+
+        let write_missing_data = router
+            .dispatch_channel("localFilesystem", "write", &json!([1, 0]))
+            .await
+            .expect_err("write without data should fail");
+        assert!(write_missing_data.contains("localFilesystem.write expected data argument"));
+    }
+
+    #[tokio::test]
+    async fn watcher_watch_rejects_invalid_request_payloads() {
+        let repo_root = temp_repo_root("watcher-invalid-requests");
+        let router = CapabilityRouter::new(repo_root);
+
+        let invalid_payload_error = router
+            .dispatch_channel("watcher", "watch", &json!([[1]]))
+            .await
+            .expect_err("watcher.watch with non-object request should fail");
+        assert!(invalid_payload_error.contains("watcher.watch received an invalid request payload"));
+
+        let missing_path_error = router
+            .dispatch_channel("watcher", "watch", &json!([[{}]]))
+            .await
+            .expect_err("watcher.watch with missing path should fail");
+        assert!(missing_path_error.contains("watcher.watch request missing string `path`"));
+    }
+
+    #[tokio::test]
     async fn storage_is_used_tracks_insert_delete_and_scope_updates() {
         let repo_root = temp_repo_root("storage-is-used");
         let router = CapabilityRouter::new(repo_root);
