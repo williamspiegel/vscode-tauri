@@ -125,6 +125,40 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(readFile.buffer.byteLength, 0);
 	});
 
+	test('call normalizes extensionHostStarter and userDataSyncAccount payloads', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'createExtensionHost') {
+					return { id: 'dynamic-host-1', ignored: true };
+				}
+				if (method === 'start') {
+					return { pid: 1234, extra: true };
+				}
+				if (method === '_getInitialData') {
+					return 'invalid';
+				}
+				if (method === 'updateAccount') {
+					return { changed: true };
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const extensionHost = await registry.call('extensionHostStarter', 'createExtensionHost', []);
+		assert.deepStrictEqual(extensionHost, { id: 'dynamic-host-1' });
+
+		const startResult = await registry.call('extensionHostStarter', 'start', []);
+		assert.deepStrictEqual(startResult, { pid: 1234 });
+
+		const syncAccountInitial = await registry.call('userDataSyncAccount', '_getInitialData', []);
+		assert.strictEqual(syncAccountInitial, undefined);
+
+		const updateAccountResult = await registry.call('userDataSyncAccount', 'updateAccount', []);
+		assert.strictEqual(updateAccountResult, undefined);
+	});
+
 	test('call maps localFilesystem host errors to FileSystemError names', async () => {
 		const host = {
 			desktopChannelCall: async () => {
@@ -187,6 +221,29 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(Array.isArray(result), true);
 		assert.deepStrictEqual(Array.from(result[0].buffer), [104, 105]);
 		assert.strictEqual(result[1], 2);
+	});
+
+	test('localFilesystem read normalizes Buffer-like data and preserves explicit bytesRead', async () => {
+		const host = {
+			desktopChannelCall: async () => [{ buffer: { type: 'Buffer', data: [1, 2, 3, 4] } }, 99],
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('localFilesystem', 'read', [{ path: '/tmp/test-buffer.bin' }]);
+		assert.deepStrictEqual(Array.from(result[0].buffer), [1, 2, 3, 4]);
+		assert.strictEqual(result[1], 99);
+	});
+
+	test('localFilesystem stat infers directory type from path hint', async () => {
+		const host = {
+			desktopChannelCall: async () => ({}),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const stat = await registry.call('localFilesystem', 'stat', [{ path: '/tmp/folder/' }]);
+		assert.strictEqual(stat.type, 2);
 	});
 
 	test('localFilesystem readFile maps decode failures to FileSystemError', async () => {
@@ -257,6 +314,34 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(seen[0].name, 'EntryNotFound (FileSystemError)');
 	});
 
+	test('localFilesystem readFileStream maps structured error payloads once', async () => {
+		/** @type {(payload: unknown) => void} */
+		let streamListener = () => undefined;
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				streamListener = onEvent;
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+		/** @type {unknown[]} */
+		const seen = [];
+
+		await registry.listen('localFilesystem', 'readFileStream', { path: '/tmp/error-stream.bin' }, payload => {
+			seen.push(payload);
+		});
+		streamListener({ message: 'stream failed', name: 'StreamFailure', code: 'EIO' });
+		streamListener({ base64: 'aGk=' });
+
+		assert.strictEqual(seen.length, 1);
+		assert.deepStrictEqual(seen[0], {
+			message: 'stream failed',
+			name: 'StreamFailure',
+			code: 'EIO'
+		});
+	});
+
 	test('listen normalizes watcher and extension host events', async () => {
 		/** @type {((payload: unknown) => void)[]} */
 		const listeners = [];
@@ -299,5 +384,34 @@ suite('Tauri Desktop Channels', () => {
 		});
 		listeners[3]({ signal: 9 });
 		assert.deepStrictEqual(dynamicExit, { code: 0, signal: '' });
+
+		let foundInFrame;
+		await registry.listen('webview', 'onFoundInFrame', undefined, payload => {
+			foundInFrame = payload;
+		});
+		listeners[4]({ requestId: 'bad', matches: 5 });
+		assert.deepStrictEqual(foundInFrame, {
+			requestId: 0,
+			activeMatchOrdinal: 0,
+			matches: 5,
+			finalUpdate: true
+		});
+	});
+
+	test('listen returns noop when host listener registration fails', async () => {
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async () => {
+				throw new Error('listener unavailable');
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+		let observed = false;
+		const stop = await registry.listen('watcher', 'onDidError', undefined, () => {
+			observed = true;
+		});
+
+		await stop();
+		assert.strictEqual(observed, false);
 	});
 });

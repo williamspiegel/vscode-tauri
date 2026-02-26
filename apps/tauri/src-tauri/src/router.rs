@@ -4600,6 +4600,479 @@ mod tests {
         assert!(error.contains("watcher.watch expected requests array argument"));
     }
 
+    #[test]
+    fn watcher_changes_from_filesystem_event_without_correlation_omits_cid() {
+        let repo_root = temp_repo_root("watcher-no-correlation");
+        let router = CapabilityRouter::new(repo_root);
+
+        {
+            let mut state = router
+                .watcher_state
+                .lock()
+                .expect("watcher state should lock");
+            state.watch_requests.insert(
+                "watcher:11".to_string(),
+                WatcherWatchRequestState {
+                    correlation_id: None,
+                },
+            );
+        }
+
+        let payload = router
+            .watcher_changes_from_filesystem_event("watcher:11", "/tmp/demo.txt", "deleted")
+            .expect("watch payload should be present");
+        assert_eq!(payload[0]["type"], json!(2));
+        assert_eq!(payload[0].get("cId"), None);
+    }
+
+    #[tokio::test]
+    async fn watcher_stop_clears_registered_requests() {
+        let repo_root = temp_repo_root("watcher-stop");
+        let router = CapabilityRouter::new(repo_root);
+
+        {
+            let mut state = router
+                .watcher_state
+                .lock()
+                .expect("watcher state should lock");
+            state.watch_requests.insert(
+                "watcher:1".to_string(),
+                WatcherWatchRequestState {
+                    correlation_id: Some(1),
+                },
+            );
+        }
+
+        router
+            .dispatch_channel("watcher", "stop", &json!([]))
+            .await
+            .expect("watcher.stop should succeed");
+
+        let state = router
+            .watcher_state
+            .lock()
+            .expect("watcher state should lock");
+        assert!(state.watch_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_stat_realpath_and_readdir_have_expected_shapes() {
+        let repo_root = temp_repo_root("localfs-shapes");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let dir_path = repo_root.join("folder");
+        let file_path = dir_path.join("note.txt");
+        fs::create_dir_all(&dir_path).expect("dir should be created");
+        fs::write(&file_path, b"hello").expect("file should be written");
+
+        let dir_stat = router
+            .dispatch_channel(
+                "localFilesystem",
+                "stat",
+                &json!([{ "path": dir_path }]),
+            )
+            .await
+            .expect("dir stat should succeed");
+        assert_eq!(dir_stat["type"], json!(2));
+
+        let file_stat = router
+            .dispatch_channel(
+                "localFilesystem",
+                "stat",
+                &json!([{ "path": file_path.clone() }]),
+            )
+            .await
+            .expect("file stat should succeed");
+        assert_eq!(file_stat["type"], json!(1));
+        assert_eq!(file_stat["size"], json!(5));
+
+        let realpath = router
+            .dispatch_channel(
+                "localFilesystem",
+                "realpath",
+                &json!([{ "path": file_path.clone() }]),
+            )
+            .await
+            .expect("realpath should succeed");
+        let resolved_path = extract_fs_path(&realpath).expect("realpath should return URI/path");
+        assert_eq!(
+            resolved_path,
+            fs::canonicalize(file_path).expect("canonicalize should succeed")
+        );
+
+        let readdir = router
+            .dispatch_channel(
+                "localFilesystem",
+                "readdir",
+                &json!([{ "path": dir_path }]),
+            )
+            .await
+            .expect("readdir should succeed")
+            .as_array()
+            .cloned()
+            .expect("readdir should return array");
+        assert!(readdir.contains(&json!(["note.txt", 1])));
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_mkdir_writefile_rename_copy_clone_and_delete_roundtrip() {
+        let repo_root = temp_repo_root("localfs-roundtrip");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let nested_dir = repo_root.join("nested/a/b");
+        let source_file = nested_dir.join("source.bin");
+        let renamed_file = nested_dir.join("renamed.bin");
+        let copied_file = nested_dir.join("copied.bin");
+        let cloned_file = nested_dir.join("cloned.bin");
+
+        router
+            .dispatch_channel("localFilesystem", "mkdir", &json!([{ "path": nested_dir }]))
+            .await
+            .expect("mkdir should succeed");
+
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "writeFile",
+                &json!([{ "path": source_file.clone() }, [1, 2, 3]]),
+            )
+            .await
+            .expect("writeFile should succeed");
+
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "rename",
+                &json!([
+                    { "path": source_file.clone() },
+                    { "path": renamed_file.clone() },
+                    { "overwrite": false }
+                ]),
+            )
+            .await
+            .expect("rename should succeed");
+
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "copy",
+                &json!([
+                    { "path": renamed_file.clone() },
+                    { "path": copied_file.clone() },
+                    { "overwrite": true }
+                ]),
+            )
+            .await
+            .expect("copy should succeed");
+
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "cloneFile",
+                &json!([
+                    { "path": copied_file.clone() },
+                    { "path": cloned_file.clone() }
+                ]),
+            )
+            .await
+            .expect("cloneFile should succeed");
+
+        assert_eq!(fs::read(renamed_file).expect("renamed file should exist"), vec![1, 2, 3]);
+        assert_eq!(fs::read(copied_file).expect("copied file should exist"), vec![1, 2, 3]);
+        assert_eq!(fs::read(cloned_file.clone()).expect("cloned file should exist"), vec![1, 2, 3]);
+
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "delete",
+                &json!([{ "path": cloned_file }, { "recursive": false }]),
+            )
+            .await
+            .expect("delete file should succeed");
+        router
+            .dispatch_channel(
+                "localFilesystem",
+                "delete",
+                &json!([{ "path": repo_root.join("nested") }, { "recursive": true }]),
+            )
+            .await
+            .expect("delete directory should succeed");
+        assert!(!repo_root.join("nested").exists());
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_write_respects_offset_and_length_slice() {
+        let repo_root = temp_repo_root("localfs-slice");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let file_path = repo_root.join("slice.bin");
+
+        let fd = router
+            .dispatch_channel(
+                "localFilesystem",
+                "open",
+                &json!([{ "path": file_path.clone() }, { "create": true }]),
+            )
+            .await
+            .expect("open(create) should succeed")
+            .as_u64()
+            .expect("open should return numeric file descriptor");
+
+        let bytes_written = router
+            .dispatch_channel(
+                "localFilesystem",
+                "write",
+                &json!([fd, 0, [10, 20, 30, 40], 1, 2]),
+            )
+            .await
+            .expect("write should succeed")
+            .as_u64()
+            .expect("write should return number");
+        assert_eq!(bytes_written, 2);
+
+        router
+            .dispatch_channel("localFilesystem", "close", &json!([fd]))
+            .await
+            .expect("close should succeed");
+        assert_eq!(fs::read(file_path).expect("file should exist"), vec![20, 30]);
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_read_and_write_validate_required_args() {
+        let repo_root = temp_repo_root("localfs-arg-validation");
+        let router = CapabilityRouter::new(repo_root);
+
+        let read_error = router
+            .dispatch_channel("localFilesystem", "read", &json!([]))
+            .await
+            .expect_err("read without args should fail");
+        assert!(read_error.contains("localFilesystem.read expected file descriptor argument"));
+
+        let write_error = router
+            .dispatch_channel("localFilesystem", "write", &json!([1, 0, { "bad": true }]))
+            .await
+            .expect_err("write with invalid data should fail");
+        assert!(write_error.contains("localFilesystem.write expected byte content"));
+    }
+
+    #[tokio::test]
+    async fn local_filesystem_watch_and_unwatch_validate_args() {
+        let repo_root = temp_repo_root("localfs-watch-args");
+        let router = CapabilityRouter::new(repo_root);
+
+        let watch_error = router
+            .dispatch_channel("localFilesystem", "watch", &json!([]))
+            .await
+            .expect_err("watch without session id should fail");
+        assert!(watch_error.contains("localFilesystem.watch expected sessionId argument"));
+
+        let unwatch_error = router
+            .dispatch_channel("localFilesystem", "unwatch", &json!([]))
+            .await
+            .expect_err("unwatch without session id should fail");
+        assert!(unwatch_error.contains("localFilesystem.unwatch expected sessionId argument"));
+    }
+
+    #[tokio::test]
+    async fn storage_is_used_tracks_insert_delete_and_scope_updates() {
+        let repo_root = temp_repo_root("storage-is-used");
+        let router = CapabilityRouter::new(repo_root);
+
+        router
+            .dispatch_channel(
+                "storage",
+                "updateItems",
+                &json!([{
+                    "insert": [["alpha", "1"]]
+                }]),
+            )
+            .await
+            .expect("storage insert should succeed");
+        let is_used_alpha = router
+            .dispatch_channel("storage", "isUsed", &json!([{ "payload": "alpha" }]))
+            .await
+            .expect("storage isUsed should succeed");
+        assert_eq!(is_used_alpha, json!(true));
+
+        router
+            .dispatch_channel(
+                "storage",
+                "updateItems",
+                &json!([{
+                    "delete": ["alpha"]
+                }]),
+            )
+            .await
+            .expect("storage delete should succeed");
+        let is_used_after_delete = router
+            .dispatch_channel("storage", "isUsed", &json!([{ "payload": "alpha" }]))
+            .await
+            .expect("storage isUsed should succeed");
+        assert_eq!(is_used_after_delete, json!(false));
+
+        router
+            .dispatch_channel(
+                "storage",
+                "updateItems",
+                &json!([{
+                    "workspace": { "id": "workspace-storage" },
+                    "insert": [["beta", "2"]]
+                }]),
+            )
+            .await
+            .expect("workspace storage insert should succeed");
+        let is_used_workspace = router
+            .dispatch_channel("storage", "isUsed", &json!([{ "payload": "beta" }]))
+            .await
+            .expect("storage isUsed should succeed");
+        assert_eq!(is_used_workspace, json!(true));
+    }
+
+    #[tokio::test]
+    async fn extension_host_starter_returns_stable_shapes() {
+        let repo_root = temp_repo_root("extension-host-starter");
+        let router = CapabilityRouter::new(repo_root);
+
+        let host_a = router
+            .dispatch_channel("extensionHostStarter", "createExtensionHost", &json!([]))
+            .await
+            .expect("createExtensionHost should succeed");
+        let host_b = router
+            .dispatch_channel("extensionHostStarter", "createExtensionHost", &json!([]))
+            .await
+            .expect("createExtensionHost should succeed");
+        let id_a = host_a
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("host id should be present");
+        let id_b = host_b
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("host id should be present");
+        assert!(id_a.starts_with("tauri-extension-host-"));
+        assert!(id_b.starts_with("tauri-extension-host-"));
+        assert_ne!(id_a, id_b);
+
+        let start = router
+            .dispatch_channel("extensionHostStarter", "start", &json!([]))
+            .await
+            .expect("start should succeed");
+        assert_eq!(start["pid"], json!(-1));
+
+        let inspect = router
+            .dispatch_channel("extensionHostStarter", "enableInspectPort", &json!([]))
+            .await
+            .expect("enableInspectPort should succeed");
+        assert_eq!(inspect, json!(false));
+
+        let kill = router
+            .dispatch_channel("extensionHostStarter", "kill", &json!([]))
+            .await
+            .expect("kill should succeed");
+        assert_eq!(kill, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn user_data_sync_store_management_has_stable_default_shape() {
+        let repo_root = temp_repo_root("sync-store");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let result = router
+            .dispatch_channel(
+                "userDataSyncStoreManagement",
+                "getPreviousUserDataSyncStore",
+                &json!([]),
+            )
+            .await
+            .expect("getPreviousUserDataSyncStore should succeed");
+        assert_eq!(result["type"], json!("stable"));
+        assert_eq!(result["canSwitch"], json!(false));
+        assert_eq!(result["authenticationProviders"], json!({}));
+        assert_eq!(result["url"]["scheme"], json!("file"));
+        let path = result
+            .get("url")
+            .and_then(extract_fs_path)
+            .expect("url should contain file path");
+        assert_eq!(path, repo_root.join(".vscode-tauri/user-data/sync"));
+    }
+
+    #[tokio::test]
+    async fn user_data_profiles_update_profile_applies_name_fields() {
+        let repo_root = temp_repo_root("profiles-update");
+        let router = CapabilityRouter::new(repo_root);
+
+        let created = router
+            .dispatch_channel(
+                "userDataProfiles",
+                "createProfile",
+                &json!(["dev", "Dev", { "transient": false }]),
+            )
+            .await
+            .expect("createProfile should succeed");
+        assert_eq!(created["id"], json!("dev"));
+
+        let updated = router
+            .dispatch_channel(
+                "userDataProfiles",
+                "updateProfile",
+                &json!([
+                    { "id": "dev" },
+                    { "name": "Developer", "shortName": "DV" }
+                ]),
+            )
+            .await
+            .expect("updateProfile should succeed");
+        assert_eq!(updated["name"], json!("Developer"));
+        assert_eq!(updated["shortName"], json!("DV"));
+    }
+
+    #[tokio::test]
+    async fn workspaces_delete_untitled_workspace_removes_workspace_file() {
+        let repo_root = temp_repo_root("workspace-delete-untitled");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let workspace = router
+            .dispatch_channel("workspaces", "createUntitledWorkspace", &json!([]))
+            .await
+            .expect("createUntitledWorkspace should succeed");
+        let config_path = workspace
+            .get("configPath")
+            .and_then(extract_fs_path)
+            .expect("workspace should include configPath");
+        assert!(config_path.exists());
+
+        router
+            .dispatch_channel(
+                "workspaces",
+                "deleteUntitledWorkspace",
+                &json!([{ "path": config_path.clone() }]),
+            )
+            .await
+            .expect("deleteUntitledWorkspace should succeed");
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn webview_and_url_channels_return_stable_fallback_shapes() {
+        let repo_root = temp_repo_root("webview-url");
+        let router = CapabilityRouter::new(repo_root);
+
+        let find_result = router
+            .dispatch_channel("webview", "findInFrame", &json!([]))
+            .await
+            .expect("webview.findInFrame should succeed");
+        assert_eq!(find_result, Value::Null);
+
+        let stop_result = router
+            .dispatch_channel("webview", "stopFindInFrame", &json!([]))
+            .await
+            .expect("webview.stopFindInFrame should succeed");
+        assert_eq!(stop_result, Value::Null);
+
+        let missing_url_result = router
+            .dispatch_channel("url", "open", &json!([]))
+            .await
+            .expect("url.open without arg should succeed");
+        assert_eq!(missing_url_result, json!(false));
+    }
+
     #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
