@@ -336,6 +336,38 @@ function extractPickedPath(result: unknown): string | undefined {
   return undefined;
 }
 
+function normalizeNativeHostMessageBoxResult(result: unknown): { response: number; checkboxChecked: boolean } {
+  const payload = asRecord(result);
+  return {
+    response: typeof payload.response === 'number' && Number.isFinite(payload.response) ? payload.response : 0,
+    checkboxChecked: payload.checkboxChecked === true
+  };
+}
+
+function normalizeNativeHostOpenDialogResult(result: unknown): { canceled: boolean; filePaths: string[] } {
+  const payload = asRecord(result);
+  const filePaths = asArray<string>(payload.filePaths).filter((value): value is string => typeof value === 'string');
+  const filePath = typeof payload.filePath === 'string' ? payload.filePath : undefined;
+  const normalizedFilePaths = filePaths.length > 0 ? filePaths : filePath ? [filePath] : [];
+  const canceled = payload.canceled === true || normalizedFilePaths.length === 0;
+  return {
+    canceled,
+    filePaths: canceled ? [] : normalizedFilePaths
+  };
+}
+
+function normalizeNativeHostSaveDialogResult(result: unknown): { canceled: boolean; filePath: string | undefined } {
+  const payload = asRecord(result);
+  const filePath =
+    (typeof payload.filePath === 'string' ? payload.filePath : undefined) ??
+    (asArray<string>(payload.filePaths).find((value): value is string => typeof value === 'string') ?? undefined);
+  const canceled = payload.canceled === true || typeof filePath !== 'string';
+  return {
+    canceled,
+    filePath: canceled ? undefined : filePath
+  };
+}
+
 async function handleNativeHostPickAndOpen(host: HostClient, method: string, args: unknown[]): Promise<null> {
   const options = asRecord(args[0]);
   const forceNewWindow = options.forceNewWindow === true;
@@ -383,6 +415,14 @@ async function handleNativeHostPickAndOpen(host: HostClient, method: string, arg
 }
 
 const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
+  [
+    'nativeHost',
+    new Map<string, ResultNormalizer>([
+      ['showMessageBox', result => normalizeNativeHostMessageBoxResult(result)],
+      ['showOpenDialog', result => normalizeNativeHostOpenDialogResult(result)],
+      ['showSaveDialog', result => normalizeNativeHostSaveDialogResult(result)]
+    ])
+  ],
   [
     'extensions',
     new Map<string, ResultNormalizer>([

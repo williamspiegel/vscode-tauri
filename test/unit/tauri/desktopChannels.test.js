@@ -343,6 +343,80 @@ suite('Tauri Desktop Channels', () => {
 		assert.match(global.window.location.href, /\?folder=%2Ftmp%2Fproject-folder$/);
 	});
 
+	test('call normalizes direct nativeHost dialog result shapes', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'showMessageBox') {
+					return { response: 'invalid', checkboxChecked: 'bad' };
+				}
+				if (method === 'showOpenDialog') {
+					return { filePath: '/tmp/picked-folder' };
+				}
+				if (method === 'showSaveDialog') {
+					return { filePaths: ['/tmp/saved-file.txt'] };
+				}
+				return {};
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const message = await registry.call('nativeHost', 'showMessageBox', [{}]);
+		assert.deepStrictEqual(message, {
+			response: 0,
+			checkboxChecked: false
+		});
+
+		const openDialog = await registry.call('nativeHost', 'showOpenDialog', [{}]);
+		assert.deepStrictEqual(openDialog, {
+			canceled: false,
+			filePaths: ['/tmp/picked-folder']
+		});
+
+		const saveDialog = await registry.call('nativeHost', 'showSaveDialog', [{}]);
+		assert.deepStrictEqual(saveDialog, {
+			canceled: false,
+			filePath: '/tmp/saved-file.txt'
+		});
+	});
+
+	test('call normalizes nativeHost dialog cancellation and null responses', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'showMessageBox') {
+					return null;
+				}
+				if (method === 'showOpenDialog') {
+					return { canceled: true, filePaths: ['/tmp/ignored'] };
+				}
+				if (method === 'showSaveDialog') {
+					return {};
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const message = await registry.call('nativeHost', 'showMessageBox', []);
+		assert.deepStrictEqual(message, {
+			response: 0,
+			checkboxChecked: false
+		});
+
+		const openDialog = await registry.call('nativeHost', 'showOpenDialog', []);
+		assert.deepStrictEqual(openDialog, {
+			canceled: true,
+			filePaths: []
+		});
+
+		const saveDialog = await registry.call('nativeHost', 'showSaveDialog', []);
+		assert.deepStrictEqual(saveDialog, {
+			canceled: true,
+			filePath: undefined
+		});
+	});
+
 	test('call maps localFilesystem host errors to FileSystemError names', async () => {
 		const host = {
 			desktopChannelCall: async () => {
