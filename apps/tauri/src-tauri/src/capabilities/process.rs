@@ -519,3 +519,39 @@ fn epoch_millis() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_env_returns_payload() {
+        let capability = RustPrimaryProcessCapability::new();
+        let result = capability
+            .invoke("process.env", &json!({}))
+            .await
+            .expect("process.env should succeed")
+            .expect("process.env should return payload");
+        assert!(result.get("env").is_some());
+    }
+
+    #[tokio::test]
+    async fn process_spawn_requires_command() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke("process.spawn", &json!({}))
+            .await
+            .expect_err("process.spawn without command should fail");
+        assert!(error.contains("missing string param 'command'"));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryProcessCapability::new();
+        let result = capability
+            .invoke("process.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not fail");
+        assert!(result.is_none());
+    }
+}

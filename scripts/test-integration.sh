@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -e
 
+TAURI_MODE=0
+PASSTHROUGH_ARGS=()
+for arg in "$@"; do
+	if [[ "$arg" == "--tauri" ]]; then
+		TAURI_MODE=1
+	else
+		PASSTHROUGH_ARGS+=("$arg")
+	fi
+done
+
+if [[ "$TAURI_MODE" == "1" ]]; then
+	exec ./scripts/test-tauri-integration.sh "${PASSTHROUGH_ARGS[@]}"
+fi
+
+set -- "${PASSTHROUGH_ARGS[@]}"
+
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	realpath() { [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"; }
 	ROOT=$(dirname $(dirname $(realpath "$0")))

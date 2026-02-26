@@ -1,0 +1,31 @@
+name: tauri-parity-macos
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - vscode-tauri
+
+permissions: {}
+
+jobs:
+  tauri-parity:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
+      - name: Run Tauri parity suite
+        run: npm run tauri:test-all

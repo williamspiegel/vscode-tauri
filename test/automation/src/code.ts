@@ -11,6 +11,7 @@ import { Logger, measureAndLog } from './logger';
 import { launch as launchPlaywrightBrowser } from './playwrightBrowser';
 import { PlaywrightDriver } from './playwrightDriver';
 import { launch as launchPlaywrightElectron } from './playwrightElectron';
+import { launch as launchPlaywrightTauri } from './playwrightTauri';
 import { teardown } from './processes';
 import { Quality } from './application';
 
@@ -30,6 +31,7 @@ export interface LaunchOptions {
 	readonly extraArgs?: string[];
 	readonly remote?: boolean;
 	readonly web?: boolean;
+	readonly tauri?: boolean;
 	readonly tracing?: boolean;
 	snapshots?: boolean;
 	readonly headless?: boolean;
@@ -45,7 +47,7 @@ interface ICodeInstance {
 
 const instances = new Set<ICodeInstance>();
 
-function registerInstance(process: cp.ChildProcess, logger: Logger, type: 'electron' | 'server'): { safeToKill: Promise<void> } {
+function registerInstance(process: cp.ChildProcess, logger: Logger, type: 'electron' | 'server' | 'tauri'): { safeToKill: Promise<void> } {
 	const instance = { kill: () => teardown(process, logger) };
 	instances.add(instance);
 
@@ -54,6 +56,9 @@ function registerInstance(process: cp.ChildProcess, logger: Logger, type: 'elect
 			const output = data.toString();
 			if (output.indexOf('calling app.quit()') >= 0 && type === 'electron') {
 				setTimeout(() => resolve(), 500 /* give Electron some time to actually terminate fully */);
+			}
+			if (output.indexOf('tauri process exited') >= 0 && type === 'tauri') {
+				resolve();
 			}
 			logger.log(`[${type}] stdout: ${output}`);
 		});
@@ -89,6 +94,14 @@ process.on('SIGTERM', () => teardownAll(128 + 15)); // same as above
 export async function launch(options: LaunchOptions): Promise<Code> {
 	if (stopped) {
 		throw new Error('Smoke test process has terminated, refusing to spawn Code');
+	}
+
+	// Tauri smoke/integration tests (playwright browser + tauri host process)
+	if (options.tauri) {
+		const { tauriProcess, driver } = await measureAndLog(() => launchPlaywrightTauri(options), 'launch playwright (tauri)', options.logger);
+		registerInstance(tauriProcess, options.logger, 'tauri');
+
+		return new Code(driver, options.logger, tauriProcess, undefined, options.quality, options.version);
 	}
 
 	// Browser smoke tests

@@ -251,3 +251,28 @@ fn spawn_terminal_data_pump<R>(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn create_requires_shell() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke("terminal.create", &json!({}))
+            .await
+            .expect_err("missing shell should return an error");
+        assert!(error.contains("missing string param 'shell'"));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let result = capability
+            .invoke("terminal.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not fail");
+        assert!(result.is_none());
+    }
+}

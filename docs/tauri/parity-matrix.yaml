@@ -98,11 +98,14 @@ test_coverage:
     status: implemented
     artifact: build/tauri/smoke.mjs
   integration:
-    status: planned
-    artifact: scripts/test-web-integration.sh
+    status: in-progress
+    artifact: scripts/test-tauri-integration.sh
   tauri_e2e:
-    status: planned
-    artifact: build/tauri
+    status: in-progress
+    artifact: scripts/test-tauri-smoke.sh
+  tauri_unit:
+    status: implemented
+    artifact: scripts/test-tauri-unit.sh
   fallback_telemetry_report:
     status: implemented
     artifact: build/tauri/fallback-telemetry-report.mjs

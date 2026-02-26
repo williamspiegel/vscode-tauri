@@ -1,4 +1,4 @@
-import protocol from '../../protocol/host-v1.json';
+import protocol from '../../protocol/host-v1.json' with { type: 'json' };
 
 export interface JsonRpcRequest {
   jsonrpc: '2.0';

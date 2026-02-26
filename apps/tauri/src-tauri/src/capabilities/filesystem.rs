@@ -665,3 +665,89 @@ fn snapshot_directory(path: &Path, recursive: bool) -> Result<u64, String> {
 
     Ok(hasher.finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file_path(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("vscode-tauri-filesystem-{prefix}-{nonce}.txt"))
+    }
+
+    #[tokio::test]
+    async fn read_write_and_stat_roundtrip() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("roundtrip");
+
+        capability
+            .invoke(
+                "filesystem.writeFile",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "contents": "hello from tauri"
+                }),
+            )
+            .await
+            .expect("writeFile should succeed");
+
+        let read_result = capability
+            .invoke(
+                "filesystem.readFile",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect("readFile should succeed")
+            .expect("readFile should return payload");
+        assert_eq!(read_result["contents"], json!("hello from tauri"));
+
+        let stat_result = capability
+            .invoke(
+                "filesystem.stat",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect("stat should succeed")
+            .expect("stat should return payload");
+        assert_eq!(stat_result["isFile"], json!(true));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn watch_requires_app_handle_and_unwatch_unknown_id_is_stable() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("watch");
+
+        let watch_result = capability
+            .invoke(
+                "filesystem.watch",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect("watch should not error without app handle");
+        assert!(watch_result.is_none());
+
+        let unwatch_result = capability
+            .invoke(
+                "filesystem.unwatch",
+                &json!({
+                    "watchId": "unknown-watch-id"
+                }),
+            )
+            .await
+            .expect("unwatch should succeed")
+            .expect("unwatch should return payload");
+        assert_eq!(unwatch_result["stopped"], json!(false));
+    }
+}

@@ -44,6 +44,7 @@ jobs:
           node build/tauri/contract-test.mjs
           node build/tauri/smoke.mjs
           node build/tauri/startup-bundle-test.mjs
+          node test/unit/tauri/index.js
 
       - name: Run Tauri Rust Unit Tests (if merge clean)
         if: steps.merge.outputs.merge_status == '0'

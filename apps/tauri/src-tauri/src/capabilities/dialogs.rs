@@ -272,3 +272,43 @@ fn run_osascript(lines: &[String]) -> Result<String, AppleScriptInvocationError>
 fn escape_apple_script_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryDialogsCapability;
+        let result = capability
+            .invoke("dialogs.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn show_message_has_stable_shape() {
+        let capability = RustPrimaryDialogsCapability;
+
+        #[cfg(target_os = "macos")]
+        {
+            let error = capability
+                .invoke("dialogs.showMessage", &json!({}))
+                .await
+                .expect_err("macOS path requires explicit message");
+            assert!(error.contains("missing string param 'message'"));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let result = capability
+                .invoke("dialogs.showMessage", &json!({}))
+                .await
+                .expect("non-macOS path should not error")
+                .expect("non-macOS path should return a payload");
+            assert_eq!(result["selectedIndex"], json!(0));
+            assert_eq!(result["handledBy"], json!("rust-primary-non-macos"));
+        }
+    }
+}

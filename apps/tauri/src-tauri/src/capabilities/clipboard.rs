@@ -106,3 +106,28 @@ fn write_clipboard_text(text: &str) -> Result<(), String> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryClipboardCapability;
+        let result = capability
+            .invoke("clipboard.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_text_requires_text_param() {
+        let capability = RustPrimaryClipboardCapability;
+        let error = capability
+            .invoke("clipboard.writeText", &json!({}))
+            .await
+            .expect_err("missing text param should return an error");
+        assert!(error.contains("missing string param 'text'"));
+    }
+}

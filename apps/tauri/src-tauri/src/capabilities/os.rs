@@ -109,3 +109,41 @@ fn show_item_in_folder(path: &Path) -> Result<(), String> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn system_info_returns_expected_shape() {
+        let capability = RustPrimaryOsCapability;
+        let result = capability
+            .invoke("os.systemInfo", &json!({}))
+            .await
+            .expect("systemInfo should not fail")
+            .expect("systemInfo should return payload");
+        assert!(result.get("os").is_some());
+        assert!(result.get("arch").is_some());
+        assert!(result.get("family").is_some());
+    }
+
+    #[tokio::test]
+    async fn open_external_requires_url_param() {
+        let capability = RustPrimaryOsCapability;
+        let error = capability
+            .invoke("os.openExternal", &json!({}))
+            .await
+            .expect_err("missing url should return an error");
+        assert!(error.contains("missing string param 'url'"));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryOsCapability;
+        let result = capability
+            .invoke("os.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not error");
+        assert!(result.is_none());
+    }
+}

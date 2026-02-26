@@ -195,3 +195,28 @@ fn read_macos_idle_time_nanos() -> Result<u64, String> {
 
     Err("failed to parse HIDIdleTime from ioreg output".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryPowerCapability::new();
+        let result = capability
+            .invoke("power.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_state_requires_threshold() {
+        let capability = RustPrimaryPowerCapability::new();
+        let error = capability
+            .invoke("power.idleState", &json!({}))
+            .await
+            .expect_err("missing threshold should return an error");
+        assert!(error.contains("missing numeric param 'thresholdSeconds'"));
+    }
+}

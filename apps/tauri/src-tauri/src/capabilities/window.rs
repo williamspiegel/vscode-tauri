@@ -138,3 +138,28 @@ fn parse_required_bool(params: &Value, key: &str) -> Result<bool, String> {
         .and_then(Value::as_bool)
         .ok_or_else(|| format!("missing boolean param '{key}'"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn set_fullscreen_requires_enabled_param() {
+        let capability = RustPrimaryWindowCapability;
+        let error = capability
+            .invoke("window.setFullscreen", &json!({}))
+            .await
+            .expect_err("missing enabled should return an error");
+        assert!(error.contains("missing boolean param 'enabled'"));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryWindowCapability;
+        let result = capability
+            .invoke("window.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not fail");
+        assert!(result.is_none());
+    }
+}

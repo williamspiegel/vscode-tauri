@@ -46,6 +46,7 @@ const opts = minimist(args, {
 		'verbose',
 		'remote',
 		'web',
+		'tauri',
 		'headless',
 		'tracing'
 	],
@@ -57,6 +58,7 @@ const opts = minimist(args, {
 	remote?: boolean;
 	headless?: boolean;
 	web?: boolean;
+	tauri?: boolean;
 	tracing?: boolean;
 	build?: string;
 	'stable-build'?: string;
@@ -70,6 +72,8 @@ const logsRootPath = (() => {
 	let logsName: string;
 	if (opts.web) {
 		logsName = 'smoke-tests-browser';
+	} else if (opts.tauri) {
+		logsName = 'smoke-tests-tauri';
 	} else if (opts.remote) {
 		logsName = 'smoke-tests-remote';
 	} else {
@@ -85,6 +89,8 @@ const crashesRootPath = (() => {
 	let crashesName: string;
 	if (opts.web) {
 		crashesName = 'smoke-tests-browser';
+	} else if (opts.tauri) {
+		crashesName = 'smoke-tests-tauri';
 	} else if (opts.remote) {
 		crashesName = 'smoke-tests-remote';
 	} else {
@@ -188,7 +194,7 @@ function parseQuality(): Quality {
 //
 // #### Electron Smoke Tests ####
 //
-if (!opts.web) {
+if (!opts.web && !opts.tauri) {
 	let testCodePath = opts.build;
 	let electronPath: string | undefined;
 
@@ -214,6 +220,9 @@ if (!opts.web) {
 	} else {
 		logger.log(`Running desktop smoke tests against ${electronPath}`);
 	}
+} else if (opts.tauri) {
+	quality = parseQuality();
+	logger.log('Running desktop smoke tests against Tauri host runtime');
 }
 
 //
@@ -345,7 +354,7 @@ async function setup(): Promise<void> {
 	logger.log('Test data path:', testDataPath);
 	logger.log('Preparing smoketest setup...');
 
-	if (!opts.web && !opts.remote && opts.build) {
+	if (!opts.web && !opts.remote && !opts.tauri && opts.build) {
 		// only enabled when running with --build and not in web or remote
 		await measureAndLog(() => ensureStableCode(), 'ensureStableCode', logger);
 	}
@@ -382,6 +391,7 @@ before(async function () {
 		verbose: opts.verbose,
 		remote: opts.remote,
 		web: opts.web,
+		tauri: opts.tauri,
 		tracing: opts.tracing || !!process.env.BUILD_ARTIFACTSTAGINGDIRECTORY || !!process.env.GITHUB_WORKSPACE,
 		headless: opts.headless,
 		browser: opts.browser,
@@ -403,7 +413,7 @@ after(async function () {
 	}
 });
 
-describe(`VSCode Smoke Tests (${opts.web ? 'Web' : 'Electron'})`, () => {
+describe(`VSCode Smoke Tests (${opts.web ? 'Web' : opts.tauri ? 'Tauri' : 'Electron'})`, () => {
 	if (!opts.web) { setupDataLossTests(() => { return { stableCodePath: opts['stable-build'], stableCodeVersion: opts['stable-version'] } /* Do not change, deferred for a reason! */; }, logger); }
 	setupPreferencesTests(logger);
 	setupSearchTests(logger);

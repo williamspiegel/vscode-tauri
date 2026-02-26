@@ -1,6 +1,12 @@
 @echo off
 setlocal
 
+if /I "%1"=="--tauri" (
+	shift
+	call .\scripts\test-tauri-integration.bat %*
+	exit /b %errorlevel%
+)
+
 pushd %~dp0\..
 
 set VSCODEUSERDATADIR=%TEMP%\vscodeuserfolder-%RANDOM%-%TIME:~6,2%

@@ -128,3 +128,30 @@ fn epoch_millis() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn check_returns_stable_payload() {
+        let capability = RustPrimaryUpdateCapability::new();
+        let result = capability
+            .invoke("update.check", &json!({}))
+            .await
+            .expect("update.check should succeed")
+            .expect("update.check should return payload");
+        assert_eq!(result["checked"], json!(true));
+        assert_eq!(result["handledBy"], json!("rust-primary"));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_none() {
+        let capability = RustPrimaryUpdateCapability::new();
+        let result = capability
+            .invoke("update.notImplemented", &json!({}))
+            .await
+            .expect("unknown method should not fail");
+        assert!(result.is_none());
+    }
+}
