@@ -219,4 +219,36 @@ mod tests {
             .expect_err("missing threshold should return an error");
         assert!(error.contains("missing numeric param 'thresholdSeconds'"));
     }
+
+    #[tokio::test]
+    async fn prevent_sleep_requires_reason() {
+        let capability = RustPrimaryPowerCapability::new();
+        let error = capability
+            .invoke("power.preventSleep", &json!({}))
+            .await
+            .expect_err("missing reason should return an error");
+        assert!(error.contains("missing string param 'reason'"));
+    }
+
+    #[tokio::test]
+    async fn allow_sleep_requires_id() {
+        let capability = RustPrimaryPowerCapability::new();
+        let error = capability
+            .invoke("power.allowSleep", &json!({}))
+            .await
+            .expect_err("missing id should return an error");
+        assert!(error.contains("missing string param 'id'"));
+    }
+
+    #[tokio::test]
+    async fn allow_sleep_unknown_id_returns_stable_payload() {
+        let capability = RustPrimaryPowerCapability::new();
+        let result = capability
+            .invoke("power.allowSleep", &json!({ "id": "unknown-blocker" }))
+            .await
+            .expect("allowSleep should succeed")
+            .expect("allowSleep should return a payload");
+        assert_eq!(result["id"], json!("unknown-blocker"));
+        assert_eq!(result["released"], json!(false));
+    }
 }

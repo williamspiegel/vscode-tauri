@@ -130,4 +130,14 @@ mod tests {
             .expect_err("missing text param should return an error");
         assert!(error.contains("missing string param 'text'"));
     }
+
+    #[tokio::test]
+    async fn write_text_requires_object_params() {
+        let capability = RustPrimaryClipboardCapability;
+        let error = capability
+            .invoke("clipboard.writeText", &json!("invalid"))
+            .await
+            .expect_err("non-object params should return an error");
+        assert!(error.contains("params must be an object"));
+    }
 }

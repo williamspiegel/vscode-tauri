@@ -91,6 +91,28 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(syncStore.url.path, '/.vscode-tauri/user-data/sync');
 	});
 
+	test('call normalizes mcpManagement installed payload and userDataSync hard fallback shape', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'getInstalled') {
+					return { invalid: true };
+				}
+				if (method === '_getInitialData') {
+					return 'not-an-array';
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const installed = await registry.call('mcpManagement', 'getInstalled', []);
+		assert.deepStrictEqual(installed, []);
+
+		const syncInitial = await registry.call('userDataSync', '_getInitialData', []);
+		assert.deepStrictEqual(syncInitial, ['uninitialized', [], undefined]);
+	});
+
 	test('call normalizes externalTerminal defaults and localFilesystem stat/readFile fallbacks', async () => {
 		const host = {
 			desktopChannelCall: async (_channel, method) => {
@@ -159,6 +181,137 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(updateAccountResult, undefined);
 	});
 
+	test('call normalizes extension manifests and queryLocal fallback payloads', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'getExtensionsControlManifest') {
+					return {
+						malicious: 'invalid',
+						deprecated: [],
+						search: 'invalid',
+						autoUpdate: null
+					};
+				}
+				if (method === 'queryLocal') {
+					return undefined;
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const manifest = await registry.call('extensions', 'getExtensionsControlManifest', []);
+		assert.deepStrictEqual(manifest, {
+			malicious: [],
+			deprecated: {},
+			search: [],
+			autoUpdate: {}
+		});
+
+		const queryLocal = await registry.call('extensions', 'queryLocal', []);
+		assert.deepStrictEqual(queryLocal, []);
+	});
+
+	test('call normalizes localPty default payloads', async () => {
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'getDefaultSystemShell') {
+					return 42;
+				}
+				if (method === 'getEnvironment') {
+					return 'invalid';
+				}
+				if (method === 'getShellEnvironment') {
+					return null;
+				}
+				return 'invalid';
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const marks = await registry.call('localPty', 'getPerformanceMarks', []);
+		assert.deepStrictEqual(marks, []);
+
+		const latency = await registry.call('localPty', 'getLatency', []);
+		assert.deepStrictEqual(latency, []);
+
+		const profiles = await registry.call('localPty', 'getProfiles', []);
+		assert.deepStrictEqual(profiles, []);
+
+		const shell = await registry.call('localPty', 'getDefaultSystemShell', []);
+		assert.strictEqual(shell, '/bin/zsh');
+
+		const env = await registry.call('localPty', 'getEnvironment', []);
+		assert.deepStrictEqual(env, {});
+
+		const shellEnv = await registry.call('localPty', 'getShellEnvironment', []);
+		assert.deepStrictEqual(shellEnv, {});
+	});
+
+	test('call handles nativeHost picker cancellation without navigation', async () => {
+		const initialHref = global.window.location.href;
+		const host = {
+			desktopChannelCall: async () => ({ canceled: true }),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('nativeHost', 'pickFolderAndOpen', [{}]);
+		assert.strictEqual(result, null);
+		assert.strictEqual(global.window.location.href, initialHref);
+	});
+
+	test('call navigates to selected folder on nativeHost pickFolderAndOpen', async () => {
+		const host = {
+			desktopChannelCall: async () => ({ filePaths: ['/tmp/example-folder'] }),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('nativeHost', 'pickFolderAndOpen', [{}]);
+		assert.strictEqual(result, null);
+		assert.match(global.window.location.href, /\?folder=%2Ftmp%2Fexample-folder$/);
+	});
+
+	test('call opens workspace in new window when forced and supported', async () => {
+		const initialHref = global.window.location.href;
+		let openedUrl;
+		global.window.open = (url) => {
+			openedUrl = String(url);
+			return {};
+		};
+
+		const host = {
+			desktopChannelCall: async () => ({ filePath: '/tmp/project.code-workspace' }),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('nativeHost', 'pickFileFolderAndOpen', [{ forceNewWindow: true }]);
+		assert.strictEqual(result, null);
+		assert.match(openedUrl, /\?workspace=%2Ftmp%2Fproject\.code-workspace$/);
+		assert.strictEqual(global.window.location.href, initialHref);
+	});
+
+	test('call falls back to current-window navigation when new window open fails or is reused', async () => {
+		global.window.open = () => null;
+		const host = {
+			desktopChannelCall: async () => ({ filePaths: ['/tmp/project-folder'] }),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('nativeHost', 'pickFolderAndOpen', [{ forceNewWindow: true }]);
+		assert.strictEqual(result, null);
+		assert.match(global.window.location.href, /\?folder=%2Ftmp%2Fproject-folder$/);
+
+		global.window.location.href = 'http://127.0.0.1:1420/';
+		await registry.call('nativeHost', 'pickFolderAndOpen', [{ forceNewWindow: true, forceReuseWindow: true }]);
+		assert.match(global.window.location.href, /\?folder=%2Ftmp%2Fproject-folder$/);
+	});
+
 	test('call maps localFilesystem host errors to FileSystemError names', async () => {
 		const host = {
 			desktopChannelCall: async () => {
@@ -176,6 +329,34 @@ suite('Tauri Desktop Channels', () => {
 				return true;
 			}
 		);
+	});
+
+	test('call maps additional localFilesystem host errors to FileSystemError names', async () => {
+		const scenarios = [
+			{ message: 'EEXIST: File exists', name: 'EntryExists (FileSystemError)' },
+			{ message: 'ENOTDIR: Not a directory', name: 'EntryNotADirectory (FileSystemError)' },
+			{ message: 'EISDIR: Is a directory', name: 'EntryIsADirectory (FileSystemError)' },
+			{ message: 'EACCES: Permission denied', name: 'NoPermissions (FileSystemError)' }
+		];
+
+		for (const scenario of scenarios) {
+			const host = {
+				desktopChannelCall: async () => {
+					throw new Error(scenario.message);
+				},
+				desktopChannelListen: async () => async () => undefined
+			};
+			const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+			await assert.rejects(
+				registry.call('localFilesystem', 'stat', [{ path: '/tmp/file' }]),
+				/** @param {Error} err */
+				err => {
+					assert.strictEqual(err.name, scenario.name);
+					return true;
+				}
+			);
+		}
 	});
 
 	test('listen normalizes storage profile payloads', async () => {
@@ -233,6 +414,29 @@ suite('Tauri Desktop Channels', () => {
 		const result = await registry.call('localFilesystem', 'read', [{ path: '/tmp/test-buffer.bin' }]);
 		assert.deepStrictEqual(Array.from(result[0].buffer), [1, 2, 3, 4]);
 		assert.strictEqual(result[1], 99);
+	});
+
+	test('localFilesystem read normalizes array-like numeric keyed payloads', async () => {
+		const host = {
+			desktopChannelCall: async () => [{ buffer: { 0: 65, 1: 66, length: 2 } }],
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('localFilesystem', 'read', [{ path: '/tmp/test-arraylike.bin' }]);
+		assert.deepStrictEqual(Array.from(result[0].buffer), [65, 66]);
+		assert.strictEqual(result[1], 2);
+	});
+
+	test('localFilesystem readFile accepts direct byte array payloads', async () => {
+		const host = {
+			desktopChannelCall: async () => [9, 8, 7],
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const readFile = await registry.call('localFilesystem', 'readFile', [{ path: '/tmp/raw-bytes.bin' }]);
+		assert.deepStrictEqual(Array.from(readFile.buffer), [9, 8, 7]);
 	});
 
 	test('localFilesystem stat infers directory type from path hint', async () => {
@@ -342,6 +546,31 @@ suite('Tauri Desktop Channels', () => {
 		});
 	});
 
+	test('localFilesystem readFileStream maps invalid payloads to FileSystemError', async () => {
+		/** @type {(payload: unknown) => void} */
+		let streamListener = () => undefined;
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				streamListener = onEvent;
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+		/** @type {unknown[]} */
+		const seen = [];
+
+		await registry.listen('localFilesystem', 'readFileStream', { path: '/tmp/invalid-stream.bin' }, payload => {
+			seen.push(payload);
+		});
+		streamListener({ nope: true });
+		streamListener({ base64: 'aGk=' });
+
+		assert.strictEqual(seen.length, 1);
+		assert.strictEqual(seen[0].name, 'Unknown (FileSystemError)');
+		assert.match(seen[0].message, /Invalid readFileStream payload from host/);
+	});
+
 	test('listen normalizes watcher and extension host events', async () => {
 		/** @type {((payload: unknown) => void)[]} */
 		const listeners = [];
@@ -396,6 +625,88 @@ suite('Tauri Desktop Channels', () => {
 			matches: 5,
 			finalUpdate: true
 		});
+	});
+
+	test('listen normalizes nativeHost sync mcp extension and debug events', async () => {
+		/** @type {((payload: unknown) => void)[]} */
+		const listeners = [];
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				listeners.push(onEvent);
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		let alwaysOnTop;
+		await registry.listen('nativeHost', 'onDidChangeWindowAlwaysOnTop', undefined, payload => {
+			alwaysOnTop = payload;
+		});
+		listeners[0]({});
+		assert.deepStrictEqual(alwaysOnTop, { windowId: 1, alwaysOnTop: false });
+
+		let colorScheme;
+		await registry.listen('nativeHost', 'onDidChangeColorScheme', undefined, payload => {
+			colorScheme = payload;
+		});
+		listeners[1]({ dark: true });
+		assert.deepStrictEqual(colorScheme, { dark: true, highContrast: false });
+
+		let syncConflicts;
+		await registry.listen('userDataSync', 'onDidChangeConflicts', undefined, payload => {
+			syncConflicts = payload;
+		});
+		listeners[2]({ invalid: true });
+		assert.deepStrictEqual(syncConflicts, []);
+
+		let syncErrors;
+		await registry.listen('userDataSync', 'onSyncErrors', undefined, payload => {
+			syncErrors = payload;
+		});
+		listeners[3]('not-array');
+		assert.deepStrictEqual(syncErrors, []);
+
+		let mcpInstallEvent;
+		await registry.listen('mcpManagement', 'onInstallMcpServer', undefined, payload => {
+			mcpInstallEvent = payload;
+		});
+		listeners[4]('invalid');
+		assert.deepStrictEqual(mcpInstallEvent, {});
+
+		let extensionInstallDone;
+		await registry.listen('extensions', 'onDidInstallExtensions', undefined, payload => {
+			extensionInstallDone = payload;
+		});
+		listeners[5]('invalid');
+		assert.deepStrictEqual(extensionInstallDone, []);
+
+		let debugAttach;
+		await registry.listen('extensionhostdebugservice', 'attach', undefined, payload => {
+			debugAttach = payload;
+		});
+		listeners[6](null);
+		assert.deepStrictEqual(debugAttach, { sessionId: '', port: 0 });
+	});
+
+	test('listen applies event-name fallback normalizers even for unknown channels', async () => {
+		/** @type {(payload: unknown) => void} */
+		let eventListener = () => undefined;
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				eventListener = onEvent;
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+		let seen;
+
+		await registry.listen('notARealChannel', 'onDidChangeStorage', undefined, payload => {
+			seen = payload;
+		});
+		eventListener({ changed: 'bad', deleted: ['ok'] });
+		assert.deepStrictEqual(seen, { changed: [], deleted: ['ok'] });
 	});
 
 	test('listen returns noop when host listener registration fails', async () => {

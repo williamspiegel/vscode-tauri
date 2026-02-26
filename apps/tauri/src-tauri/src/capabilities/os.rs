@@ -148,6 +148,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_external_requires_object_params() {
+        let capability = RustPrimaryOsCapability;
+        let error = capability
+            .invoke("os.openExternal", &json!("invalid"))
+            .await
+            .expect_err("non-object params should fail validation");
+        assert!(error.contains("params must be an object"));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryOsCapability;
         let result = capability

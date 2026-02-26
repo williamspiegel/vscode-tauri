@@ -300,6 +300,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_non_string_args() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.create",
+                &json!({
+                    "shell": "/bin/sh",
+                    "args": ["-lc", 1]
+                }),
+            )
+            .await
+            .expect_err("non-string args should fail validation");
+        assert!(error.contains("args must contain only strings"));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_non_object_env() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.create",
+                &json!({
+                    "shell": "/bin/sh",
+                    "env": "not-an-object"
+                }),
+            )
+            .await
+            .expect_err("non-object env should fail validation");
+        assert!(error.contains("env must be an object of string values"));
+    }
+
+    #[tokio::test]
     async fn resize_requires_cols_and_rows() {
         let capability = RustPrimaryTerminalCapability::new();
         let error = capability
@@ -331,6 +363,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_requires_data() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke(
+                "terminal.write",
+                &json!({
+                    "id": 1
+                }),
+            )
+            .await
+            .expect_err("missing data should fail");
+        assert!(error.contains("missing string param 'data'"));
+    }
+
+    #[tokio::test]
     async fn kill_unknown_session_id_fails() {
         let capability = RustPrimaryTerminalCapability::new();
         let error = capability
@@ -343,6 +390,16 @@ mod tests {
             .await
             .expect_err("unknown session id should fail");
         assert!(error.contains("terminal.kill unknown session id"));
+    }
+
+    #[tokio::test]
+    async fn kill_requires_id() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let error = capability
+            .invoke("terminal.kill", &json!({}))
+            .await
+            .expect_err("missing id should fail");
+        assert!(error.contains("missing numeric param 'id'"));
     }
 
     #[tokio::test]

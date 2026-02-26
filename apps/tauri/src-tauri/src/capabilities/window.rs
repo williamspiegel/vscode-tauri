@@ -188,6 +188,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn focus_errors_when_app_handle_is_missing() {
+        let capability = RustPrimaryWindowCapability;
+        let error = capability
+            .invoke("window.focus", &json!({}))
+            .await
+            .expect_err("window.focus should fail without app handle");
+        assert!(error.contains("tauri app handle not initialized"));
+    }
+
+    #[tokio::test]
+    async fn close_errors_when_app_handle_is_missing() {
+        let capability = RustPrimaryWindowCapability;
+        let error = capability
+            .invoke("window.close", &json!({}))
+            .await
+            .expect_err("window.close should fail without app handle");
+        assert!(error.contains("tauri app handle not initialized"));
+    }
+
+    #[tokio::test]
+    async fn open_honors_label_alias_for_non_main_targets() {
+        let capability = RustPrimaryWindowCapability;
+        let result = capability
+            .invoke("window.open", &json!({ "label": "extensions" }))
+            .await
+            .expect("non-main window open should not fail")
+            .expect("non-main window open should return payload");
+        assert_eq!(result["target"], json!("extensions"));
+        assert_eq!(result["opened"], json!(false));
+        assert_eq!(result["existing"], json!(false));
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_none() {
         let capability = RustPrimaryWindowCapability;
         let result = capability

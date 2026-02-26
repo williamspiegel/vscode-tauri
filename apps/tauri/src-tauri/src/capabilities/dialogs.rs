@@ -327,4 +327,20 @@ mod tests {
             .expect_err("non-string buttons should fail validation");
         assert!(error.contains("buttons must contain only strings"));
     }
+
+    #[tokio::test]
+    async fn show_message_rejects_non_array_buttons() {
+        let capability = RustPrimaryDialogsCapability;
+        let error = capability
+            .invoke(
+                "dialogs.showMessage",
+                &json!({
+                    "message": "hello",
+                    "buttons": "ok"
+                }),
+            )
+            .await
+            .expect_err("non-array buttons should fail validation");
+        assert!(error.contains("buttons must be an array of strings"));
+    }
 }

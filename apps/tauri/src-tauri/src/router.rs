@@ -5346,6 +5346,377 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_host_static_methods_return_stable_shapes() {
+        let repo_root = temp_repo_root("native-host-static");
+        let router = CapabilityRouter::new(repo_root);
+
+        let window_count = router
+            .dispatch_channel("nativeHost", "getWindowCount", &json!([]))
+            .await
+            .expect("getWindowCount should succeed");
+        assert_eq!(window_count, json!(1));
+
+        let active_window_id = router
+            .dispatch_channel("nativeHost", "getActiveWindowId", &json!([]))
+            .await
+            .expect("getActiveWindowId should succeed");
+        assert_eq!(active_window_id, json!(1));
+
+        let windows = router
+            .dispatch_channel("nativeHost", "getWindows", &json!([]))
+            .await
+            .expect("getWindows should succeed");
+        assert_eq!(windows[0]["id"], json!(1));
+
+        let cursor = router
+            .dispatch_channel("nativeHost", "getCursorScreenPoint", &json!([]))
+            .await
+            .expect("getCursorScreenPoint should succeed");
+        assert_eq!(cursor["point"]["x"], json!(0));
+        assert_eq!(cursor["display"]["width"], json!(0));
+
+        let os_color_scheme = router
+            .dispatch_channel("nativeHost", "getOSColorScheme", &json!([]))
+            .await
+            .expect("getOSColorScheme should succeed");
+        assert_eq!(os_color_scheme["dark"], json!(false));
+        assert_eq!(os_color_scheme["highContrast"], json!(false));
+
+        let os_statistics = router
+            .dispatch_channel("nativeHost", "getOSStatistics", &json!([]))
+            .await
+            .expect("getOSStatistics should succeed");
+        assert_eq!(os_statistics["loadavg"], json!([0, 0, 0]));
+
+        let process_id = router
+            .dispatch_channel("nativeHost", "getProcessId", &json!([]))
+            .await
+            .expect("getProcessId should succeed")
+            .as_u64()
+            .expect("getProcessId should return number");
+        assert!(process_id > 0);
+    }
+
+    #[tokio::test]
+    async fn native_host_noop_methods_and_feature_flags_are_stable() {
+        let repo_root = temp_repo_root("native-host-noop");
+        let router = CapabilityRouter::new(repo_root);
+
+        let notify_ready = router
+            .dispatch_channel("nativeHost", "notifyReady", &json!([]))
+            .await
+            .expect("notifyReady should succeed");
+        assert_eq!(notify_ready, Value::Null);
+
+        let resolve_proxy = router
+            .dispatch_channel("nativeHost", "resolveProxy", &json!([]))
+            .await
+            .expect("resolveProxy should succeed");
+        assert_eq!(resolve_proxy, Value::Null);
+
+        let is_maximized = router
+            .dispatch_channel("nativeHost", "isMaximized", &json!([]))
+            .await
+            .expect("isMaximized should succeed");
+        assert_eq!(is_maximized, json!(false));
+
+        let is_admin = router
+            .dispatch_channel("nativeHost", "isAdmin", &json!([]))
+            .await
+            .expect("isAdmin should succeed");
+        assert_eq!(is_admin, json!(false));
+
+        let open_external_no_arg = router
+            .dispatch_channel("nativeHost", "openExternal", &json!([]))
+            .await
+            .expect("openExternal without args should succeed");
+        assert_eq!(open_external_no_arg, json!(false));
+    }
+
+    #[tokio::test]
+    async fn low_level_channels_return_stable_null_and_empty_payloads() {
+        let repo_root = temp_repo_root("low-level-channels");
+        let router = CapabilityRouter::new(repo_root);
+
+        let profile_storage = router
+            .dispatch_channel("profileStorageListener", "onDidChange", &json!([]))
+            .await
+            .expect("profileStorageListener.onDidChange should succeed");
+        assert_eq!(profile_storage, Value::Null);
+
+        let telemetry_log = router
+            .dispatch_channel(
+                "telemetryAppender",
+                "log",
+                &json!([{
+                    "eventName": "unit-test",
+                    "data": { "ok": true }
+                }]),
+            )
+            .await
+            .expect("telemetryAppender.log should succeed");
+        assert_eq!(telemetry_log, Value::Null);
+
+        let telemetry_flush = router
+            .dispatch_channel("telemetryAppender", "flush", &json!([]))
+            .await
+            .expect("telemetryAppender.flush should succeed");
+        assert_eq!(telemetry_flush, Value::Null);
+
+        let browser_debug = router
+            .dispatch_channel("browserElements", "startDebugSession", &json!([]))
+            .await
+            .expect("browserElements.startDebugSession should succeed");
+        assert_eq!(browser_debug, Value::Null);
+
+        let browser_logs = router
+            .dispatch_channel("browserElements", "getConsoleLogs", &json!([]))
+            .await
+            .expect("browserElements.getConsoleLogs should succeed");
+        assert_eq!(browser_logs, Value::Null);
+
+        let extension_tips = router
+            .dispatch_channel("extensionTipsService", "getConfigBasedTips", &json!([]))
+            .await
+            .expect("extensionTipsService.getConfigBasedTips should succeed");
+        assert_eq!(extension_tips, json!([]));
+
+        let endpoint_log = router
+            .dispatch_channel("customEndpointTelemetry", "publicLog", &json!([]))
+            .await
+            .expect("customEndpointTelemetry.publicLog should succeed");
+        assert_eq!(endpoint_log, Value::Null);
+
+        let shared_content = router
+            .dispatch_channel("sharedWebContentExtractor", "readImage", &json!([]))
+            .await
+            .expect("sharedWebContentExtractor.readImage should succeed");
+        assert_eq!(shared_content, Value::Null);
+
+        let playwright_init = router
+            .dispatch_channel("playwright", "initialize", &json!([]))
+            .await
+            .expect("playwright.initialize should succeed");
+        assert_eq!(playwright_init, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn sync_tunnel_language_and_manifest_channels_return_stable_shapes() {
+        let repo_root = temp_repo_root("sync-tunnel-language");
+        let router = CapabilityRouter::new(repo_root);
+
+        let auto_sync = router
+            .dispatch_channel("userDataAutoSync", "turnOn", &json!([]))
+            .await
+            .expect("userDataAutoSync.turnOn should succeed");
+        assert_eq!(auto_sync, Value::Null);
+
+        let sync_machines = router
+            .dispatch_channel("userDataSyncMachines", "getMachines", &json!([]))
+            .await
+            .expect("userDataSyncMachines.getMachines should succeed");
+        assert_eq!(sync_machines, json!([]));
+
+        let sync_rename = router
+            .dispatch_channel("userDataSyncMachines", "renameMachine", &json!([]))
+            .await
+            .expect("userDataSyncMachines.renameMachine should succeed");
+        assert_eq!(sync_rename, Value::Null);
+
+        let remote_mode = router
+            .dispatch_channel("remoteTunnel", "getMode", &json!([]))
+            .await
+            .expect("remoteTunnel.getMode should succeed");
+        assert_eq!(remote_mode["active"], json!(false));
+
+        let remote_status = router
+            .dispatch_channel("remoteTunnel", "getTunnelStatus", &json!([]))
+            .await
+            .expect("remoteTunnel.getTunnelStatus should succeed");
+        assert_eq!(remote_status["type"], json!("disconnected"));
+
+        let remote_name = router
+            .dispatch_channel("remoteTunnel", "getTunnelName", &json!([]))
+            .await
+            .expect("remoteTunnel.getTunnelName should succeed");
+        assert_eq!(remote_name, Value::Null);
+
+        let languages = router
+            .dispatch_channel("languagePacks", "getAvailableLanguages", &json!([]))
+            .await
+            .expect("languagePacks.getAvailableLanguages should succeed");
+        assert_eq!(languages[0]["id"], json!("en"));
+        assert_eq!(languages[0]["label"], json!("English"));
+
+        let language_uri = router
+            .dispatch_channel(
+                "languagePacks",
+                "getBuiltInExtensionTranslationsUri",
+                &json!([]),
+            )
+            .await
+            .expect("languagePacks.getBuiltInExtensionTranslationsUri should succeed");
+        assert_eq!(language_uri, Value::Null);
+
+        let mcp_discovery = router
+            .dispatch_channel("NativeMcpDiscoveryHelper", "load", &json!([]))
+            .await
+            .expect("NativeMcpDiscoveryHelper.load should succeed");
+        assert_eq!(mcp_discovery, Value::Null);
+
+        let mcp_manifest = router
+            .dispatch_channel("mcpGalleryManifest", "setMcpGalleryManifest", &json!([]))
+            .await
+            .expect("mcpGalleryManifest.setMcpGalleryManifest should succeed");
+        assert_eq!(mcp_manifest, Value::Null);
+
+        let extension_manifest = router
+            .dispatch_channel(
+                "extensionGalleryManifest",
+                "setExtensionGalleryManifest",
+                &json!([]),
+            )
+            .await
+            .expect("extensionGalleryManifest.setExtensionGalleryManifest should succeed");
+        assert_eq!(extension_manifest, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn extension_host_debug_service_and_webview_channels_are_stable() {
+        let repo_root = temp_repo_root("debug-webview");
+        let router = CapabilityRouter::new(repo_root);
+
+        let reload = router
+            .dispatch_channel("extensionhostdebugservice", "reload", &json!([]))
+            .await
+            .expect("extensionhostdebugservice.reload should succeed");
+        assert_eq!(reload, Value::Null);
+
+        let open_host = router
+            .dispatch_channel(
+                "extensionhostdebugservice",
+                "openExtensionDevelopmentHostWindow",
+                &json!([]),
+            )
+            .await
+            .expect("openExtensionDevelopmentHostWindow should succeed");
+        assert_eq!(open_host["success"], json!(false));
+
+        let attach_renderer = router
+            .dispatch_channel(
+                "extensionhostdebugservice",
+                "attachToCurrentWindowRenderer",
+                &json!([]),
+            )
+            .await
+            .expect("attachToCurrentWindowRenderer should succeed");
+        assert_eq!(attach_renderer["success"], json!(false));
+
+        let ignore_shortcuts = router
+            .dispatch_channel("webview", "setIgnoreMenuShortcuts", &json!([]))
+            .await
+            .expect("webview.setIgnoreMenuShortcuts should succeed");
+        assert_eq!(ignore_shortcuts, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn checksum_and_url_handler_channels_validate_and_hash() {
+        let repo_root = temp_repo_root("checksum-url-handler");
+        let router = CapabilityRouter::new(repo_root.clone());
+        let path = repo_root.join("checksum.txt");
+        fs::write(&path, b"hello world").expect("checksum fixture should be written");
+
+        let checksum = router
+            .dispatch_channel("checksum", "checksum", &json!([{ "path": path }]))
+            .await
+            .expect("checksum should succeed");
+        assert_eq!(checksum, json!("uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek"));
+
+        let checksum_error = router
+            .dispatch_channel("checksum", "checksum", &json!([]))
+            .await
+            .expect_err("checksum without args should fail");
+        assert!(checksum_error.contains("checksum.checksum expected resource argument"));
+
+        let handled_without_url = router
+            .dispatch_channel("urlHandler", "handleURL", &json!([]))
+            .await
+            .expect("urlHandler.handleURL without args should succeed");
+        assert_eq!(handled_without_url, json!(false));
+    }
+
+    #[tokio::test]
+    async fn local_pty_and_keyboard_layout_channels_have_stable_shapes() {
+        let repo_root = temp_repo_root("local-pty-keyboard");
+        let router = CapabilityRouter::new(repo_root);
+
+        let keyboard_layout = router
+            .dispatch_channel("keyboardLayout", "getKeyboardLayoutData", &json!([]))
+            .await
+            .expect("keyboardLayout.getKeyboardLayoutData should succeed");
+        assert_eq!(keyboard_layout["keyboardLayoutInfo"]["layout"], json!("US"));
+        assert_eq!(keyboard_layout["keyboardMapping"], json!({}));
+
+        let profiles = router
+            .dispatch_channel("localPty", "getProfiles", &json!([]))
+            .await
+            .expect("localPty.getProfiles should succeed");
+        assert!(profiles
+            .as_array()
+            .expect("profiles should be array")
+            .len()
+            >= 1);
+
+        let shell = router
+            .dispatch_channel("localPty", "getDefaultSystemShell", &json!([]))
+            .await
+            .expect("localPty.getDefaultSystemShell should succeed");
+        assert!(shell.as_str().is_some());
+
+        let env = router
+            .dispatch_channel("localPty", "getEnvironment", &json!([]))
+            .await
+            .expect("localPty.getEnvironment should succeed");
+        assert!(env.is_object());
+
+        let detach = router
+            .dispatch_channel("localPty", "requestDetachInstance", &json!([]))
+            .await
+            .expect("localPty.requestDetachInstance should succeed");
+        assert_eq!(detach, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn default_backed_channels_return_expected_payloads() {
+        let repo_root = temp_repo_root("default-backed-channels");
+        let router = CapabilityRouter::new(repo_root);
+
+        let extensions = router
+            .dispatch_channel("extensions", "getInstalled", &json!([]))
+            .await
+            .expect("extensions.getInstalled should succeed");
+        assert_eq!(extensions, json!([]));
+
+        let mcp_installed = router
+            .dispatch_channel("mcpManagement", "getInstalled", &json!([]))
+            .await
+            .expect("mcpManagement.getInstalled should succeed");
+        assert_eq!(mcp_installed, json!([]));
+
+        let sync_initial_data = router
+            .dispatch_channel("userDataSync", "_getInitialData", &json!([]))
+            .await
+            .expect("userDataSync._getInitialData should succeed");
+        assert_eq!(sync_initial_data, json!(["uninitialized", [], Value::Null]));
+
+        let update_initial_state = router
+            .dispatch_channel("update", "_getInitialState", &json!([]))
+            .await
+            .expect("update._getInitialState should succeed");
+        assert_eq!(update_initial_state, json!({ "type": "uninitialized" }));
+    }
+
+    #[tokio::test]
     async fn fallback_counts_record_channel_calls() {
         let repo_root = temp_repo_root("fallback");
         let router = CapabilityRouter::new(repo_root.clone());

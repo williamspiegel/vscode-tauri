@@ -393,9 +393,19 @@ const RESULT_NORMALIZERS = new Map<string, Map<string, ResultNormalizer>>([
           const objectResult = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
           return {
             malicious: Array.isArray(objectResult.malicious) ? objectResult.malicious : [],
-            deprecated: objectResult.deprecated && typeof objectResult.deprecated === 'object' ? objectResult.deprecated : {},
+            deprecated:
+              objectResult.deprecated &&
+              typeof objectResult.deprecated === 'object' &&
+              !Array.isArray(objectResult.deprecated)
+                ? objectResult.deprecated
+                : {},
             search: Array.isArray(objectResult.search) ? objectResult.search : [],
-            autoUpdate: objectResult.autoUpdate && typeof objectResult.autoUpdate === 'object' ? objectResult.autoUpdate : {}
+            autoUpdate:
+              objectResult.autoUpdate &&
+              typeof objectResult.autoUpdate === 'object' &&
+              !Array.isArray(objectResult.autoUpdate)
+                ? objectResult.autoUpdate
+                : {}
           };
         }
       ]

@@ -46,6 +46,69 @@ suite('Tauri Host Protocol', () => {
 		);
 	});
 
+	test('validateRequiredParams throws when required-object methods receive non-object params', () => {
+		assert.throws(
+			() => hostProtocolModule.validateRequiredParams('desktop.channelCall', null),
+			/expects object params/
+		);
+	});
+
+	test('validateRequiredParams allows object methods with no required params', () => {
+		assert.doesNotThrow(() => hostProtocolModule.validateRequiredParams('update.check', undefined));
+		assert.doesNotThrow(() => hostProtocolModule.validateRequiredParams('window.getState', null));
+	});
+
+	test('validateRequiredParams ignores non-object method specs', () => {
+		assert.doesNotThrow(() => hostProtocolModule.validateRequiredParams('protocol.handshake', undefined));
+	});
+
+	test('validateRequiredParams enforces every required protocol param', () => {
+		const methods = hostProtocolModule.hostProtocol.methods;
+		for (const [method, spec] of Object.entries(methods)) {
+			const paramsSpec = spec && typeof spec === 'object' ? spec.params : undefined;
+			if (!paramsSpec || paramsSpec.type !== 'object' || !Array.isArray(paramsSpec.required) || paramsSpec.required.length === 0) {
+				continue;
+			}
+
+			const firstRequired = paramsSpec.required[0];
+			assert.throws(
+				() => hostProtocolModule.validateRequiredParams(method, {}),
+				new RegExp(`missing required param: ${firstRequired}`)
+			);
+		}
+	});
+
+	test('validateRequiredParams rejects non-object params for required-object methods', () => {
+		const methods = hostProtocolModule.hostProtocol.methods;
+		for (const [method, spec] of Object.entries(methods)) {
+			const paramsSpec = spec && typeof spec === 'object' ? spec.params : undefined;
+			if (!paramsSpec || paramsSpec.type !== 'object' || !Array.isArray(paramsSpec.required) || paramsSpec.required.length === 0) {
+				continue;
+			}
+
+			assert.throws(
+				() => hostProtocolModule.validateRequiredParams(method, 'not-an-object'),
+				/expects object params/
+			);
+		}
+	});
+
+	test('validateRequiredParams allows object-param methods with no required fields', () => {
+		const methods = hostProtocolModule.hostProtocol.methods;
+		for (const [method, spec] of Object.entries(methods)) {
+			const paramsSpec = spec && typeof spec === 'object' ? spec.params : undefined;
+			if (!paramsSpec || paramsSpec.type !== 'object') {
+				continue;
+			}
+			if (Array.isArray(paramsSpec.required) && paramsSpec.required.length > 0) {
+				continue;
+			}
+
+			assert.doesNotThrow(() => hostProtocolModule.validateRequiredParams(method, undefined));
+			assert.doesNotThrow(() => hostProtocolModule.validateRequiredParams(method, null));
+		}
+	});
+
 	test('protocol version is stable', () => {
 		assert.strictEqual(hostProtocolModule.hostProtocol.protocolVersion, '1.0.0');
 		assert.ok(hostProtocolModule.hostProtocol.methods['desktop.resolveWindowConfig']);

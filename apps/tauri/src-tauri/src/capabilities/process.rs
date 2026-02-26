@@ -588,6 +588,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_spawn_rejects_non_string_args() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke(
+                "process.spawn",
+                &json!({
+                    "command": "echo",
+                    "args": ["ok", 1]
+                }),
+            )
+            .await
+            .expect_err("non-string args should fail validation");
+        assert!(error.contains("args must contain only strings"));
+    }
+
+    #[tokio::test]
+    async fn process_spawn_rejects_non_object_env() {
+        let capability = RustPrimaryProcessCapability::new();
+        let error = capability
+            .invoke(
+                "process.spawn",
+                &json!({
+                    "command": "echo",
+                    "env": "not-an-object"
+                }),
+            )
+            .await
+            .expect_err("non-object env should fail validation");
+        assert!(error.contains("env must be an object of string values"));
+    }
+
+    #[tokio::test]
     async fn process_kill_requires_pid() {
         let capability = RustPrimaryProcessCapability::new();
         let error = capability
@@ -614,6 +646,19 @@ mod tests {
         assert_eq!(result["exited"], json!(false));
         assert_eq!(result["running"], json!(false));
         assert_eq!(result["known"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn process_list_returns_stable_initial_shape() {
+        let capability = RustPrimaryProcessCapability::new();
+        let result = capability
+            .invoke("process.list", &json!({}))
+            .await
+            .expect("process.list should succeed")
+            .expect("process.list should return payload");
+        assert_eq!(result["running"], json!([]));
+        assert_eq!(result["completed"], json!([]));
+        assert_eq!(result["handledBy"], json!("rust-primary"));
     }
 
     #[tokio::test]

@@ -770,6 +770,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_file_requires_contents() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let path = temp_file_path("missing-contents");
+        let error = capability
+            .invoke(
+                "filesystem.writeFile",
+                &json!({
+                    "path": path.to_string_lossy()
+                }),
+            )
+            .await
+            .expect_err("missing contents should fail");
+        assert!(error.contains("missing string param 'contents'"));
+    }
+
+    #[tokio::test]
+    async fn write_file_without_create_parents_fails_for_missing_parent() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let base = std::env::temp_dir().join(format!(
+            "vscode-tauri-fs-no-parent-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ));
+        let path = base.join("missing").join("file.txt");
+
+        let error = capability
+            .invoke(
+                "filesystem.writeFile",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "contents": "hello",
+                    "createParents": false
+                }),
+            )
+            .await
+            .expect_err("write should fail when parent is missing and createParents=false");
+        assert!(error.contains("filesystem.writeFile failed"));
+    }
+
+    #[tokio::test]
     async fn write_base64_roundtrips_through_read() {
         let capability = RustPrimaryFilesystemCapability::new();
         let path = temp_file_path("base64");
@@ -811,6 +853,21 @@ mod tests {
             .await
             .expect_err("missing watchId should fail");
         assert!(error.contains("missing param 'watchId'"));
+    }
+
+    #[tokio::test]
+    async fn unwatch_rejects_invalid_watch_id_type() {
+        let capability = RustPrimaryFilesystemCapability::new();
+        let error = capability
+            .invoke(
+                "filesystem.unwatch",
+                &json!({
+                    "watchId": true
+                }),
+            )
+            .await
+            .expect_err("invalid watchId type should fail");
+        assert!(error.contains("param 'watchId' must be a string or number"));
     }
 
     #[tokio::test]
