@@ -651,6 +651,9 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
 
 		const config = await resolveWindowConfig();
     applyWorkspaceFromLocation(config);
+    if (typeof config.zoomLevel === 'number') {
+      zoomLevel = config.zoomLevel;
+    }
 		cachedConfiguration = config;
 		return config;
 	};
@@ -915,11 +918,7 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
       },
       async resolveConfiguration(): Promise<Record<string, unknown>> {
         const resolved = await resolveConfiguration();
-        if (typeof resolved.zoomLevel === 'number') {
-          zoomLevel = resolved.zoomLevel;
-        } else {
-          resolved.zoomLevel = zoomLevel;
-        }
+        resolved.zoomLevel = zoomLevel;
 
         return resolved;
       }

@@ -202,6 +202,35 @@ suite('Tauri Desktop Sandbox', () => {
 		assert.strictEqual(mock.getResolveCount(), 1);
 	});
 
+	test('context.resolveConfiguration keeps zoom level in sync with webFrame setter', async () => {
+		createWindow('');
+		const mock = createHost({
+			zoomLevel: 3
+		});
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		const firstConfig = await vscode.context.resolveConfiguration();
+		assert.strictEqual(firstConfig.zoomLevel, 3);
+
+		vscode.webFrame.setZoomLevel(7);
+		const secondConfig = await vscode.context.resolveConfiguration();
+		assert.strictEqual(secondConfig.zoomLevel, 7);
+	});
+
+	test('process env external endpoint is not injected when window origin is null', async () => {
+		createWindow('');
+		global.window.location.origin = 'null';
+		const mock = createHost();
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		assert.strictEqual(
+			Object.prototype.hasOwnProperty.call(vscode.process.env, 'VSCODE_TAURI_WEBVIEW_EXTERNAL_ENDPOINT'),
+			false
+		);
+	});
+
 	test('ipcRenderer send/invoke bridge validates channels and routes correctly', async () => {
 		createWindow('');
 		const mock = createHost();

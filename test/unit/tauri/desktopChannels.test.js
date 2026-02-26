@@ -91,6 +91,37 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(syncStore.url.path, '/.vscode-tauri/user-data/sync');
 	});
 
+	test('call preserves complete userDataSync store payload and update state object', async () => {
+		const completeStore = {
+			url: { scheme: 'https', authority: 'sync.example', path: '/store' },
+			type: 'insiders',
+			defaultUrl: { scheme: 'https', authority: 'sync.example', path: '/default' },
+			insidersUrl: { scheme: 'https', authority: 'sync.example', path: '/insiders' },
+			stableUrl: { scheme: 'https', authority: 'sync.example', path: '/stable' },
+			canSwitch: true,
+			authenticationProviders: { github: {} }
+		};
+		const host = {
+			desktopChannelCall: async (_channel, method) => {
+				if (method === 'getPreviousUserDataSyncStore') {
+					return completeStore;
+				}
+				if (method === '_getInitialState') {
+					return { type: 'ready', quality: 'stable' };
+				}
+				return undefined;
+			},
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const store = await registry.call('userDataSyncStoreManagement', 'getPreviousUserDataSyncStore', []);
+		assert.deepStrictEqual(store, completeStore);
+
+		const updateState = await registry.call('update', '_getInitialState', []);
+		assert.deepStrictEqual(updateState, { type: 'ready', quality: 'stable' });
+	});
+
 	test('call normalizes mcpManagement installed payload and userDataSync hard fallback shape', async () => {
 		const host = {
 			desktopChannelCall: async (_channel, method) => {
@@ -404,6 +435,18 @@ suite('Tauri Desktop Channels', () => {
 		assert.strictEqual(result[1], 2);
 	});
 
+	test('localFilesystem read returns empty chunk fallback when host payload is null', async () => {
+		const host = {
+			desktopChannelCall: async () => null,
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const result = await registry.call('localFilesystem', 'read', [{ path: '/tmp/none.bin' }]);
+		assert.deepStrictEqual(Array.from(result[0].buffer), []);
+		assert.strictEqual(result[1], 0);
+	});
+
 	test('localFilesystem read normalizes Buffer-like data and preserves explicit bytesRead', async () => {
 		const host = {
 			desktopChannelCall: async () => [{ buffer: { type: 'Buffer', data: [1, 2, 3, 4] } }, 99],
@@ -447,6 +490,17 @@ suite('Tauri Desktop Channels', () => {
 		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
 
 		const stat = await registry.call('localFilesystem', 'stat', [{ path: '/tmp/folder/' }]);
+		assert.strictEqual(stat.type, 2);
+	});
+
+	test('localFilesystem stat infers directory type from known directory names', async () => {
+		const host = {
+			desktopChannelCall: async () => ({}),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const stat = await registry.call('localFilesystem', 'stat', [{ path: '/tmp/profiles' }]);
 		assert.strictEqual(stat.type, 2);
 	});
 
@@ -687,6 +741,88 @@ suite('Tauri Desktop Channels', () => {
 		});
 		listeners[6](null);
 		assert.deepStrictEqual(debugAttach, { sessionId: '', port: 0 });
+	});
+
+	test('listen normalizes extensionhostdebugservice and extension/mcp object events', async () => {
+		/** @type {((payload: unknown) => void)[]} */
+		const listeners = [];
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				listeners.push(onEvent);
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		let debugReload;
+		await registry.listen('extensionhostdebugservice', 'reload', undefined, payload => {
+			debugReload = payload;
+		});
+		listeners[0](undefined);
+		assert.deepStrictEqual(debugReload, { sessionId: '' });
+
+		let debugClose;
+		await registry.listen('extensionhostdebugservice', 'close', undefined, payload => {
+			debugClose = payload;
+		});
+		listeners[1]('bad');
+		assert.deepStrictEqual(debugClose, { sessionId: '' });
+
+		let debugTerminate;
+		await registry.listen('extensionhostdebugservice', 'terminate', undefined, payload => {
+			debugTerminate = payload;
+		});
+		listeners[2](null);
+		assert.deepStrictEqual(debugTerminate, { sessionId: '' });
+
+		let extInstall;
+		await registry.listen('extensions', 'onInstallExtension', undefined, payload => {
+			extInstall = payload;
+		});
+		listeners[3](null);
+		assert.deepStrictEqual(extInstall, {});
+
+		let extUninstallDone;
+		await registry.listen('extensions', 'onDidUninstallExtension', undefined, payload => {
+			extUninstallDone = payload;
+		});
+		listeners[4]('bad');
+		assert.deepStrictEqual(extUninstallDone, {});
+
+		let mcpUninstallDone;
+		await registry.listen('mcpManagement', 'onDidUninstallMcpServer', undefined, payload => {
+			mcpUninstallDone = payload;
+		});
+		listeners[5]('bad');
+		assert.deepStrictEqual(mcpUninstallDone, {});
+	});
+
+	test('listen normalizes watcher error and log payload variants', async () => {
+		/** @type {((payload: unknown) => void)[]} */
+		const listeners = [];
+		const host = {
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (_channel, _event, _arg, onEvent) => {
+				listeners.push(onEvent);
+				return async () => undefined;
+			}
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		let watcherError;
+		await registry.listen('watcher', 'onDidError', undefined, payload => {
+			watcherError = payload;
+		});
+		listeners[0]('from-string');
+		assert.deepStrictEqual(watcherError, { error: 'from-string' });
+
+		let watcherLog;
+		await registry.listen('watcher', 'onDidLogMessage', undefined, payload => {
+			watcherLog = payload;
+		});
+		listeners[1]({ type: 'warn', message: 'hello' });
+		assert.deepStrictEqual(watcherLog, { type: 'warn', message: 'hello' });
 	});
 
 	test('listen applies event-name fallback normalizers even for unknown channels', async () => {

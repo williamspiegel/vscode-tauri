@@ -4172,6 +4172,30 @@ mod tests {
         path
     }
 
+    fn write_user_extension(
+        repo_root: &Path,
+        publisher: &str,
+        name: &str,
+        version: &str,
+    ) -> PathBuf {
+        let extension_root = repo_root
+            .join(".vscode-tauri/user-data/extensions")
+            .join(format!("{publisher}.{name}"));
+        fs::create_dir_all(&extension_root).expect("extension root should be created");
+        let manifest = json!({
+            "publisher": publisher,
+            "name": name,
+            "version": version,
+            "engines": { "vscode": "*" }
+        });
+        fs::write(
+            extension_root.join("package.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should be written");
+        extension_root
+    }
+
     #[test]
     fn checksum_sha256_base64_matches_expected() {
         let nonce = SystemTime::now()
@@ -5802,5 +5826,324 @@ mod tests {
             .await
             .expect("getTerminalLayoutInfo should succeed");
         assert_eq!(loaded_layout["workspaceId"], json!("workspace-a"));
+    }
+
+    #[tokio::test]
+    async fn menubar_update_validates_payload_and_requires_app_handle() {
+        let repo_root = temp_repo_root("menubar-update");
+        let router = CapabilityRouter::new(repo_root);
+
+        let missing_data_error = router
+            .dispatch_channel("menubar", "updateMenubar", &json!([]))
+            .await
+            .expect_err("updateMenubar without payload should fail");
+        assert!(missing_data_error.contains("menubar.updateMenubar expected menubar data argument"));
+
+        let missing_menus_error = router
+            .dispatch_channel("menubar", "updateMenubar", &json!([{}]))
+            .await
+            .expect_err("updateMenubar without menus object should fail");
+        assert!(missing_menus_error.contains("menubar.updateMenubar missing menus object"));
+
+        let no_app_handle_error = router
+            .dispatch_channel(
+                "menubar",
+                "updateMenubar",
+                &json!([
+                    0,
+                    {
+                        "menus": {}
+                    }
+                ]),
+            )
+            .await
+            .expect_err("updateMenubar should fail when app handle is missing");
+        assert!(no_app_handle_error.contains("tauri app handle not initialized"));
+    }
+
+    #[test]
+    fn menubar_action_payload_maps_actions_with_and_without_args() {
+        let repo_root = temp_repo_root("menubar-actions");
+        let router = CapabilityRouter::new(repo_root);
+
+        {
+            let mut state = router
+                .menubar_state
+                .lock()
+                .expect("menubar state should lock");
+            state.action_by_menu_item_id.insert(
+                "item.noargs".to_string(),
+                MenubarAction::RunAction {
+                    command_id: "workbench.action.openSettings".to_string(),
+                    args: vec![],
+                },
+            );
+            state.action_by_menu_item_id.insert(
+                "item.args".to_string(),
+                MenubarAction::RunAction {
+                    command_id: "workbench.action.files.openFile".to_string(),
+                    args: vec![json!("/tmp/demo.txt"), json!({ "reveal": true })],
+                },
+            );
+        }
+
+        let no_args_payload = router
+            .menubar_action_payload("item.noargs")
+            .expect("menu payload should exist");
+        assert_eq!(
+            no_args_payload,
+            json!({
+                "id": "workbench.action.openSettings",
+                "from": "menu"
+            })
+        );
+
+        let with_args_payload = router
+            .menubar_action_payload("item.args")
+            .expect("menu payload with args should exist");
+        assert_eq!(
+            with_args_payload,
+            json!({
+                "id": "workbench.action.files.openFile",
+                "from": "menu",
+                "args": ["/tmp/demo.txt", { "reveal": true }]
+            })
+        );
+
+        assert_eq!(router.menubar_action_payload("item.missing"), None);
+    }
+
+    #[tokio::test]
+    async fn extensions_channel_argument_validation_and_stable_defaults() {
+        let repo_root = temp_repo_root("extensions-args");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let get_manifest_error = router
+            .dispatch_channel("extensions", "getManifest", &json!([]))
+            .await
+            .expect_err("getManifest without archive should fail");
+        assert!(get_manifest_error.contains("extensions.getManifest expected archive URI/path"));
+
+        let zip_error = router
+            .dispatch_channel("extensions", "zip", &json!([{}]))
+            .await
+            .expect_err("zip without location should fail");
+        assert!(zip_error.contains("extensions.zip expected extension.location"));
+
+        let install_error = router
+            .dispatch_channel("extensions", "install", &json!([]))
+            .await
+            .expect_err("install without archive should fail");
+        assert!(install_error.contains("extensions.install expected archive URI/path"));
+
+        let install_from_location_error = router
+            .dispatch_channel("extensions", "installFromLocation", &json!([]))
+            .await
+            .expect_err("installFromLocation without location should fail");
+        assert!(install_from_location_error
+            .contains("extensions.installFromLocation expected location URI/path"));
+
+        let install_from_gallery_missing_url_error = router
+            .dispatch_channel("extensions", "installFromGallery", &json!([{}]))
+            .await
+            .expect_err("installFromGallery without assets url should fail");
+        assert!(install_from_gallery_missing_url_error
+            .contains("extensions.installFromGallery missing download url"));
+
+        let install_gallery_extensions_missing_extension_error = router
+            .dispatch_channel("extensions", "installGalleryExtensions", &json!([[{}]]))
+            .await
+            .expect_err("installGalleryExtensions without extension payload should fail");
+        assert!(install_gallery_extensions_missing_extension_error
+            .contains("extensions.installGalleryExtensions expected extension payload"));
+
+        let install_gallery_extensions_missing_url_error = router
+            .dispatch_channel(
+                "extensions",
+                "installGalleryExtensions",
+                &json!([[{ "extension": {} }]]),
+            )
+            .await
+            .expect_err("installGalleryExtensions without download url should fail");
+        assert!(install_gallery_extensions_missing_url_error
+            .contains("extensions.installGalleryExtensions missing download url"));
+
+        let install_gallery_extensions_empty = router
+            .dispatch_channel("extensions", "installGalleryExtensions", &json!([{}]))
+            .await
+            .expect("installGalleryExtensions with non-array input should succeed");
+        assert_eq!(install_gallery_extensions_empty, json!([]));
+
+        let download_missing_payload_error = router
+            .dispatch_channel("extensions", "download", &json!([]))
+            .await
+            .expect_err("download without payload should fail");
+        assert!(download_missing_payload_error.contains("extensions.download expected extension payload"));
+
+        let download_missing_url_error = router
+            .dispatch_channel("extensions", "download", &json!([{}]))
+            .await
+            .expect_err("download without url should fail");
+        assert!(download_missing_url_error.contains("extensions.download missing download url"));
+
+        let uninstall_missing_payload_error = router
+            .dispatch_channel("extensions", "uninstall", &json!([]))
+            .await
+            .expect_err("uninstall without extension should fail");
+        assert!(uninstall_missing_payload_error
+            .contains("extensions.uninstall expected local extension payload"));
+
+        let toggle_scope_missing_payload_error = router
+            .dispatch_channel("extensions", "toggleApplicationScope", &json!([]))
+            .await
+            .expect_err("toggleApplicationScope without extension should fail");
+        assert!(toggle_scope_missing_payload_error
+            .contains("extensions.toggleApplicationScope expected local extension payload"));
+
+        let update_metadata_missing_payload_error = router
+            .dispatch_channel("extensions", "updateMetadata", &json!([]))
+            .await
+            .expect_err("updateMetadata without extension should fail");
+        assert!(update_metadata_missing_payload_error
+            .contains("extensions.updateMetadata expected local extension payload"));
+
+        let target_platform = router
+            .dispatch_channel("extensions", "getTargetPlatform", &json!([]))
+            .await
+            .expect("getTargetPlatform should succeed");
+        assert_eq!(target_platform, json!(current_target_platform()));
+
+        let copy_extensions = router
+            .dispatch_channel("extensions", "copyExtensions", &json!([]))
+            .await
+            .expect("copyExtensions should succeed");
+        assert_eq!(copy_extensions, Value::Null);
+
+        let cache_dir = repo_root.join(".vscode-tauri/user-data/CachedExtensionVSIXs");
+        fs::create_dir_all(&cache_dir).expect("cache directory should be created");
+        fs::write(cache_dir.join("stale.vsix"), b"stale").expect("cache fixture should be created");
+
+        let cleanup_result = router
+            .dispatch_channel("extensions", "cleanUp", &json!([]))
+            .await
+            .expect("cleanUp should succeed");
+        assert_eq!(cleanup_result, Value::Null);
+        assert!(cache_dir.is_dir());
+        let cache_entries = fs::read_dir(&cache_dir)
+            .expect("cache dir should be readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("cache entries should be collected");
+        assert!(cache_entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extensions_control_manifest_falls_back_to_defaults() {
+        let repo_root = temp_repo_root("extensions-control-manifest");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let default_manifest = json!({
+            "malicious": [],
+            "deprecated": {},
+            "search": [],
+            "autoUpdate": {}
+        });
+
+        let no_control_url = router
+            .dispatch_channel("extensions", "getExtensionsControlManifest", &json!([]))
+            .await
+            .expect("control manifest without configured URL should succeed");
+        assert_eq!(no_control_url, default_manifest);
+
+        fs::write(
+            repo_root.join("product.json"),
+            serde_json::to_vec_pretty(&json!({
+                "extensionsGallery": {
+                    "controlUrl": "://not-a-valid-url"
+                }
+            }))
+            .expect("product.json should serialize"),
+        )
+        .expect("product.json should be written");
+
+        let invalid_url_manifest = router
+            .dispatch_channel("extensions", "getExtensionsControlManifest", &json!([]))
+            .await
+            .expect("control manifest with invalid URL should succeed");
+        assert_eq!(invalid_url_manifest, default_manifest);
+    }
+
+    #[tokio::test]
+    async fn extensions_profile_metadata_and_uninstall_paths_are_stateful() {
+        let repo_root = temp_repo_root("extensions-profile-metadata");
+        let router = CapabilityRouter::new(repo_root.clone());
+
+        let extension_root = write_user_extension(&repo_root, "acme", "demo", "1.2.3");
+
+        let matched = router
+            .dispatch_channel(
+                "extensions",
+                "installExtensionsFromProfile",
+                &json!([[{ "id": "acme.demo" }]]),
+            )
+            .await
+            .expect("installExtensionsFromProfile should succeed");
+        let matched_items = matched
+            .as_array()
+            .expect("installExtensionsFromProfile should return array");
+        assert_eq!(matched_items.len(), 1);
+        assert_eq!(matched_items[0]["identifier"]["id"], json!("acme.demo"));
+
+        let installed = router
+            .dispatch_channel("extensions", "getInstalled", &json!([1]))
+            .await
+            .expect("getInstalled should succeed");
+        let extension = installed
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["identifier"]["id"] == json!("acme.demo")))
+            .cloned()
+            .expect("acme.demo extension should be installed");
+
+        let toggled = router
+            .dispatch_channel("extensions", "toggleApplicationScope", &json!([extension.clone()]))
+            .await
+            .expect("toggleApplicationScope should succeed");
+        assert_eq!(toggled["isApplicationScoped"], json!(true));
+
+        let updated = router
+            .dispatch_channel(
+                "extensions",
+                "updateMetadata",
+                &json!([toggled.clone(), { "pinned": true, "isMachineScoped": true }]),
+            )
+            .await
+            .expect("updateMetadata should succeed");
+        assert_eq!(updated["pinned"], json!(true));
+        assert_eq!(updated["isMachineScoped"], json!(true));
+
+        router
+            .dispatch_channel("extensions", "resetPinnedStateForAllUserExtensions", &json!([false]))
+            .await
+            .expect("resetPinnedStateForAllUserExtensions should succeed");
+        let after_reset = router
+            .dispatch_channel("extensions", "getInstalled", &json!([1]))
+            .await
+            .expect("getInstalled after reset should succeed");
+        let after_reset_item = after_reset
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["identifier"]["id"] == json!("acme.demo")))
+            .cloned()
+            .expect("acme.demo extension should still be installed");
+        assert_eq!(after_reset_item["pinned"], json!(false));
+
+        let uninstall_many = router
+            .dispatch_channel(
+                "extensions",
+                "uninstallExtensions",
+                &json!([[{ "extension": after_reset_item.clone() }, {}]]),
+            )
+            .await
+            .expect("uninstallExtensions should succeed");
+        assert_eq!(uninstall_many, Value::Null);
+        assert!(!extension_root.exists());
     }
 }
