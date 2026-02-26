@@ -4271,6 +4271,189 @@ mod tests {
         assert_eq!(from_location.as_deref(), Some("location-profile"));
     }
 
+    #[test]
+    fn helper_arg_parsers_and_watch_ids_are_stable() {
+        assert_eq!(
+            parse_u64_arg(Some(&json!(7_u64)), "bad").expect("u64 should parse"),
+            7
+        );
+        assert_eq!(
+            parse_u64_arg(Some(&json!(9_i64)), "bad").expect("positive i64 should parse"),
+            9
+        );
+        assert!(
+            parse_u64_arg(Some(&json!(-1_i64)), "bad")
+                .expect_err("negative i64 should fail")
+                .contains("bad")
+        );
+        assert!(
+            parse_u64_arg(None, "missing")
+                .expect_err("missing value should fail")
+                .contains("missing")
+        );
+
+        assert_eq!(
+            parse_usize_arg(Some(&json!(3_u64)), "bad").expect("usize should parse"),
+            3
+        );
+        assert!(
+            parse_usize_arg(Some(&json!(-2_i64)), "bad")
+                .expect_err("negative should fail")
+                .contains("bad")
+        );
+
+        assert_eq!(
+            parse_watch_id_arg(Some(&json!("session")), "bad").expect("string id should parse"),
+            "session"
+        );
+        assert_eq!(
+            parse_watch_id_arg(Some(&json!(42_u64)), "bad").expect("u64 id should parse"),
+            "42"
+        );
+        assert_eq!(
+            parse_watch_id_arg(Some(&json!(-4_i64)), "bad").expect("i64 id should parse"),
+            "-4"
+        );
+        assert!(
+            parse_watch_id_arg(Some(&json!(true)), "bad")
+                .expect_err("bool id should fail")
+                .contains("bad")
+        );
+
+        assert_eq!(
+            local_filesystem_watch_id("session-1", "request-2"),
+            "localfs:session-1:request-2"
+        );
+    }
+
+    #[test]
+    fn helper_string_and_uri_path_normalization_is_stable() {
+        assert_eq!(
+            extract_string_arg(Some(&json!("direct"))).as_deref(),
+            Some("direct")
+        );
+        assert_eq!(
+            extract_string_arg(Some(&json!({ "path": "/tmp/from-path" }))).as_deref(),
+            Some("/tmp/from-path")
+        );
+        assert_eq!(extract_string_arg(Some(&json!({ "bad": true }))), None);
+        assert_eq!(extract_string_arg(None), None);
+
+        let uri_path = normalize_file_uri_path("file:///tmp/demo.txt");
+        assert_eq!(to_forward_slash_path(&uri_path), "/tmp/demo.txt");
+
+        let raw_path = normalize_file_uri_path("/tmp/raw.txt");
+        assert_eq!(to_forward_slash_path(&raw_path), "/tmp/raw.txt");
+
+        let file_uri = file_uri_value_from_path(&PathBuf::from("relative/path.txt"));
+        assert_eq!(file_uri["scheme"], json!("file"));
+        assert_eq!(file_uri["query"], json!(""));
+        assert_eq!(file_uri["fragment"], json!(""));
+        assert_eq!(file_uri["path"], json!("/relative/path.txt"));
+    }
+
+    #[test]
+    fn byte_decoding_helpers_cover_array_buffer_and_indexed_shapes() {
+        assert_eq!(value_to_u8(&json!(300)), Some(44));
+        assert_eq!(value_to_u8(&json!(-1)), Some(255));
+        assert_eq!(value_to_u8(&json!(12.7)), Some(12));
+        assert_eq!(value_to_u8(&json!("260")), Some(4));
+        assert_eq!(value_to_u8(&json!("not-a-number")), None);
+
+        assert_eq!(
+            decode_byte_array(&json!([0, 255, 256, -1, "2"])),
+            Some(vec![0, 255, 0, 255, 2])
+        );
+        assert_eq!(
+            decode_byte_array(&json!({ "type": "Buffer", "data": [1, 2, 3] })),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            decode_byte_array(&json!({ "buffer": [9, 8, 7], "byteLength": 2 })),
+            Some(vec![9, 8])
+        );
+        assert_eq!(
+            decode_byte_array(&json!({ "0": 65, "2": 67, "1": 66 })),
+            Some(vec![65, 66, 67])
+        );
+        assert_eq!(decode_byte_array(&json!({ "data": "bad" })), None);
+    }
+
+    #[test]
+    fn workspace_and_recent_path_helpers_handle_nested_shapes() {
+        let workspace_by_id = workspace_identifier_key(Some(&json!({ "id": "workspace-id" })));
+        assert_eq!(workspace_by_id.as_deref(), Some("workspace-id"));
+
+        let workspace_by_config_path = workspace_identifier_key(Some(&json!({
+            "configPath": {
+                "path": "/tmp/config.code-workspace"
+            }
+        })));
+        assert_eq!(
+            workspace_by_config_path.as_deref(),
+            Some("/tmp/config.code-workspace")
+        );
+
+        let workspace_by_uri = workspace_identifier_key(Some(&json!({
+            "uri": {
+                "path": "/tmp/folder"
+            }
+        })));
+        assert_eq!(workspace_by_uri.as_deref(), Some("/tmp/folder"));
+
+        let preserved_workspace = workspace_identifier_from_value(&json!({
+            "id": "ws-1",
+            "configPath": "/tmp/preserved.code-workspace"
+        }));
+        assert_eq!(preserved_workspace["id"], json!("ws-1"));
+        assert_eq!(
+            preserved_workspace["configPath"]["path"],
+            json!("/tmp/preserved.code-workspace")
+        );
+
+        let recent_entry = json!({
+            "workspace": {
+                "configPath": { "path": "/tmp/workspace.code-workspace" }
+            },
+            "fileUri": { "path": "/tmp/readme.md" }
+        });
+        let candidate = json!({
+            "path": "/tmp/readme.md"
+        });
+        assert_eq!(recent_entry_matches_path(&recent_entry, &candidate), true);
+        assert_eq!(
+            recent_entry_matches_path(&recent_entry, &json!({ "path": "/tmp/nope.md" })),
+            false
+        );
+
+        let mut collected = collect_recent_paths(&recent_entry);
+        collected.sort();
+        assert!(collected.contains(&"/tmp/workspace.code-workspace".to_string()));
+        assert!(collected.contains(&"/tmp/readme.md".to_string()));
+    }
+
+    #[test]
+    fn metadata_and_fallback_count_helpers_are_stable() {
+        use std::time::Duration;
+
+        assert_eq!(to_epoch_millis(None), 0);
+        assert_eq!(
+            to_epoch_millis(Some(UNIX_EPOCH + Duration::from_millis(1234))),
+            1234
+        );
+
+        let repo_root = temp_repo_root("fallback-count-helpers");
+        let missing_metrics = read_fallback_counts(&repo_root.join("missing-metrics.json"))
+            .expect("missing metrics file should return empty map");
+        assert!(missing_metrics.is_empty());
+
+        let metrics_path = repo_root.join("metrics.json");
+        fs::write(&metrics_path, "{ not-json }").expect("invalid json fixture should be written");
+        let parse_error = read_fallback_counts(&metrics_path)
+            .expect_err("invalid json should return parse error");
+        assert!(parse_error.contains("failed to parse fallback metrics"));
+    }
+
     #[tokio::test]
     async fn user_data_profiles_workspace_mapping_tracks_profile_lifecycle() {
         let repo_root = temp_repo_root("profiles");
@@ -6616,5 +6799,44 @@ mod tests {
             .expect("uninstallExtensions should succeed");
         assert_eq!(uninstall_many, Value::Null);
         assert!(!extension_root.exists());
+    }
+
+    #[test]
+    fn helper_edge_cases_cover_epoch_metrics_and_nested_data_payloads() {
+        assert!(parse_watch_id_arg(None, "missing watch id")
+            .expect_err("missing watch id should fail")
+            .contains("missing watch id"));
+        assert_eq!(workspace_identifier_key(None), None);
+
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("epoch subtraction should succeed");
+        assert_eq!(to_epoch_millis(Some(before_epoch)), 0);
+
+        assert_eq!(decode_byte_array(&json!({ "data": [5, 6] })), Some(vec![5, 6]));
+        assert_eq!(
+            decode_byte_array(&json!({ "buffer": { "data": [9, 8, 7] }, "byteLength": 2 })),
+            Some(vec![9, 8])
+        );
+
+        let repo_root = temp_repo_root("fallback-count-edge-cases");
+        let metrics_path = repo_root.join("metrics.json");
+        fs::write(
+            &metrics_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "updated_at_ms": 1,
+                "counts": {
+                    "channel:logger:log": 2,
+                    "channel:bad:value": "oops"
+                }
+            }))
+            .expect("metrics payload should serialize"),
+        )
+        .expect("metrics payload should be written");
+
+        let parsed = read_fallback_counts(&metrics_path).expect("valid file should parse");
+        assert_eq!(parsed.get("channel:logger:log"), Some(&2));
+        assert!(!parsed.contains_key("channel:bad:value"));
     }
 }
