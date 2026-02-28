@@ -8,6 +8,9 @@ node build\tauri\contract-test.mjs
 if %errorlevel% neq 0 exit /b %errorlevel%
 node build\tauri\smoke.mjs
 if %errorlevel% neq 0 exit /b %errorlevel%
+echo ### Tauri API extension build
+call .\node_modules\.bin\tsc.cmd -p "%CD%\extensions\vscode-api-tests\tsconfig.json"
+if %errorlevel% neq 0 exit /b %errorlevel%
 
 set VSCODEUSERDATADIR=%TEMP%\vscodeuserfolder-%RANDOM%-%TIME:~6,2%
 set VSCODEAPITESTDIR=%TEMP%\vscode-api-tests-%RANDOM%-%TIME:~6,2%

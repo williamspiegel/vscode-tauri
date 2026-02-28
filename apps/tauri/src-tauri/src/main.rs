@@ -132,6 +132,7 @@ struct ExtensionHostBridgeConfig {
     args: Vec<String>,
     exec_argv: Vec<String>,
     env: Vec<ExtensionHostBridgeEnvEntry>,
+    vscode_version: String,
 }
 
 #[derive(Serialize)]
@@ -982,6 +983,25 @@ impl AppState {
             args: vec!["--skipWorkspaceStorageLock".to_string()],
             exec_argv,
             env: env_entries,
+            vscode_version: read_json_file(&self.repo_root.join("product.json"))
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| {
+                    read_json_file(&self.repo_root.join("package.json"))
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("version")
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned)
+                        })
+                })
+                .unwrap_or_else(|| "0.0.0".to_string()),
         };
         let encoded =
             BASE64_STANDARD.encode(serde_json::to_vec(&config).map_err(|error| error.to_string())?);
@@ -1185,7 +1205,7 @@ impl AppState {
 
     async fn forward_extension_host_frames(
         channel_runtime: Arc<Mutex<ChannelRuntimeState>>,
-        extension_host_id: String,
+        _extension_host_id: String,
         nonce: String,
         mut stdout: tokio::process::ChildStdout,
     ) {
@@ -1222,13 +1242,6 @@ impl AppState {
                     "extensionHostStarter",
                     "onDynamicMessagePortFrame",
                     &nonce,
-                    json!(frame),
-                );
-                Self::emit_dynamic_subscription_event(
-                    &channel_runtime,
-                    "extensionHostStarter",
-                    "onDynamicMessage",
-                    &extension_host_id,
                     json!(frame),
                 );
             }

@@ -14,6 +14,9 @@ echo "### Tauri integration preflight"
 node build/tauri/contract-test.mjs
 node build/tauri/smoke.mjs
 
+echo "### Tauri API extension build"
+./node_modules/.bin/tsc -p "$ROOT/extensions/vscode-api-tests/tsconfig.json"
+
 VSCODEUSERDATADIR=$(mktemp -d 2>/dev/null)
 VSCODEAPITESTDIR=$(mktemp -d 2>/dev/null)
 VSCODECRASHDIR=$ROOT/.build/crashes

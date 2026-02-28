@@ -82,6 +82,15 @@ if (Array.isArray(workerData?.execArgv)) {
   });
 }
 
+if (typeof workerData?.vscodeVersion === 'string' && workerData.vscodeVersion.length > 0) {
+  Object.defineProperty(process.versions, 'vscode', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: workerData.vscodeVersion,
+  });
+}
+
 if (Array.isArray(workerData?.args)) {
   const entry = typeof workerData.entryPoint === 'string' ? workerData.entryPoint : 'extensionHostProcess.js';
   Object.defineProperty(process, 'argv', {

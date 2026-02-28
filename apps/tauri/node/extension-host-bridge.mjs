@@ -34,6 +34,7 @@ function parseConfig() {
     env: Array.isArray(parsed.env)
       ? parsed.env.filter(value => value && typeof value === 'object')
       : [],
+    vscodeVersion: typeof parsed.vscodeVersion === 'string' ? parsed.vscodeVersion : '',
   };
 }
 
@@ -139,6 +140,7 @@ const worker = new Worker(workerScript, {
     args: config.args,
     execArgv: config.execArgv,
     env: config.env,
+    vscodeVersion: config.vscodeVersion,
   },
   stdout: true,
   stderr: true,

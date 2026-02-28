@@ -816,8 +816,12 @@ impl CapabilityRouter {
         match channel {
             "logger" => match method {
                 "getRegisteredLoggers" => Ok(Some(json!([]))),
-                "createLogger" | "log" | "consoleLog" | "registerLogger" | "deregisterLogger"
-                | "setLogLevel" | "setVisibility" => Ok(Some(Value::Null)),
+                "createLogger" | "registerLogger" | "deregisterLogger" | "setLogLevel"
+                | "setVisibility" => Ok(Some(Value::Null)),
+                "log" | "consoleLog" => {
+                    maybe_trace_integration_logger_call(method, args);
+                    Ok(Some(Value::Null))
+                }
                 _ => Ok(None),
             },
             "storage" => match method {
@@ -2703,6 +2707,40 @@ fn first_arg(args: &Value) -> Option<&Value> {
 
 fn nth_arg(args: &Value, index: usize) -> Option<&Value> {
     args.as_array().and_then(|items| items.get(index))
+}
+
+fn maybe_trace_integration_logger_call(method: &str, args: &Value) {
+    if std::env::var("VSCODE_TAURI_INTEGRATION").ok().as_deref() != Some("1") {
+        return;
+    }
+
+    fn visit(value: &Value, traces: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                if text.starts_with("[tauri.integration.") {
+                    traces.push(text.clone());
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    visit(item, traces);
+                }
+            }
+            Value::Object(entries) => {
+                for value in entries.values() {
+                    visit(value, traces);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut traces = Vec::new();
+    visit(args, &mut traces);
+
+    for trace in traces {
+        eprintln!("[host.integration.trace] logger.{method} {trace}");
+    }
 }
 
 fn parse_u64_arg(value: Option<&Value>, message: &str) -> Result<u64, String> {
