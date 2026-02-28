@@ -181,6 +181,11 @@ let startupCurrentAttemptPath: string | undefined;
 let startupHost: HostClient | undefined;
 let startupWindowConfig: Record<string, unknown> | undefined;
 
+type AutomationLogFile = {
+	relativePath?: string;
+	contents?: string;
+};
+
 function isHttpOrigin(): boolean {
 	return (
 		window.location.protocol === "http:" ||
@@ -1210,11 +1215,115 @@ function formatErrorDetails(error: unknown): string {
 	}
 }
 
+function formatAutomationArg(value: unknown): string {
+	if (typeof value === "string") {
+		return value;
+	}
+
+	if (value instanceof Error) {
+		return formatErrorDetails(value);
+	}
+
+	try {
+		return JSON.stringify(value);
+	} catch {
+		return String(value);
+	}
+}
+
+function getWindowConfigString(
+	config: Record<string, unknown> | undefined,
+	key: string,
+): string | undefined {
+	if (!config) {
+		return undefined;
+	}
+
+	const direct = config[key];
+	if (typeof direct === "string" && direct.length > 0) {
+		return direct;
+	}
+
+	const args = asRecord(config.args);
+	const fromArgs = args[key];
+	if (typeof fromArgs === "string" && fromArgs.length > 0) {
+		return fromArgs;
+	}
+
+	return undefined;
+}
+
+function isExtensionTestsWindow(
+	config: Record<string, unknown> | undefined,
+): boolean {
+	return typeof getWindowConfigString(config, "extensionTestsPath") === "string";
+}
+
 function shouldFailFastOnStartupFailure(): boolean {
-	return (
-		typeof startupWindowConfig?.extensionTestsPath === "string" &&
-		startupWindowConfig.extensionTestsPath.length > 0
-	);
+	return isExtensionTestsWindow(startupWindowConfig);
+}
+
+function installAutomationWindowHooks(
+	host: HostClient,
+	windowConfig: Record<string, unknown>,
+): void {
+	if (!isExtensionTestsWindow(windowConfig)) {
+		return;
+	}
+
+	const automatedWindow = window as Window & {
+		codeAutomationLog?: (type: string, args: unknown[]) => void;
+		codeAutomationExit?: (
+			code: number,
+			logs: ReadonlyArray<AutomationLogFile>,
+		) => void;
+	};
+
+	automatedWindow.codeAutomationLog = (type: string, args: unknown[]) => {
+		const entries = Array.isArray(args) ? args : [];
+		const message =
+			entries.length > 0
+				? formatAutomationArg(entries[0])
+				: "[automation] log";
+		const detail = entries
+			.slice(1)
+			.map((entry) => formatAutomationArg(entry))
+			.filter((entry) => entry.length > 0)
+			.join("\n");
+
+		void host
+			.invokeMethod("host.log", {
+				level: type,
+				source: "automation",
+				message,
+				detail,
+			})
+			.catch(() => undefined);
+	};
+
+	automatedWindow.codeAutomationExit = (
+		code: number,
+		logs: ReadonlyArray<AutomationLogFile>,
+	) => {
+		const summarizedLogs = Array.isArray(logs)
+			? logs.map((log) => ({
+					relativePath:
+						typeof log?.relativePath === "string" ? log.relativePath : "",
+					size:
+						typeof log?.contents === "string" ? log.contents.length : 0,
+				}))
+			: [];
+
+		void host
+			.invokeMethod("host.automationExit", {
+				code,
+				logs: summarizedLogs,
+			})
+			.catch((error) => {
+				console.error("[automation.exit] failed", error);
+				void host.invokeMethod("window.close", {}).catch(() => undefined);
+			});
+	};
 }
 
 async function reportStartupFailureToHost(message: string): Promise<void> {
@@ -1511,6 +1620,7 @@ async function main(): Promise<void> {
 		host.resolveWindowConfig(),
 	);
 	startupWindowConfig = windowConfig;
+	installAutomationWindowHooks(host, windowConfig);
 	const appRoot =
 		typeof windowConfig.appRoot === "string" ? windowConfig.appRoot : "";
 	console.info("[startup] using appRoot", appRoot);

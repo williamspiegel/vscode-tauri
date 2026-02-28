@@ -414,14 +414,26 @@ impl AppState {
                             envelope_literal
                         );
                         if window.eval(script.as_str()).is_ok() {
-                            if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                            if is_integration_startup_watchdog_enabled()
+                                && channel == "extensionHostStarter"
+                                && matches!(
+                                    event,
+                                    "onDynamicStdout" | "onDynamicStderr" | "onDynamicExit"
+                                )
+                            {
                                 eprintln!(
                                     "[host.desktop.channelEvent.emit] via=eval channel={} event={} subscriptionId={}",
                                     channel, event, subscription_id
                                 );
                             }
                             return;
-                        } else if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                        } else if is_integration_startup_watchdog_enabled()
+                            && channel == "extensionHostStarter"
+                            && matches!(
+                                event,
+                                "onDynamicStdout" | "onDynamicStderr" | "onDynamicExit"
+                            )
+                        {
                             eprintln!(
                                 "[host.desktop.channelEvent.emit] via=eval-failed channel={} event={} subscriptionId={}",
                                 channel, event, subscription_id
@@ -430,7 +442,10 @@ impl AppState {
                     }
                 }
 
-                if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                if is_integration_startup_watchdog_enabled()
+                    && channel == "extensionHostStarter"
+                    && matches!(event, "onDynamicStdout" | "onDynamicStderr" | "onDynamicExit")
+                {
                     eprintln!(
                         "[host.desktop.channelEvent.emit] via=window.emit channel={} event={} subscriptionId={}",
                         channel, event, subscription_id
@@ -532,7 +547,10 @@ impl AppState {
             Err(_) => Vec::new(),
         };
 
-        if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+        if is_integration_startup_watchdog_enabled()
+            && channel == "extensionHostStarter"
+            && matches!(event, "onDynamicStdout" | "onDynamicStderr" | "onDynamicExit")
+        {
             eprintln!(
                 "[host.desktop.channelEvent.match] channel={} event={} arg={} subscriptions={}",
                 channel,
@@ -1199,15 +1217,6 @@ impl AppState {
                 let frame = raw_buffer[4..(4 + frame_length)].to_vec();
                 raw_buffer.drain(..(4 + frame_length));
 
-                if is_integration_startup_watchdog_enabled() {
-                    eprintln!(
-                        "[host.extensionHostStarter.frame] id={} nonce={} bytes={}",
-                        extension_host_id,
-                        nonce,
-                        frame.len()
-                    );
-                }
-
                 Self::emit_dynamic_subscription_event(
                     &channel_runtime,
                     "extensionHostStarter",
@@ -1839,7 +1848,11 @@ async fn host_invoke(
 
     if std::env::var("VSCODE_TAURI_INTEGRATION").ok().as_deref() == Some("1") {
         match request.method.as_str() {
-            "protocol.handshake" | "desktop.resolveWindowConfig" | "host.log" | "window.close" => {
+            "protocol.handshake"
+            | "desktop.resolveWindowConfig"
+            | "host.log"
+            | "host.automationExit"
+            | "window.close" => {
                 eprintln!("[host.invoke] method={}", request.method);
             }
             _ => {}
@@ -1957,6 +1970,50 @@ async fn host_invoke(
         return Ok(ok_response(request.id, json!({ "logged": true })));
     }
 
+    if request.method == "host.automationExit" {
+        let object = match request.params.as_object() {
+            Some(value) => value,
+            None => {
+                return Ok(error_response(
+                    request.id,
+                    -32602,
+                    "host.automationExit expects object params",
+                ));
+            }
+        };
+        let code = match object
+            .get("code")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+        {
+            Some(value) => value,
+            None => {
+                return Ok(error_response(
+                    request.id,
+                    -32602,
+                    "host.automationExit requires an integer code",
+                ));
+            }
+        };
+        let log_count = object
+            .get("logs")
+            .and_then(Value::as_array)
+            .map(|value| value.len())
+            .unwrap_or(0);
+
+        println!(
+            "[host.automationExit] code={} logs={}",
+            code, log_count
+        );
+
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            std::process::exit(code);
+        });
+
+        return Ok(ok_response(request.id, json!({ "accepted": true })));
+    }
+
     if request.method == "host.httpRequest" {
         let params = match serde_json::from_value::<HostHttpRequestParams>(request.params.clone()) {
             Ok(value) => value,
@@ -2015,7 +2072,10 @@ async fn host_invoke(
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new()));
 
-        if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+        if is_integration_startup_watchdog_enabled()
+            && channel == "extensionHostStarter"
+            && method != "writeMessagePortFrame"
+        {
             eprintln!(
                 "[host.desktop.channelCall] channel={} method={}",
                 channel, method
@@ -2074,7 +2134,10 @@ async fn host_invoke(
         return match state.router.dispatch_channel(&channel, &method, &args).await {
             Ok(value) => Ok(ok_response(request.id, value)),
             Err(error) => {
-                if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                if is_integration_startup_watchdog_enabled()
+                    && channel == "extensionHostStarter"
+                    && method != "writeMessagePortFrame"
+                {
                     eprintln!(
                         "[host.desktop.channelCall.error] channel={} method={} error={}",
                         channel, method, error

@@ -841,7 +841,6 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
               return;
             }
             const frame = Array.from(toUint8Array(event.data));
-            logMessagePortBridge(`write frame nonce=${nonce} bytes=${frame.length}`);
             void host
               .desktopChannelCall('extensionHostStarter', 'writeMessagePortFrame', [nonce, frame])
               .catch(error => {
@@ -864,11 +863,9 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
                 return;
               }
               if (!rendererPortReady) {
-                logMessagePortBridge(`queue frame nonce=${nonce} bytes=${frame.byteLength}`);
                 pendingFrames.push(frame);
                 return;
               }
-              logMessagePortBridge(`forward frame nonce=${nonce} bytes=${frame.byteLength}`);
               channel.port2.postMessage(frame);
             })
             .then(stop => {

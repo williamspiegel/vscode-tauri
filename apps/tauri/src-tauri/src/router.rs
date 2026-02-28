@@ -1806,17 +1806,30 @@ impl CapabilityRouter {
                 | "toggleDevTools"
                 | "reload"
                 | "relaunch"
-                | "quit"
-                | "exit"
                 | "updateTouchBar"
                 | "updateWindowControls"
                 | "pickFileFolderAndOpen"
                 | "pickFileAndOpen"
                 | "pickFolderAndOpen"
                 | "pickWorkspaceAndOpen" => Ok(Some(Value::Null)),
+                "quit" => {
+                    schedule_process_exit(0);
+                    Ok(Some(Value::Null))
+                }
+                "exit" => {
+                    let code = parse_i32_arg(nth_arg(args, 0), "nativeHost.exit expected exit code")?;
+                    schedule_process_exit(code);
+                    Ok(Some(Value::Null))
+                }
                 "focusWindow" => {
                     self.window
                         .invoke("window.focus", &json!({ "target": "main" }))
+                        .await?;
+                    Ok(Some(Value::Null))
+                }
+                "closeWindow" => {
+                    self.window
+                        .invoke("window.close", &json!({ "target": "main" }))
                         .await?;
                     Ok(Some(Value::Null))
                 }
@@ -2711,6 +2724,15 @@ fn parse_u64_arg(value: Option<&Value>, message: &str) -> Result<u64, String> {
 fn parse_usize_arg(value: Option<&Value>, message: &str) -> Result<usize, String> {
     let parsed = parse_u64_arg(value, message)?;
     usize::try_from(parsed).map_err(|_| message.to_string())
+}
+
+fn parse_i32_arg(value: Option<&Value>, message: &str) -> Result<i32, String> {
+    let value = value.ok_or_else(|| message.to_string())?;
+    let parsed = value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .ok_or_else(|| message.to_string())?;
+    i32::try_from(parsed).map_err(|_| message.to_string())
 }
 
 fn parse_watch_id_arg(value: Option<&Value>, message: &str) -> Result<String, String> {
@@ -4157,6 +4179,13 @@ fn extract_url_from_any(value: &Value) -> Option<String> {
     Some(url)
 }
 
+fn schedule_process_exit(code: i32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::process::exit(code);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4195,6 +4224,29 @@ mod tests {
                 .expect("dialog responses should lock")
                 .pop_front()
                 .unwrap_or(Ok(None))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingWindowCapability {
+        calls: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl RecordingWindowCapability {
+        fn take_calls(&self) -> Vec<(String, Value)> {
+            let mut calls = self.calls.lock().expect("window calls should lock");
+            std::mem::take(&mut *calls)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WindowCapability for RecordingWindowCapability {
+        async fn invoke(&self, method: &str, params: &Value) -> Result<Option<Value>, String> {
+            self.calls
+                .lock()
+                .expect("window calls should lock")
+                .push((method.to_string(), params.clone()));
+            Ok(Some(Value::Null))
         }
     }
 
@@ -6843,6 +6895,16 @@ mod tests {
             .expect_err("missing watch id should fail")
             .contains("missing watch id"));
         assert_eq!(workspace_identifier_key(None), None);
+        assert_eq!(
+            parse_i32_arg(Some(&json!(5)), "missing exit code")
+                .expect("numeric exit code should parse"),
+            5
+        );
+        assert!(
+            parse_i32_arg(Some(&json!("oops")), "missing exit code")
+                .expect_err("non-numeric exit code should fail")
+                .contains("missing exit code")
+        );
 
         let before_epoch = UNIX_EPOCH
             .checked_sub(std::time::Duration::from_secs(1))
@@ -7009,5 +7071,36 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].0, "dialogs.saveFile");
         assert_eq!(calls[1].0, "dialogs.saveFile");
+    }
+
+    #[tokio::test]
+    async fn native_host_close_window_maps_to_main_window_close() {
+        let repo_root = temp_repo_root("native-host-close-window");
+        let mut router = CapabilityRouter::new(repo_root);
+        let window = RecordingWindowCapability::default();
+        router.window = Arc::new(window.clone());
+
+        let result = router
+            .dispatch_channel("nativeHost", "closeWindow", &json!([]))
+            .await
+            .expect("closeWindow should succeed");
+        assert_eq!(result, Value::Null);
+
+        let calls = window.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "window.close");
+        assert_eq!(calls[0].1["target"], json!("main"));
+    }
+
+    #[tokio::test]
+    async fn native_host_exit_requires_numeric_exit_code() {
+        let repo_root = temp_repo_root("native-host-exit");
+        let router = CapabilityRouter::new(repo_root);
+
+        let error = router
+            .dispatch_channel("nativeHost", "exit", &json!([]))
+            .await
+            .expect_err("exit without code should fail");
+        assert!(error.contains("nativeHost.exit expected exit code"));
     }
 }

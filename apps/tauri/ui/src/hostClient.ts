@@ -623,7 +623,10 @@ export class HostClient {
 					HostClient.normalizeDesktopChannelPayload(payload);
 
 				const handler = this.desktopChannelHandlers.get(subscriptionId);
-				if (payload.channel === "extensionHostStarter") {
+				if (
+					payload.channel === "extensionHostStarter" &&
+					payload.event !== "onDynamicMessagePortFrame"
+				) {
 					void this
 						.invokeMethod("host.log", {
 							level: "info",

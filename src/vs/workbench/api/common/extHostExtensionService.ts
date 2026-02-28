@@ -730,19 +730,34 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 	}
 
 	public async $extensionTestsExecute(): Promise<number> {
+		const shouldTrace = process.env['VSCODE_TAURI_INTEGRATION'] === '1';
+		if (shouldTrace) {
+			console.error('[tauri.integration.extHostTests] execute requested');
+		}
 		await this._eagerExtensionsActivated.wait();
 		try {
-			return await this._doHandleExtensionTests();
+			const result = await this._doHandleExtensionTests();
+			if (shouldTrace) {
+				console.error(`[tauri.integration.extHostTests] execute resolved code=${result}`);
+			}
+			return result;
 		} catch (error) {
 			console.error(error); // ensure any error message makes it onto the console
+			if (shouldTrace) {
+				console.error('[tauri.integration.extHostTests] execute failed', error);
+			}
 			throw error;
 		}
 	}
 
 	private async _doHandleExtensionTests(): Promise<number> {
 		const { extensionDevelopmentLocationURI, extensionTestsLocationURI } = this._initData.environment;
+		const shouldTrace = process.env['VSCODE_TAURI_INTEGRATION'] === '1';
 		if (!extensionDevelopmentLocationURI || !extensionTestsLocationURI) {
 			throw new Error(nls.localize('extensionTestError1', "Cannot load test runner."));
+		}
+		if (shouldTrace) {
+			console.error(`[tauri.integration.extHostTests] loading runner path=${extensionTestsLocationURI.toString()}`);
 		}
 
 		const extensionDescription = (await this.getExtensionPathIndex()).findSubstr(extensionTestsLocationURI);
@@ -752,6 +767,9 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 		const testRunner = await (isESM
 			? this._loadESMModule<ITestRunner | INewTestRunner | undefined>(null, extensionTestsLocationURI, new ExtensionActivationTimesBuilder(false))
 			: this._loadCommonJSModule<ITestRunner | INewTestRunner | undefined>(null, extensionTestsLocationURI, new ExtensionActivationTimesBuilder(false)));
+		if (shouldTrace) {
+			console.error(`[tauri.integration.extHostTests] runner loaded isESM=${isESM}`);
+		}
 
 		if (!testRunner || typeof testRunner.run !== 'function') {
 			throw new Error(nls.localize('extensionTestError', "Path {0} does not point to a valid extension test runner.", extensionTestsLocationURI.toString()));
@@ -761,11 +779,17 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 		return new Promise<number>((resolve, reject) => {
 			const oldTestRunnerCallback = (error: Error, failures: number | undefined) => {
 				if (error) {
+					if (shouldTrace) {
+						console.error('[tauri.integration.extHostTests] callback error', error);
+					}
 					if (isCI) {
 						this._logService.error(`Test runner called back with error`, error);
 					}
 					reject(error);
 				} else {
+					if (shouldTrace) {
+						console.error(`[tauri.integration.extHostTests] callback failures=${failures ?? 0}`);
+					}
 					if (isCI) {
 						if (failures) {
 							this._logService.info(`Test runner called back with ${failures} failures.`);
@@ -785,12 +809,18 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 			if (runResult && runResult.then) {
 				runResult
 					.then(() => {
+						if (shouldTrace) {
+							console.error('[tauri.integration.extHostTests] promise resolved');
+						}
 						if (isCI) {
 							this._logService.info(`Test runner finished successfully.`);
 						}
 						resolve(0);
 					})
 					.catch((err: unknown) => {
+						if (shouldTrace) {
+							console.error('[tauri.integration.extHostTests] promise rejected', err);
+						}
 						if (isCI) {
 							this._logService.error(`Test runner finished with error`, err);
 						}

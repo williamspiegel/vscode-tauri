@@ -579,26 +579,45 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 	}
 
 	private async _handleExtensionTests(): Promise<void> {
+		const shouldTrace = process.env['VSCODE_TAURI_INTEGRATION'] === '1';
 		if (!this._environmentService.isExtensionDevelopment || !this._environmentService.extensionTestsLocationURI) {
+			if (shouldTrace) {
+				this._logService.info('[tauri.integration.extensionTests] skipped isExtensionDevelopment=', this._environmentService.isExtensionDevelopment, 'hasTestsPath=', !!this._environmentService.extensionTestsLocationURI);
+			}
 			return;
+		}
+		if (shouldTrace) {
+			this._logService.info('[tauri.integration.extensionTests] locating host for', this._environmentService.extensionTestsLocationURI.toString());
 		}
 
 		const extensionHostManager = this.findTestExtensionHost(this._environmentService.extensionTestsLocationURI);
 		if (!extensionHostManager) {
 			const msg = nls.localize('extensionTestError', "No extension host found that can launch the test runner at {0}.", this._environmentService.extensionTestsLocationURI.toString());
+			if (shouldTrace) {
+				this._logService.error('[tauri.integration.extensionTests] no host found', msg);
+			}
 			console.error(msg);
 			this._notificationService.error(msg);
 			return;
+		}
+		if (shouldTrace) {
+			this._logService.info('[tauri.integration.extensionTests] host found, executing tests');
 		}
 
 
 		let exitCode: number;
 		try {
 			exitCode = await extensionHostManager.extensionTestsExecute();
+			if (shouldTrace) {
+				this._logService.info('[tauri.integration.extensionTests] execute resolved', exitCode);
+			}
 			if (isCI) {
 				this._logService.info(`Extension host test runner exit code: ${exitCode}`);
 			}
 		} catch (err) {
+			if (shouldTrace) {
+				this._logService.error('[tauri.integration.extensionTests] execute failed', err);
+			}
 			if (isCI) {
 				this._logService.error(`Extension host test runner error`, err);
 			}

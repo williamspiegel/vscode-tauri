@@ -52,6 +52,7 @@
         "host.fallbackCounts",
         "host.cssModules",
         "host.log",
+        "host.automationExit",
         "host.httpRequest"
       ]
     },
@@ -142,6 +143,7 @@
     "host.fallbackCounts": { "params": { "type": "object" } },
     "host.cssModules": { "params": { "type": "object" } },
     "host.log": { "params": { "type": "object", "required": ["level", "message"] } },
+    "host.automationExit": { "params": { "type": "object", "required": ["code"] } },
     "host.httpRequest": { "params": { "type": "object", "required": ["url"] } },
     "desktop.resolveWindowConfig": { "params": { "type": "object" } },
     "desktop.channelCall": { "params": { "type": "object", "required": ["channel", "method"] } },
