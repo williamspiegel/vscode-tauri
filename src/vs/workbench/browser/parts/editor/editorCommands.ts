@@ -5,6 +5,7 @@
 
 import { IJSONSchema } from '../../../../base/common/jsonSchema.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
+import { timeout } from '../../../../base/common/async.js';
 import { Schemas, matchesScheme } from '../../../../base/common/network.js';
 import { extname, isEqual } from '../../../../base/common/resources.js';
 import { isNumber, isObject, isString, isUndefined } from '../../../../base/common/types.js';
@@ -439,8 +440,15 @@ function registerOpenEditorAPICommands(): void {
 	// complements https://github.com/microsoft/vscode/blob/2b164efb0e6a5de3826bff62683eaeafe032284f/src/vs/workbench/api/common/extHostApiCommands.ts#L373
 	CommandsRegistry.registerCommand({
 		id: 'vscode.open',
-		handler: (accessor, arg) => {
-			accessor.get(ICommandService).executeCommand(API_OPEN_EDITOR_COMMAND_ID, arg);
+		handler: (accessor, resourceArg, columnOrOptions?: EditorGroupColumn | ITextEditorOptions | [EditorGroupColumn?, ITextEditorOptions?], label?: string) => {
+			let normalizedColumnAndOptions: typeof columnOrOptions = columnOrOptions;
+			if (typeof columnOrOptions === 'number') {
+				normalizedColumnAndOptions = [columnOrOptions, undefined];
+			} else if (columnOrOptions && !Array.isArray(columnOrOptions) && typeof columnOrOptions === 'object') {
+				normalizedColumnAndOptions = [columnOrOptions.viewColumn, columnOrOptions];
+			}
+
+			accessor.get(ICommandService).executeCommand(API_OPEN_EDITOR_COMMAND_ID, resourceArg, normalizedColumnAndOptions, label);
 		},
 		metadata: {
 			description: 'Opens the provided resource in the editor.',
@@ -480,6 +488,7 @@ function registerOpenEditorAPICommands(): void {
 			}
 
 			await editorService.openEditor(input, columnToEditorGroup(editorGroupsService, configurationService, column));
+			await timeout(0);
 		}
 
 		// do not allow to execute commands from here

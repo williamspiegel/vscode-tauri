@@ -54,6 +54,27 @@ function getRendererIpcModulePaths(): { eventModulePath: string; bufferModulePat
   };
 }
 
+function getRendererLifecycleModulePath(): string {
+  return getRendererIpcModulePaths().eventModulePath.replace(/event\.js$/, 'lifecycle.js');
+}
+
+function getRendererIpcMessagePortModulePath(): string {
+  return getRendererIpcModulePaths().ipcModulePath.replace(/ipc\.js$/, 'ipc.mp.js');
+}
+
+const ENVIRONMENT_VARIABLE_MUTATOR_TYPE_REPLACE = 1;
+const ENVIRONMENT_VARIABLE_MUTATOR_TYPE_APPEND = 2;
+const ENVIRONMENT_VARIABLE_MUTATOR_TYPE_PREPEND = 3;
+
+type SerializableEnvironmentMutator = {
+  variable?: unknown;
+  value?: unknown;
+  type?: unknown;
+  options?: {
+    applyAtProcessCreation?: unknown;
+  };
+};
+
 function numberHash(value: number, hashValue: number): number {
   return (((hashValue << 5) - hashValue) + value) | 0;
 }
@@ -647,6 +668,414 @@ function parseArch(config: Record<string, unknown>): string {
   return 'x64';
 }
 
+type LocalPtyLoopbackProcess = {
+  id: number;
+  shell: string;
+  cwd: string;
+  hostTerminalId: number;
+  pid: number;
+};
+
+async function createLocalPtyHostLoopbackPort(
+  host: HostClient,
+  shellEnv: () => Promise<Record<string, string>>,
+  defaultShell: () => string
+): Promise<MessagePort> {
+  const [
+    ipcModule,
+    ipcMessagePortModule,
+    lifecycleModule,
+    eventModule
+  ] = await Promise.all([
+    import(/* @vite-ignore */ getRendererIpcModulePaths().ipcModulePath) as Promise<{
+      ChannelServer: new (protocol: unknown, ctx: string) => {
+        registerChannel(name: string, channel: unknown): void;
+      };
+      ProxyChannel: {
+        fromService<TContext>(
+          service: unknown,
+          disposables: { add<T extends { dispose(): void }>(value: T): T }
+        ): unknown;
+      };
+    }>,
+    import(/* @vite-ignore */ getRendererIpcMessagePortModulePath()) as Promise<{
+      Protocol: new (port: MessagePort) => { disconnect(): void };
+    }>,
+    import(/* @vite-ignore */ getRendererLifecycleModulePath()) as Promise<{
+      DisposableStore: new () => {
+        add<T extends { dispose(): void }>(value: T): T;
+        dispose(): void;
+      };
+    }>,
+    import(/* @vite-ignore */ getRendererIpcModulePaths().eventModulePath) as Promise<{
+      Emitter: new <T>() => {
+        readonly event: (listener: (value: T) => void) => { dispose(): void };
+        fire(value: T): void;
+        dispose(): void;
+      };
+    }>
+  ]);
+
+  const channel = new MessageChannel();
+  const disposables = new lifecycleModule.DisposableStore();
+  const onProcessData = new eventModule.Emitter<{ id: number; event: { data: string; trackCommit: boolean } }>();
+  const onProcessReady = new eventModule.Emitter<{
+    id: number;
+    event: { pid: number; cwd: string; windowsPty: undefined };
+  }>();
+  const onProcessExit = new eventModule.Emitter<{ id: number; event: number | undefined }>();
+  const onDidChangeProperty = new eventModule.Emitter<{ id: number; property: { type: number; value: unknown } }>();
+  const onProcessReplay = new eventModule.Emitter<{ id: number; event: { events: []; commands: { commands: [] } } }>();
+  const onProcessOrphanQuestion = new eventModule.Emitter<{ id: number }>();
+  const onDidRequestDetach = new eventModule.Emitter<{ workspaceId: string; instanceId: number }>();
+  const processes = new Map<number, LocalPtyLoopbackProcess>();
+
+  disposables.add(onProcessData);
+  disposables.add(onProcessReady);
+  disposables.add(onProcessExit);
+  disposables.add(onDidChangeProperty);
+  disposables.add(onProcessReplay);
+  disposables.add(onProcessOrphanQuestion);
+  disposables.add(onDidRequestDetach);
+
+  const resolveProcess = (id: number): LocalPtyLoopbackProcess => {
+    const process = processes.get(id);
+    if (!process) {
+      throw new Error(`Unknown local pty process id ${id}`);
+    }
+    return process;
+  };
+
+  const parseShellLaunchArgs = (value: unknown): string[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.filter((item): item is string => typeof item === 'string');
+  };
+
+  const applyEnvironmentVariableCollections = (
+    env: Record<string, string>,
+    serializedCollections: unknown
+  ): void => {
+    if (!Array.isArray(serializedCollections)) {
+      return;
+    }
+
+    const variableMutators = new Map<string, SerializableEnvironmentMutator[]>();
+
+    for (const collectionEntry of serializedCollections) {
+      if (!Array.isArray(collectionEntry) || collectionEntry.length < 2) {
+        continue;
+      }
+
+      const serializedCollection = collectionEntry[1];
+      if (!Array.isArray(serializedCollection)) {
+        continue;
+      }
+
+      for (const mutatorEntry of serializedCollection) {
+        if (!Array.isArray(mutatorEntry) || mutatorEntry.length < 2) {
+          continue;
+        }
+
+        const [variableName, rawMutator] = mutatorEntry;
+        if (typeof variableName !== 'string' || !rawMutator || typeof rawMutator !== 'object') {
+          continue;
+        }
+
+        const mutator = rawMutator as SerializableEnvironmentMutator;
+        const variable =
+          typeof mutator.variable === 'string' && mutator.variable.length > 0
+            ? mutator.variable
+            : variableName;
+        const value = typeof mutator.value === 'string' ? mutator.value : undefined;
+        const type = typeof mutator.type === 'number' ? mutator.type : undefined;
+        if (typeof value !== 'string' || typeof type !== 'number') {
+          continue;
+        }
+
+        let entry = variableMutators.get(variable);
+        if (!entry) {
+          entry = [];
+          variableMutators.set(variable, entry);
+        }
+
+        if (entry.length > 0 && entry[0].type === ENVIRONMENT_VARIABLE_MUTATOR_TYPE_REPLACE) {
+          continue;
+        }
+        entry.unshift(mutator);
+      }
+    }
+
+    for (const [variable, mutators] of variableMutators) {
+      for (const mutator of mutators) {
+        if (mutator.options?.applyAtProcessCreation === false) {
+          continue;
+        }
+
+        const value = typeof mutator.value === 'string' ? mutator.value : '';
+        switch (mutator.type) {
+          case ENVIRONMENT_VARIABLE_MUTATOR_TYPE_REPLACE:
+            env[variable] = value;
+            break;
+          case ENVIRONMENT_VARIABLE_MUTATOR_TYPE_APPEND:
+            env[variable] = (env[variable] || '') + value;
+            break;
+          case ENVIRONMENT_VARIABLE_MUTATOR_TYPE_PREPEND:
+            env[variable] = value + (env[variable] || '');
+            break;
+        }
+      }
+    }
+  };
+
+  const stopLocalPtyData = await host.desktopChannelListen(
+    'localPty',
+    'onProcessData',
+    null,
+    payload => {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+
+      const event = payload as {
+        id?: unknown;
+        event?: { data?: unknown; trackCommit?: unknown } | undefined;
+      };
+      const processId = typeof event.id === 'number' ? event.id : undefined;
+      const processEvent =
+        event.event && typeof event.event === 'object' ? event.event : undefined;
+      const data =
+        processEvent && typeof processEvent.data === 'string'
+          ? processEvent.data
+          : undefined;
+      if (typeof processId !== 'number' || typeof data !== 'string') {
+        return;
+      }
+
+      onProcessData.fire({
+        id: processId,
+        event: {
+          data,
+          trackCommit: processEvent?.trackCommit === true
+        }
+      });
+    }
+  );
+  disposables.add({
+    dispose: () => {
+      void stopLocalPtyData();
+    }
+  });
+
+  const service = {
+    onProcessData: onProcessData.event,
+    onProcessReady: onProcessReady.event,
+    onProcessExit: onProcessExit.event,
+    onDidChangeProperty: onDidChangeProperty.event,
+    onProcessReplay: onProcessReplay.event,
+    onProcessOrphanQuestion: onProcessOrphanQuestion.event,
+    onDidRequestDetach: onDidRequestDetach.event,
+    async createProcess(
+      shellLaunchConfig: Record<string, unknown> | undefined,
+      cwd: string,
+      _cols: number,
+      _rows: number,
+      _unicodeVersion: string,
+      env: Record<string, string | null> | undefined,
+      _executableEnv?: Record<string, string | null> | undefined,
+      options?: { environmentVariableCollections?: unknown }
+    ): Promise<number> {
+      const mergedEnv = {
+        ...(await shellEnv())
+      } as Record<string, string>;
+
+      if (env && typeof env === 'object') {
+        for (const [key, value] of Object.entries(env)) {
+          if (typeof value === 'string') {
+            mergedEnv[key] = value;
+          } else if (value === null) {
+            delete mergedEnv[key];
+          }
+        }
+      }
+
+      applyEnvironmentVariableCollections(mergedEnv, options?.environmentVariableCollections);
+
+      const executable =
+        typeof shellLaunchConfig?.executable === 'string' && shellLaunchConfig.executable.length > 0
+          ? shellLaunchConfig.executable
+          : defaultShell();
+      const args = parseShellLaunchArgs(shellLaunchConfig?.args);
+      void host.invokeMethod('host.log', {
+        level: 'info',
+        source: 'desktopSandbox.localPty',
+        message: `createProcess shell=${executable} cwd=${cwd} args=${JSON.stringify(args)} envKeys=${Object.keys(mergedEnv).length} envCollections=${Array.isArray(options?.environmentVariableCollections) ? options.environmentVariableCollections.length : 0}`
+      }).catch(() => undefined);
+      const result = await host.invokeMethod<{ id?: unknown; pid?: unknown }>('terminal.create', {
+        shell: executable,
+        args,
+        cwd,
+        env: mergedEnv
+      });
+      const hostTerminalId = typeof result.id === 'number' ? result.id : undefined;
+      const pid = typeof result.pid === 'number' ? result.pid : -1;
+      if (typeof hostTerminalId !== 'number') {
+        throw new Error('terminal.create returned an invalid id');
+      }
+
+      const id = hostTerminalId;
+      processes.set(id, {
+        id,
+        shell: executable,
+        cwd,
+        hostTerminalId,
+        pid
+      });
+      return id;
+    },
+    async start(id: number): Promise<void> {
+      const process = resolveProcess(id);
+      onProcessReady.fire({
+        id,
+        event: {
+          pid: process.pid,
+          cwd: process.cwd,
+          windowsPty: undefined
+        }
+      });
+    },
+    input(id: number, data: string): void {
+      const process = resolveProcess(id);
+      void host.invokeMethod('host.log', {
+        level: 'info',
+        source: 'desktopSandbox.localPty',
+        message: `input id=${id} bytes=${data.length} data=${data.replace(/\n/g, '\\n').replace(/\r/g, '\\r')}`
+      }).catch(() => undefined);
+      void host.invokeMethod('terminal.write', {
+        id: process.hostTerminalId,
+        data
+      }).catch(error => {
+        console.warn('[desktopSandbox] local pty write failed', { id, error });
+      });
+    },
+    resize(id: number, cols: number, rows: number): void {
+      const process = resolveProcess(id);
+      void host.invokeMethod('terminal.resize', {
+        id: process.hostTerminalId,
+        cols,
+        rows
+      }).catch(() => undefined);
+    },
+    shutdown(id: number): void {
+      const process = processes.get(id);
+      if (!process) {
+        return;
+      }
+      processes.delete(id);
+      void host.invokeMethod('terminal.kill', {
+        id: process.hostTerminalId
+      }).catch(() => undefined).finally(() => {
+        onProcessExit.fire({ id, event: undefined });
+      });
+    },
+    async getEnvironment(): Promise<Record<string, string>> {
+      return shellEnv();
+    },
+    async getShellEnvironment(): Promise<Record<string, string>> {
+      return shellEnv();
+    },
+    async getLatency(): Promise<[]> {
+      return [];
+    },
+    async getPerformanceMarks(): Promise<[]> {
+      return [];
+    },
+    async getProfiles(): Promise<unknown[]> {
+      const shell = defaultShell();
+      return [{
+        profileName: shell.split('/').pop() || 'shell',
+        path: shell,
+        isDefault: true,
+        isAutoDetected: true
+      }];
+    },
+    async getDefaultSystemShell(): Promise<string> {
+      return defaultShell();
+    },
+    async requestDetachInstance(): Promise<undefined> {
+      return undefined;
+    },
+    async acceptDetachInstanceReply(): Promise<void> {
+      return;
+    },
+    async detachFromProcess(): Promise<void> {
+      return;
+    },
+    async attachToProcess(): Promise<void> {
+      throw new Error('attachToProcess is not supported in the Tauri local pty loopback.');
+    },
+    async listProcesses(): Promise<[]> {
+      return [];
+    },
+    async processBinary(id: number, data: string): Promise<void> {
+      this.input(id, data);
+    },
+    async sendSignal(id: number): Promise<void> {
+      this.shutdown(id);
+    },
+    async acknowledgeDataEvent(): Promise<void> {
+      return;
+    },
+    async setUnicodeVersion(): Promise<void> {
+      return;
+    },
+    async clearBuffer(): Promise<void> {
+      return;
+    },
+    async refreshProperty(id: number): Promise<unknown> {
+      const process = processes.get(id);
+      return process?.cwd;
+    },
+    async updateProperty(): Promise<void> {
+      return;
+    },
+    async getTerminalLayoutInfo(): Promise<null> {
+      return null;
+    },
+    async setTerminalLayoutInfo(): Promise<void> {
+      return;
+    },
+    async reviveTerminalProcesses(): Promise<void> {
+      return;
+    },
+    async reduceConnectionGraceTime(): Promise<void> {
+      return;
+    },
+    orphanQuestionReply(): void {
+      return;
+    },
+    dispose(): void {
+      for (const process of processes.values()) {
+        void host.invokeMethod('terminal.kill', {
+          id: process.hostTerminalId
+        }).catch(() => undefined);
+      }
+      processes.clear();
+      disposables.dispose();
+    }
+  };
+
+  const protocol = new ipcMessagePortModule.Protocol(channel.port2);
+  const server = new ipcModule.ChannelServer(protocol, 'tauri-pty-host');
+  server.registerChannel(
+    'ptyHostWindow',
+    ipcModule.ProxyChannel.fromService(service, disposables)
+  );
+
+  return channel.port1;
+}
+
 export async function installDesktopSandbox(host: HostClient): Promise<void> {
 	const win = window as WindowWithVscode;
 	let resolvedWindowConfigPromise: Promise<Record<string, unknown>> | undefined;
@@ -886,6 +1315,25 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
             logMessagePortBridge(`renderer ready nonce=${nonce}`);
             flushPendingFrames();
           }, 0);
+          return;
+        }
+
+        if (responseChannel === 'vscode:createPtyHostMessageChannelResult') {
+          void host.invokeMethod('host.log', {
+            level: 'info',
+            source: 'desktopSandbox.localPty',
+            message: 'acquire pty host message channel'
+          }).catch(() => undefined);
+          void createLocalPtyHostLoopbackPort(
+            host,
+            shellEnv,
+            () => processEnv.SHELL || '/bin/zsh'
+          ).then(port => {
+            postResponse([port]);
+          }).catch(error => {
+            console.warn('[desktopSandbox] failed to create local pty loopback port', error);
+            postResponse([]);
+          });
           return;
         }
 

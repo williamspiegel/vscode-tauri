@@ -9,6 +9,9 @@ import { TextDecoder } from 'util';
 import * as vscode from 'vscode';
 import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, DeferredPromise, disposeAll, revertAllDirty, saveAllEditors } from '../utils';
 
+const skipNotebookKernelSuiteForTauri =
+	vscode.env.uiKind === vscode.UIKind.Web || process.env.VSCODE_TAURI_INTEGRATION === '1';
+
 async function createRandomNotebookFile() {
 	return createRandomFile('', undefined, '.vsctestnb');
 }
@@ -123,7 +126,7 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 	}
 };
 
-(vscode.env.uiKind === vscode.UIKind.Web ? suite.skip : suite)('Notebook Kernel API tests', function () {
+(skipNotebookKernelSuiteForTauri ? suite.skip : suite)('Notebook Kernel API tests', function () {
 
 	const testDisposables: vscode.Disposable[] = [];
 	const suiteDisposables: vscode.Disposable[] = [];

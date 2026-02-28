@@ -16,6 +16,11 @@ fi
 
 cd "$ROOT"
 
+if [[ -z "${VSCODE_TAURI_NODE_BINARY:-}" ]]; then
+	VSCODE_TAURI_NODE_BINARY="$(command -v node)"
+	export VSCODE_TAURI_NODE_BINARY
+fi
+
 if [[ -z "${VSCODE_SKIP_PRELAUNCH:-}" ]]; then
 	node build/lib/preLaunch.ts
 fi

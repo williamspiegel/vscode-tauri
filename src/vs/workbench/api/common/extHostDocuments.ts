@@ -15,6 +15,7 @@ import { assertReturnsDefined } from '../../../base/common/types.js';
 import { deepFreeze } from '../../../base/common/objects.js';
 import { TextDocumentChangeReason } from './extHostTypes.js';
 import { ISerializedModelContentChangedEvent } from '../../../editor/common/textModelEvents.js';
+import { disposableTimeout } from '../../../base/common/async.js';
 
 export class ExtHostDocuments implements ExtHostDocumentsShape {
 
@@ -90,7 +91,11 @@ export class ExtHostDocuments implements ExtHostDocumentsShape {
 			promise = this._proxy.$tryOpenDocument(uri, options).then(uriData => {
 				this._documentLoader.delete(uri.toString());
 				const canonicalUri = URI.revive(uriData);
-				return assertReturnsDefined(this._documentsAndEditors.getDocument(canonicalUri));
+				const document = this._documentsAndEditors.getDocument(canonicalUri);
+				if (document) {
+					return document;
+				}
+				return this._waitForDocumentAdd(canonicalUri);
 			}, err => {
 				this._documentLoader.delete(uri.toString());
 				return Promise.reject(err);
@@ -108,6 +113,41 @@ export class ExtHostDocuments implements ExtHostDocumentsShape {
 		}
 
 		return promise;
+	}
+
+	private _waitForDocumentAdd(uri: URI): Promise<ExtHostDocumentData> {
+		const cached = this._documentsAndEditors.getDocument(uri);
+		if (cached) {
+			return Promise.resolve(cached);
+		}
+
+		return new Promise<ExtHostDocumentData>((resolve, reject) => {
+			let settled = false;
+			const listener = this.onDidAddDocument(document => {
+				if (settled || document.uri.toString() !== uri.toString()) {
+					return;
+				}
+
+				const data = this._documentsAndEditors.getDocument(uri);
+				if (!data) {
+					return;
+				}
+
+				settled = true;
+				timeout.dispose();
+				listener.dispose();
+				resolve(data);
+			});
+			const timeout = disposableTimeout(() => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				listener.dispose();
+				reject(new Error(`Unable to retrieve document from URI '${uri}' after open`));
+			}, 1000);
+		});
 	}
 
 	public createDocumentData(options?: { language?: string; content?: string; encoding?: string }): Promise<URI> {

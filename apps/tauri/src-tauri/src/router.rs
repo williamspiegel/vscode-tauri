@@ -85,6 +85,12 @@ struct UserDataProfilesRuntimeState {
 #[derive(Default)]
 struct LocalPtyRuntimeState {
     layout_by_workspace: HashMap<String, Value>,
+    sessions_by_id: HashMap<u64, LocalPtySessionState>,
+}
+
+struct LocalPtySessionState {
+    pid: i64,
+    cwd: String,
 }
 
 struct FallbackTelemetryState {
@@ -1247,6 +1253,169 @@ impl CapabilityRouter {
             },
             "localPty" => match method {
                 "getPerformanceMarks" | "getLatency" => Ok(Some(json!([]))),
+                "createProcess" => {
+                    let shell_launch_config = nth_arg(args, 0)
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    let cwd = nth_arg(args, 1)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let executable = shell_launch_config
+                        .get("executable")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| {
+                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+                        });
+                    let shell_args = shell_launch_config
+                        .get("args")
+                        .cloned()
+                        .filter(|value| value.is_array())
+                        .unwrap_or_else(|| json!([]));
+                    let env = nth_arg(args, 5).cloned();
+
+                    let mut terminal_params = serde_json::Map::new();
+                    terminal_params.insert("shell".to_string(), Value::String(executable));
+                    terminal_params.insert("args".to_string(), shell_args);
+                    if !cwd.is_empty() {
+                        terminal_params.insert("cwd".to_string(), Value::String(cwd.clone()));
+                    }
+                    if let Some(env_object) = env.filter(Value::is_object) {
+                        terminal_params.insert("env".to_string(), env_object);
+                    }
+
+                    let result = self
+                        .terminal
+                        .invoke("terminal.create", &Value::Object(terminal_params))
+                        .await?
+                        .unwrap_or_else(|| json!({}));
+                    let terminal_id = result
+                        .get("id")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| "localPty.createProcess expected terminal id".to_string())?;
+                    let pid = result.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+
+                    let mut state = self
+                        .local_pty_state
+                        .lock()
+                        .map_err(|_| "localPty state lock poisoned".to_string())?;
+                    state
+                        .sessions_by_id
+                        .insert(terminal_id, LocalPtySessionState { pid, cwd });
+
+                    Ok(Some(json!(terminal_id)))
+                }
+                "start" => {
+                    let id = parse_u64_arg(
+                        nth_arg(args, 0),
+                        "localPty.start expected terminal id argument",
+                    )?;
+                    let state = self
+                        .local_pty_state
+                        .lock()
+                        .map_err(|_| "localPty state lock poisoned".to_string())?;
+                    let session = state
+                        .sessions_by_id
+                        .get(&id)
+                        .ok_or_else(|| format!("localPty.start unknown session id {id}"))?;
+                    Ok(Some(json!({
+                        "pid": session.pid,
+                        "cwd": session.cwd,
+                        "windowsPty": Value::Null
+                    })))
+                }
+                "input" | "processBinary" => {
+                    let id = parse_u64_arg(
+                        nth_arg(args, 0),
+                        &format!("localPty.{method} expected terminal id argument"),
+                    )?;
+                    let data = nth_arg(args, 1)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| format!("localPty.{method} expected string data argument"))?;
+                    self.terminal
+                        .invoke(
+                            "terminal.write",
+                            &json!({
+                                "id": id,
+                                "data": data
+                            }),
+                        )
+                        .await?;
+                    Ok(Some(Value::Null))
+                }
+                "resize" => {
+                    let id = parse_u64_arg(
+                        nth_arg(args, 0),
+                        "localPty.resize expected terminal id argument",
+                    )?;
+                    let cols = parse_u64_arg(
+                        nth_arg(args, 1),
+                        "localPty.resize expected cols argument",
+                    )?;
+                    let rows = parse_u64_arg(
+                        nth_arg(args, 2),
+                        "localPty.resize expected rows argument",
+                    )?;
+                    Ok(self
+                        .terminal
+                        .invoke(
+                            "terminal.resize",
+                            &json!({
+                                "id": id,
+                                "cols": cols,
+                                "rows": rows
+                            }),
+                        )
+                        .await?)
+                }
+                "shutdown" | "sendSignal" => {
+                    let id = parse_u64_arg(
+                        nth_arg(args, 0),
+                        &format!("localPty.{method} expected terminal id argument"),
+                    )?;
+                    {
+                        let mut state = self
+                            .local_pty_state
+                            .lock()
+                            .map_err(|_| "localPty state lock poisoned".to_string())?;
+                        state.sessions_by_id.remove(&id);
+                    }
+                    let _ = self
+                        .terminal
+                        .invoke(
+                            "terminal.kill",
+                            &json!({
+                                "id": id
+                            }),
+                        )
+                        .await?;
+                    Ok(Some(Value::Null))
+                }
+                "clearBuffer"
+                | "acknowledgeDataEvent"
+                | "setUnicodeVersion"
+                | "orphanQuestionReply"
+                | "updateProperty" => Ok(Some(Value::Null)),
+                "refreshProperty" => {
+                    let id = parse_u64_arg(
+                        nth_arg(args, 0),
+                        "localPty.refreshProperty expected terminal id argument",
+                    )?;
+                    let state = self
+                        .local_pty_state
+                        .lock()
+                        .map_err(|_| "localPty state lock poisoned".to_string())?;
+                    Ok(Some(
+                        state
+                            .sessions_by_id
+                            .get(&id)
+                            .map(|session| Value::String(session.cwd.clone()))
+                            .unwrap_or(Value::Null),
+                    ))
+                }
                 "getProfiles" => {
                     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
                     let profile_name = shell

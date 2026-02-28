@@ -222,10 +222,15 @@ suite('chat', () => {
 		if (env.uiKind === UIKind.Web) {
 			this.skip();
 		}
+		const shouldTrace = process.env['VSCODE_TAURI_INTEGRATION'] === '1';
 		const nodePtyModules = [
 			join(env.appRoot, 'node_modules.asar', 'node-pty'),
 			join(env.appRoot, 'node_modules', 'node-pty')
 		];
+		if (shouldTrace) {
+			console.error(`[tauri.integration.chatTest] env.appRoot=${env.appRoot}`);
+			console.error(`[tauri.integration.chatTest] nodePtyModules=${nodePtyModules.join(',')}`);
+		}
 
 		for (const modulePath of nodePtyModules) {
 			// try to stat and require module
@@ -235,6 +240,9 @@ suite('chat', () => {
 				assert.ok(nodePty, `Successfully required node-pty from ${modulePath}`);
 				return;
 			} catch (err) {
+				if (shouldTrace) {
+					console.error(`[tauri.integration.chatTest] node-pty load failed path=${modulePath}`, err);
+				}
 				// failed to require, try next
 			}
 		}

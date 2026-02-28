@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { timeout } from '../../../base/common/async.js';
 import { DisposableStore, dispose } from '../../../base/common/lifecycle.js';
 import { equals } from '../../../base/common/objects.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
@@ -30,6 +31,7 @@ class MainThreadNotebook {
 }
 
 export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape {
+	private static readonly _editorSettleAttempts = 100;
 
 	private readonly _disposables = new DisposableStore();
 
@@ -110,13 +112,26 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		};
 
 		const editorPane = await this._editorService.openEditor({ resource: URI.revive(resource), options: editorOptions }, columnToEditorGroup(this._editorGroupService, this._configurationService, options.position));
-		const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		const notebookEditor = await this._waitForNotebookEditor(editorPane);
 
 		if (notebookEditor) {
 			return notebookEditor.getId();
 		} else {
 			throw new Error(`Notebook Editor creation failure for document ${JSON.stringify(resource)}`);
 		}
+	}
+
+	private async _waitForNotebookEditor(editorPane: unknown): Promise<INotebookEditor | undefined> {
+		for (let attempt = 0; attempt < MainThreadNotebookEditors._editorSettleAttempts; attempt++) {
+			const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+			if (notebookEditor) {
+				return notebookEditor;
+			}
+
+			await timeout(50);
+		}
+
+		return undefined;
 	}
 
 	async $tryRevealRange(id: string, range: ICellRange, revealType: NotebookEditorRevealType): Promise<void> {

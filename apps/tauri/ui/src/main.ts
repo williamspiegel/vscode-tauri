@@ -74,6 +74,42 @@ function isWorkbenchRendered(): boolean {
 	return !!document.querySelector(".monaco-workbench");
 }
 
+function getWorkbenchStartupFailureMessage(): string | undefined {
+	const startupFailure = Array.from(
+		document.querySelectorAll("body > pre"),
+	).find((element) =>
+		(element.textContent ?? "").includes("Workbench startup failed"),
+	);
+	const message = startupFailure?.textContent?.trim();
+	if (!message) {
+		return undefined;
+	}
+
+	const maxLength = 4000;
+	return message.length > maxLength
+		? `${message.slice(0, maxLength)}...`
+		: message;
+}
+
+function describeWorkbenchDomState(): string {
+	const body = document.body;
+	const bodyChildren = body ? body.children.length : 0;
+	const splashVisible = !!document.getElementById("monaco-parts-splash");
+	const startupFailureVisible = !!getWorkbenchStartupFailureMessage();
+	const status = document.getElementById("status");
+	const statusText = status?.textContent?.trim() ?? "";
+	const statusPreview =
+		statusText.length > 160 ? `${statusText.slice(0, 160)}...` : statusText;
+	return [
+		`readyState=${document.readyState}`,
+		`bodyChildren=${bodyChildren}`,
+		`hasWorkbench=${isWorkbenchRendered()}`,
+		`splashVisible=${splashVisible}`,
+		`startupFailureVisible=${startupFailureVisible}`,
+		`status=${JSON.stringify(statusPreview)}`,
+	].join(" ");
+}
+
 function waitForWorkbenchRender(timeoutMs = 15000): Promise<boolean> {
 	if (isWorkbenchRendered()) {
 		return Promise.resolve(true);
@@ -1778,9 +1814,15 @@ async function main(): Promise<void> {
 		true,
 	);
 	throw new Error(
-		"Workbench did not render within 15s.\n" +
-			`Loaded runtime: ${loadedWorkbenchPath}\n` +
+		[
+			"Workbench did not render within 15s.",
+			`Loaded runtime: ${loadedWorkbenchPath}`,
+			`DOM state: ${describeWorkbenchDomState()}`,
+			getWorkbenchStartupFailureMessage(),
 			"Run with ?hostDebug=1 and share console errors.",
+		]
+			.filter((value): value is string => typeof value === "string" && value.length > 0)
+			.join("\n"),
 	);
 }
 

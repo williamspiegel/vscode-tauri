@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as arrays from '../../../base/common/arrays.js';
+import { timeout } from '../../../base/common/async.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { URI } from '../../../base/common/uri.js';
@@ -16,6 +17,7 @@ import { TextEditorSelectionChangeKind, TextEditorChangeKind } from './extHostTy
 import * as vscode from 'vscode';
 
 export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
+	private static readonly _editorSettleAttempts = 100;
 
 	private readonly _onDidChangeTextEditorSelection = this._register(new Emitter<vscode.TextEditorSelectionChangeEvent>());
 	private readonly _onDidChangeTextEditorOptions = this._register(new Emitter<vscode.TextEditorOptionsChangeEvent>());
@@ -83,7 +85,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 
 		const editorId = await this._proxy.$tryShowTextDocument(document.uri, options);
-		const editor = editorId && this._extHostDocumentsAndEditors.getEditor(editorId);
+		const editor = editorId && await this._waitForEditor(editorId);
 		if (editor) {
 			return editor.value;
 		}
@@ -94,6 +96,19 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		} else {
 			throw new Error(`Could NOT open editor for "${document.uri.toString()}".`);
 		}
+	}
+
+	private async _waitForEditor(editorId: string): Promise<ExtHostTextEditor | undefined> {
+		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
+			const editor = this._extHostDocumentsAndEditors.getEditor(editorId);
+			if (editor) {
+				return editor;
+			}
+
+			await timeout(50);
+		}
+
+		return undefined;
 	}
 
 	createTextEditorDecorationType(extension: IExtensionDescription, options: vscode.DecorationRenderOptions): vscode.TextEditorDecorationType {

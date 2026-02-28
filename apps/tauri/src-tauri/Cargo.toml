@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
+libc = "0.2"
 notify = "8.2.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate"] }
 serde = { version = "1", features = ["derive"] }

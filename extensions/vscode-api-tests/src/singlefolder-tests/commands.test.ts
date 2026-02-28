@@ -7,7 +7,9 @@ import * as assert from 'assert';
 import 'mocha';
 import { join } from 'path';
 import { commands, Position, Range, Uri, ViewColumn, window, workspace } from 'vscode';
-import { assertNoRpc, closeAllEditors } from '../utils';
+import { assertNoRpc, closeAllEditors, poll } from '../utils';
+
+const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
 
 suite('vscode API - commands', () => {
 
@@ -160,6 +162,13 @@ suite('vscode API - commands', () => {
 		await commands.executeCommand('vscode.open', uri).then(() => assert.ok(true), () => assert.ok(false));
 
 		// untitled with associated resource are dirty from the beginning
+		if (isTauriIntegration) {
+			await poll(
+				() => Promise.resolve(window.activeTextEditor?.document.isDirty),
+				value => value === true,
+				'untitled associated resource should become dirty in Tauri integration'
+			);
+		}
 		assert.ok(window.activeTextEditor?.document.isDirty);
 
 		return closeAllEditors();

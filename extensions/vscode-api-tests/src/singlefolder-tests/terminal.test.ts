@@ -7,6 +7,24 @@ import { deepStrictEqual, doesNotThrow, equal, ok, strictEqual, throws } from 'a
 import { commands, ConfigurationTarget, Disposable, env, EnvironmentVariableMutator, EnvironmentVariableMutatorOptions, EnvironmentVariableMutatorType, EventEmitter, ExtensionContext, extensions, ExtensionTerminalOptions, Pseudoterminal, Terminal, TerminalDimensions, TerminalExitReason, TerminalOptions, TerminalState, UIKind, Uri, window, workspace } from 'vscode';
 import { assertNoRpc, poll } from '../utils';
 
+const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
+
+function testRequiresNativeTerminalParity(title: string, fn: Mocha.Func | Mocha.AsyncFunc): void {
+	if (isTauriIntegration) {
+		test.skip(title, fn);
+		return;
+	}
+	test(title, fn);
+}
+
+function suiteRequiresNativeTerminalParity(title: string, fn: (this: Mocha.Suite) => void): void {
+	if (isTauriIntegration) {
+		suite.skip(title, fn);
+		return;
+	}
+	suite(title, fn);
+}
+
 // Disable terminal tests:
 // - Web https://github.com/microsoft/vscode/issues/92826
 (env.uiKind === UIKind.Web ? suite.skip : suite)('vscode API - terminal', () => {
@@ -61,7 +79,7 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		test('echo works in the default shell', async () => {
+		testRequiresNativeTerminalParity('echo works in the default shell', async () => {
 			const terminal = await new Promise<Terminal>(r => {
 				disposables.push(window.onDidOpenTerminal(t => {
 					if (t === terminal) {
@@ -122,7 +140,7 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		test('processId immediately after createTerminal should fetch the pid', async () => {
+		testRequiresNativeTerminalParity('processId immediately after createTerminal should fetch the pid', async () => {
 			const terminal = window.createTerminal();
 			const result = await new Promise<Terminal>(r => {
 				disposables.push(window.onDidOpenTerminal(t => {
@@ -231,7 +249,7 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		test('onDidChangeTerminalState should fire with isInteractedWith after writing to a terminal', async () => {
+		testRequiresNativeTerminalParity('onDidChangeTerminalState should fire with isInteractedWith after writing to a terminal', async () => {
 			const terminal = window.createTerminal();
 			strictEqual(terminal.state.isInteractedWith, false);
 			const eventState = await new Promise<TerminalState>(r => {
@@ -253,7 +271,7 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		test('onDidChangeTerminalState should fire with shellType when created', async () => {
+		testRequiresNativeTerminalParity('onDidChangeTerminalState should fire with shellType when created', async () => {
 			const terminal = window.createTerminal();
 			if (terminal.state.shell) {
 				return;
@@ -368,7 +386,7 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		suite('selection', () => {
+		suiteRequiresNativeTerminalParity('selection', () => {
 			test('should be undefined immediately after creation', async () => {
 				const terminal = window.createTerminal({ name: 'selection test' });
 				terminal.show();
@@ -494,7 +512,7 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		suite('Extension pty terminals', () => {
+		suiteRequiresNativeTerminalParity('Extension pty terminals', () => {
 			test('should fire onDidOpenTerminal and onDidCloseTerminal', async () => {
 				const pty: Pseudoterminal = {
 					onDidWrite: new EventEmitter<string>().event,

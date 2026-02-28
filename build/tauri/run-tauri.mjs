@@ -12,6 +12,8 @@ if (!['dev', 'build'].includes(mode)) {
 	process.exit(1);
 }
 const appArgs = process.argv.slice(3);
+const resolvedNodeBinary = process.env.VSCODE_TAURI_NODE_BINARY || process.execPath;
+process.env.VSCODE_TAURI_NODE_BINARY = resolvedNodeBinary;
 const useStaticFrontendInDev =
 	mode === 'dev' &&
 	['1', 'true', 'on'].includes(String(process.env.VSCODE_TAURI_NO_DEV_SERVER ?? '').toLowerCase());
@@ -94,6 +96,7 @@ function run(command, args, options = {}) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd: repoRoot,
+			env: process.env,
 			shell: process.platform === 'win32',
 			stdio: ['inherit', 'pipe', 'pipe'],
 			...options

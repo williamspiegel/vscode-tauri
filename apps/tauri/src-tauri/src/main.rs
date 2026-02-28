@@ -1008,7 +1008,13 @@ impl AppState {
         let node_binary =
             std::env::var("VSCODE_TAURI_NODE_BINARY").unwrap_or_else(|_| "node".to_string());
 
-        let mut command = TokioCommand::new(node_binary);
+        let mut command = if should_force_arm64_node_bridge() {
+            let mut command = TokioCommand::new("/usr/bin/arch");
+            command.arg("-arm64").arg(&node_binary);
+            command
+        } else {
+            TokioCommand::new(&node_binary)
+        };
         command
             .arg(bridge_script)
             .arg("--config-base64")
@@ -1413,6 +1419,32 @@ impl AppState {
         Ok(())
     }
 
+    fn handle_terminal_data(&self, payload_json: &str) -> Result<(), String> {
+        let payload: Value = serde_json::from_str(payload_json)
+            .map_err(|error| format!("Invalid terminal.data payload: {error}"))?;
+        let terminal_id = payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "terminal.data payload missing id".to_string())?;
+        let data = payload
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "terminal.data payload missing data".to_string())?;
+
+        self.emit_to_subscriptions(
+            "localPty",
+            "onProcessData",
+            json!({
+                "id": terminal_id,
+                "event": {
+                    "data": data,
+                    "trackCommit": false
+                }
+            }),
+            |_| true,
+        )
+    }
+
     fn emit_ipc_event(&self, channel: &str, args: Vec<Value>) -> Result<(), String> {
         self.emit_to_subscriptions(
             IPC_EVENT_CHANNEL,
@@ -1568,6 +1600,28 @@ impl AppState {
         };
 
         self.emit_to_subscriptions("menubar", "runAction", payload, |_| true)
+    }
+}
+
+fn should_force_arm64_node_bridge() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::consts::ARCH != "x86_64" {
+            return false;
+        }
+
+        return std::process::Command::new("sysctl")
+            .args(["-in", "hw.optional.arm64"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim() == "1")
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -1828,7 +1882,9 @@ fn spawn_integration_startup_watchdog() {
 
     reset_integration_startup_watchdog_state();
     std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(20));
+        // Keep this comfortably above the renderer-side first-render timeout so the
+        // UI can report the concrete startup failure instead of being preempted here.
+        std::thread::sleep(Duration::from_secs(35));
         if INTEGRATION_STARTUP_RENDERED.load(Ordering::Relaxed) {
             return;
         }
@@ -1839,7 +1895,7 @@ fn spawn_integration_startup_watchdog() {
             .and_then(|progress| progress.clone())
             .unwrap_or_else(|| "<no ui.startup progress recorded>".to_string());
         eprintln!(
-            "[integration.startup.timeout] renderer did not report first render within 20s; lastProgress={}",
+            "[integration.startup.timeout] renderer did not report first render within 35s; lastProgress={}",
             last_progress
         );
         std::process::exit(1);
@@ -3611,6 +3667,18 @@ fn main() {
                 let state = listener_handle.state::<AppState>();
                 if let Err(error) = state.handle_filesystem_changed(payload) {
                     eprintln!("[desktop.fs.bridge.error] {error}");
+                }
+            });
+            let terminal_listener_handle = app_handle.clone();
+            app_handle.listen("terminal_data", move |event| {
+                let payload = event.payload();
+                if payload.is_empty() {
+                    return;
+                }
+
+                let state = terminal_listener_handle.state::<AppState>();
+                if let Err(error) = state.handle_terminal_data(payload) {
+                    eprintln!("[desktop.terminal.bridge.error] {error}");
                 }
             });
             app_handle.on_menu_event(move |_app, event| {

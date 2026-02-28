@@ -5,8 +5,9 @@
 
 import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
+import { ExtHostDocuments } from '../../common/extHostDocuments.js';
 import { ExtHostDocumentsAndEditors } from '../../common/extHostDocumentsAndEditors.js';
-import { TestRPCProtocol } from '../common/testRPCProtocol.js';
+import { SingleProxyRPCProtocol, TestRPCProtocol } from '../common/testRPCProtocol.js';
 import { NullLogService } from '../../../../platform/log/common/log.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 
@@ -58,6 +59,38 @@ suite('ExtHostDocumentsAndEditors', () => {
 			});
 
 		});
+	});
+
+	test('waits for document add after open resolves', async () => {
+		const resource = URI.parse('test:/file.txt');
+		const rpc = SingleProxyRPCProtocol({
+			$tryOpenDocument: async () => resource
+		});
+		const documentsAndEditors = new ExtHostDocumentsAndEditors(rpc, new NullLogService());
+		const documents = new ExtHostDocuments(rpc, documentsAndEditors);
+
+		try {
+			const documentPromise = documents.ensureDocumentData(resource);
+			await Promise.resolve();
+
+			documentsAndEditors.$acceptDocumentsAndEditorsDelta({
+				addedDocuments: [{
+					isDirty: false,
+					languageId: 'plaintext',
+					uri: resource,
+					versionId: 1,
+					lines: ['hello'],
+					EOL: '\n',
+					encoding: 'utf8'
+				}]
+			});
+
+			const document = await documentPromise;
+			assert.strictEqual(document.document.uri.toString(), resource.toString());
+			assert.strictEqual(document.document.getText(), 'hello');
+		} finally {
+			documents.dispose();
+		}
 	});
 
 });

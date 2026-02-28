@@ -133,6 +133,10 @@ const config = parseConfig();
 const workerScript = new URL('./extension-host-worker.mjs', import.meta.url);
 const workerExecArgv = sanitizeWorkerExecArgv(config.execArgv);
 
+if (process.env.VSCODE_TAURI_INTEGRATION === '1') {
+  process.stderr.write(`[bridge] process.arch=${process.arch} process.execPath=${process.execPath}\n`);
+}
+
 const worker = new Worker(workerScript, {
   type: 'module',
   workerData: {

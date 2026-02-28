@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize } from '../../../nls.js';
+import { timeout } from '../../../base/common/async.js';
 import { VSBuffer } from '../../../base/common/buffer.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { Emitter, Event } from '../../../base/common/event.js';
@@ -42,6 +43,7 @@ import { ILogService } from '../../../platform/log/common/log.js';
 
 export class ExtHostNotebookController implements ExtHostNotebookShape {
 	private static _notebookStatusBarItemProviderHandlePool: number = 0;
+	private static readonly _editorSettleAttempts = 100;
 
 	private readonly _notebookProxy: MainThreadNotebookShape;
 	private readonly _notebookDocumentsProxy: MainThreadNotebookDocumentsShape;
@@ -227,9 +229,12 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 
 		const viewType = !!options?.asRepl ? 'repl' : notebook.notebookType;
 		const editorId = await this._notebookEditorsProxy.$tryShowNotebookDocument(notebook.uri, viewType, resolvedOptions);
-		const editor = editorId && this._editors.get(editorId)?.apiEditor;
+		const editor = editorId ? await this._waitForEditor(editorId) : undefined;
 
 		if (editor) {
+			if (!resolvedOptions.preserveFocus) {
+				await this._waitForActiveEditor(editorId, editor);
+			}
 			return editor;
 		}
 
@@ -237,6 +242,33 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			throw new Error(`Could NOT open editor for "${notebook.uri.toString()}" because another editor opened in the meantime.`);
 		} else {
 			throw new Error(`Could NOT open editor for "${notebook.uri.toString()}".`);
+		}
+	}
+
+	private async _waitForEditor(editorId: string): Promise<vscode.NotebookEditor | undefined> {
+		for (let attempt = 0; attempt < ExtHostNotebookController._editorSettleAttempts; attempt++) {
+			const editor = this._editors.get(editorId)?.apiEditor;
+			if (editor) {
+				return editor;
+			}
+
+			await timeout(50);
+		}
+
+		return undefined;
+	}
+
+	private async _waitForActiveEditor(editorId: string, editor: vscode.NotebookEditor): Promise<void> {
+		for (let attempt = 0; attempt < ExtHostNotebookController._editorSettleAttempts; attempt++) {
+			if (this._activeNotebookEditor?.id === editorId) {
+				return;
+			}
+
+			await timeout(50);
+		}
+
+		if (this._editors.get(editorId)?.apiEditor === editor) {
+			this._activeNotebookEditor = this._editors.get(editorId);
 		}
 	}
 

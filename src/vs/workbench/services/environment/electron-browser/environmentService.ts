@@ -59,6 +59,9 @@ export interface INativeWorkbenchEnvironmentService extends IBrowserWorkbenchEnv
 export class NativeWorkbenchEnvironmentService extends AbstractNativeEnvironmentService implements INativeWorkbenchEnvironmentService {
 
 	@memoize
+	override get appRoot(): string { return this.configuration.appRoot || super.appRoot; }
+
+	@memoize
 	get mainPid() { return this.configuration.mainPid; }
 
 	@memoize

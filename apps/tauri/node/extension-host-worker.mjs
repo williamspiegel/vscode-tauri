@@ -5,6 +5,10 @@ if (!parentPort) {
   throw new Error('extension-host-worker requires parentPort');
 }
 
+if (process.env.VSCODE_TAURI_INTEGRATION === '1') {
+  console.error(`[worker] process.arch=${process.arch} process.execPath=${process.execPath}`);
+}
+
 function wrapTransferredPort(port) {
   return {
     on(event, listener) {

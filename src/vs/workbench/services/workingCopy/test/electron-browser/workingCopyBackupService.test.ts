@@ -195,6 +195,11 @@ suite('WorkingCopyBackupService', () => {
 	const fooBarFile = URI.file(isWindows ? 'c:\\Foo Bar' : '/Foo Bar');
 	const untitledFile = URI.from({ scheme: Schemas.untitled, path: 'Untitled-1' });
 
+	test('environment service appRoot prefers configuration', () => {
+		const environmentService = new NativeWorkbenchEnvironmentService({ ...TestNativeWindowConfiguration, appRoot: '/configured/app-root' }, TestProductService);
+		assert.strictEqual(environmentService.appRoot, '/configured/app-root');
+	});
+
 	setup(async () => {
 		testDir = URI.file(join(generateUuid(), 'vsctests', 'workingcopybackupservice')).with({ scheme: Schemas.inMemory });
 		backupHome = joinPath(testDir, 'Backups');

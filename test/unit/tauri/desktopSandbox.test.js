@@ -133,10 +133,14 @@ suite('Tauri Desktop Sandbox', () => {
 	}
 
 	function createRendererIpcModuleOverrides() {
-		const eventModulePath = path.join(os.tmpdir(), `tauri-event-${Date.now()}-${Math.random()}.js`);
-		const bufferModulePath = path.join(os.tmpdir(), `tauri-buffer-${Date.now()}-${Math.random()}.js`);
-		const ipcModulePath = path.join(os.tmpdir(), `tauri-ipc-${Date.now()}-${Math.random()}.js`);
+		const token = `${Date.now()}-${Math.random()}`;
+		const eventModulePath = path.join(os.tmpdir(), `tauri-${token}-event.js`);
+		const bufferModulePath = path.join(os.tmpdir(), `tauri-${token}-buffer.js`);
+		const ipcModulePath = path.join(os.tmpdir(), `tauri-${token}-ipc.js`);
+		const lifecycleModulePath = eventModulePath.replace(/event\.js$/, 'lifecycle.js');
+		const ipcMessagePortModulePath = ipcModulePath.replace(/ipc\.js$/, 'ipc.mp.js');
 		tempModulePaths.push(eventModulePath, bufferModulePath, ipcModulePath);
+		tempModulePaths.push(lifecycleModulePath, ipcMessagePortModulePath);
 		const indent = (line, level = 1) => `${'  '.repeat(level)}${line}`;
 		const eventModuleLines = [];
 		eventModuleLines.push('class Emitter {');
@@ -193,9 +197,70 @@ suite('Tauri Desktop Sandbox', () => {
 		ipcModuleLines.push(indent('}'));
 		ipcModuleLines.push('}');
 		ipcModuleLines.push('');
-		ipcModuleLines.push('module.exports = { ChannelServer };');
+		ipcModuleLines.push('const ProxyChannel = {');
+		ipcModuleLines.push(indent('fromService(service) {'));
+		ipcModuleLines.push(indent('return service;', 2));
+		ipcModuleLines.push(indent('}'));
+		ipcModuleLines.push('};');
+		ipcModuleLines.push('');
+		ipcModuleLines.push('module.exports = { ChannelServer, ProxyChannel };');
 		ipcModuleLines.push('');
 		fs.writeFileSync(ipcModulePath, ipcModuleLines.join('\n'), 'utf8');
+
+		const lifecycleModuleLines = [];
+		lifecycleModuleLines.push('class DisposableStore {');
+		lifecycleModuleLines.push(indent('constructor() {'));
+		lifecycleModuleLines.push(indent('this.items = [];', 2));
+		lifecycleModuleLines.push(indent('}'));
+		lifecycleModuleLines.push('');
+		lifecycleModuleLines.push(indent('add(value) {'));
+		lifecycleModuleLines.push(indent('this.items.push(value);', 2));
+		lifecycleModuleLines.push(indent('return value;', 2));
+		lifecycleModuleLines.push(indent('}'));
+		lifecycleModuleLines.push('');
+		lifecycleModuleLines.push(indent('dispose() {'));
+		lifecycleModuleLines.push(indent('for (const item of this.items.splice(0)) {', 2));
+		lifecycleModuleLines.push(indent('if (item && typeof item.dispose === \"function\") {', 3));
+		lifecycleModuleLines.push(indent('item.dispose();', 4));
+		lifecycleModuleLines.push(indent('}', 3));
+		lifecycleModuleLines.push(indent('}', 2));
+		lifecycleModuleLines.push(indent('}'));
+		lifecycleModuleLines.push('}');
+		lifecycleModuleLines.push('');
+		lifecycleModuleLines.push('module.exports = { DisposableStore };');
+		lifecycleModuleLines.push('');
+		fs.writeFileSync(lifecycleModulePath, lifecycleModuleLines.join('\n'), 'utf8');
+
+		const ipcMessagePortModuleLines = [];
+		ipcMessagePortModuleLines.push('class Protocol {');
+		ipcMessagePortModuleLines.push(indent('constructor(port) {'));
+		ipcMessagePortModuleLines.push(indent('this.port = port;', 2));
+		ipcMessagePortModuleLines.push(indent('this.listeners = new Set();', 2));
+		ipcMessagePortModuleLines.push(indent('this.port.addEventListener(\"message\", (event) => {', 2));
+		ipcMessagePortModuleLines.push(indent('for (const listener of [...this.listeners]) {', 3));
+		ipcMessagePortModuleLines.push(indent('listener(event.data);', 4));
+		ipcMessagePortModuleLines.push(indent('}', 3));
+		ipcMessagePortModuleLines.push(indent('});', 2));
+		ipcMessagePortModuleLines.push(indent('this.port.start();', 2));
+		ipcMessagePortModuleLines.push(indent('}'));
+		ipcMessagePortModuleLines.push('');
+		ipcMessagePortModuleLines.push(indent('onMessage(listener) {'));
+		ipcMessagePortModuleLines.push(indent('this.listeners.add(listener);', 2));
+		ipcMessagePortModuleLines.push(indent('return { dispose: () => this.listeners.delete(listener) };', 2));
+		ipcMessagePortModuleLines.push(indent('}'));
+		ipcMessagePortModuleLines.push('');
+		ipcMessagePortModuleLines.push(indent('send(message) {'));
+		ipcMessagePortModuleLines.push(indent('this.port.postMessage(message);', 2));
+		ipcMessagePortModuleLines.push(indent('}'));
+		ipcMessagePortModuleLines.push('');
+		ipcMessagePortModuleLines.push(indent('disconnect() {'));
+		ipcMessagePortModuleLines.push(indent('this.port.close();', 2));
+		ipcMessagePortModuleLines.push(indent('}'));
+		ipcMessagePortModuleLines.push('}');
+		ipcMessagePortModuleLines.push('');
+		ipcMessagePortModuleLines.push('module.exports = { Protocol };');
+		ipcMessagePortModuleLines.push('');
+		fs.writeFileSync(ipcMessagePortModulePath, ipcMessagePortModuleLines.join('\n'), 'utf8');
 
 		return {
 			event: eventModulePath,
@@ -657,6 +722,25 @@ suite('Tauri Desktop Sandbox', () => {
 		await incomingFramePromise;
 		assert.deepStrictEqual(incomingFrames, [[7, 8, 9]]);
 		port.close();
+	});
+
+	test('ipcMessagePort acquires the local pty host port via desktop channel events', async () => {
+		createWindow('', {
+			moduleOverrides: createRendererIpcModuleOverrides()
+		});
+		const mock = createHost();
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		const messageEventPromise = waitForMessageEvent('nonce-pty');
+		vscode.ipcMessagePort.acquire('vscode:createPtyHostMessageChannelResult', 'nonce-pty');
+		const messageEvent = await messageEventPromise;
+
+		assert.strictEqual(messageEvent.source, global.window);
+		assert.strictEqual(messageEvent.ports.length, 1);
+		assert.ok(mock.listeners.has('localPty:onProcessData'));
+
+		messageEvent.ports[0].close();
 	});
 
 	test('ipcMessagePort emits a close event when the extension host bridge fails', async () => {

@@ -5,7 +5,10 @@
 
 import * as assert from 'assert';
 import { env, Position, Range, Selection, SnippetString, TextDocument, TextEditor, TextEditorCursorStyle, TextEditorLineNumbersStyle, Uri, window, workspace } from 'vscode';
-import { assertNoRpc, closeAllEditors, createRandomFile, deleteFile } from '../utils';
+import { assertNoRpc, closeAllEditors, createRandomFile, deleteFile, poll } from '../utils';
+
+const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
+const testRequiresDirtyStateParity = isTauriIntegration ? test.skip : test;
 
 suite('vscode API - editors', () => {
 
@@ -13,6 +16,18 @@ suite('vscode API - editors', () => {
 		assertNoRpc();
 		await closeAllEditors();
 	});
+
+	async function assertDocumentDirty(doc: TextDocument, timeoutMessage: string): Promise<void> {
+		if (isTauriIntegration) {
+			await poll(
+				() => Promise.resolve(doc.isDirty),
+				value => value === true,
+				timeoutMessage
+			);
+		}
+
+		assert.ok(doc.isDirty);
+	}
 
 	function withRandomFileEditor(initialContents: string, run: (editor: TextEditor, doc: TextDocument) => Thenable<void>): Thenable<boolean> {
 		return createRandomFile(initialContents).then(file => {
@@ -45,7 +60,7 @@ suite('vscode API - editors', () => {
 			return editor.insertSnippet(snippetString).then(inserted => {
 				assert.ok(inserted);
 				assert.strictEqual(doc.getText(), 'This is a placeholder snippet');
-				assert.ok(doc.isDirty);
+				return assertDocumentDirty(doc, 'document should become dirty after snippet insertion');
 			});
 		});
 	});
@@ -70,13 +85,13 @@ suite('vscode API - editors', () => {
 			const inserted = await editor.insertSnippet(snippetString);
 			assert.ok(inserted);
 			assert.strictEqual(doc.getText(), 'running: INTEGRATION-TESTS');
-			assert.ok(doc.isDirty);
+			await assertDocumentDirty(doc, 'document should become dirty after snippet insertion with clipboard variables');
 		});
 
 		await env.clipboard.writeText(old);
 	});
 
-	test('insert snippet with replacement, editor selection', () => {
+	testRequiresDirtyStateParity('insert snippet with replacement, editor selection', () => {
 		const snippetString = new SnippetString()
 			.appendText('has been');
 
@@ -89,7 +104,7 @@ suite('vscode API - editors', () => {
 			return editor.insertSnippet(snippetString).then(inserted => {
 				assert.ok(inserted);
 				assert.strictEqual(doc.getText(), 'This has been replaced');
-				assert.ok(doc.isDirty);
+				return assertDocumentDirty(doc, 'document should become dirty after snippet replacement');
 			});
 		});
 	});
@@ -107,7 +122,7 @@ suite('vscode API - editors', () => {
 	 * The 3rd line should not be auto-indented, as the edit already
 	 * contains the necessary adjustment.
 	 */
-	test('insert snippet with replacement, avoid adjusting indentation', () => {
+	testRequiresDirtyStateParity('insert snippet with replacement, avoid adjusting indentation', () => {
 		const snippetString = new SnippetString()
 			.appendText('This is line 2\n  This is line 3');
 
@@ -120,12 +135,12 @@ suite('vscode API - editors', () => {
 			return editor.insertSnippet(snippetString, undefined, { undoStopAfter: false, undoStopBefore: false, keepWhitespace: true }).then(inserted => {
 				assert.ok(inserted);
 				assert.strictEqual(doc.getText(), 'This is line 1\n  This is line 2\n  This is line 3');
-				assert.ok(doc.isDirty);
+				return assertDocumentDirty(doc, 'document should become dirty after snippet insertion with indentation');
 			});
 		});
 	});
 
-	test('insert snippet with replacement, selection as argument', () => {
+	testRequiresDirtyStateParity('insert snippet with replacement, selection as argument', () => {
 		const snippetString = new SnippetString()
 			.appendText('has been');
 
@@ -138,31 +153,31 @@ suite('vscode API - editors', () => {
 			return editor.insertSnippet(snippetString, selection).then(inserted => {
 				assert.ok(inserted);
 				assert.strictEqual(doc.getText(), 'This has been replaced');
-				assert.ok(doc.isDirty);
+				return assertDocumentDirty(doc, 'document should become dirty after snippet insertion with explicit selection');
 			});
 		});
 	});
 
-	test('make edit', () => {
+	testRequiresDirtyStateParity('make edit', () => {
 		return withRandomFileEditor('', (editor, doc) => {
 			return editor.edit((builder) => {
 				builder.insert(new Position(0, 0), 'Hello World');
 			}).then(applied => {
 				assert.ok(applied);
 				assert.strictEqual(doc.getText(), 'Hello World');
-				assert.ok(doc.isDirty);
+				return assertDocumentDirty(doc, 'document should become dirty after edit insert');
 			});
 		});
 	});
 
-	test('issue #6281: Edits fail to validate ranges correctly before applying', () => {
+	testRequiresDirtyStateParity('issue #6281: Edits fail to validate ranges correctly before applying', () => {
 		return withRandomFileEditor('Hello world!', (editor, doc) => {
 			return editor.edit((builder) => {
 				builder.replace(new Range(0, 0, Number.MAX_VALUE, Number.MAX_VALUE), 'new');
 			}).then(applied => {
 				assert.ok(applied);
 				assert.strictEqual(doc.getText(), 'new');
-				assert.ok(doc.isDirty);
+				return assertDocumentDirty(doc, 'document should become dirty after edit replace');
 			});
 		});
 	});
