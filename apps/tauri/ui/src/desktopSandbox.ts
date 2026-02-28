@@ -16,6 +16,11 @@ interface WindowWithVscode extends Window {
   vscode?: unknown;
   _VSCODE_USE_RELATIVE_IMPORTS?: boolean;
   _VSCODE_DISABLE_CSS_IMPORT_MAP?: boolean;
+  __VSCODE_DESKTOP_SANDBOX_MODULE_OVERRIDES__?: {
+    event?: string;
+    buffer?: string;
+    ipc?: string;
+  };
 }
 
 interface UriComponents {
@@ -37,6 +42,17 @@ interface MultiRootWorkspaceIdentifier {
 }
 
 type WorkspaceIdentifier = SingleFolderWorkspaceIdentifier | MultiRootWorkspaceIdentifier;
+
+function getRendererIpcModulePaths(): { eventModulePath: string; bufferModulePath: string; ipcModulePath: string } {
+  const win = window as WindowWithVscode;
+  const overrides = win.__VSCODE_DESKTOP_SANDBOX_MODULE_OVERRIDES__;
+
+  return {
+    eventModulePath: typeof overrides?.event === 'string' ? overrides.event : '/out/vs/base/common/event.js',
+    bufferModulePath: typeof overrides?.buffer === 'string' ? overrides.buffer : '/out/vs/base/common/buffer.js',
+    ipcModulePath: typeof overrides?.ipc === 'string' ? overrides.ipc : '/out/vs/base/parts/ipc/common/ipc.js'
+  };
+}
 
 function numberHash(value: number, hashValue: number): number {
   return (((hashValue << 5) - hashValue) + value) | 0;
@@ -158,9 +174,7 @@ class RendererChannelServer {
     }
 
 		this.readyPromise = (async () => {
-			const eventModulePath = '/out/vs/base/common/event.js';
-			const bufferModulePath = '/out/vs/base/common/buffer.js';
-			const ipcModulePath = '/out/vs/base/parts/ipc/common/ipc.js';
+			const { eventModulePath, bufferModulePath, ipcModulePath } = getRendererIpcModulePaths();
 
 			const eventModule = (await import(/* @vite-ignore */ eventModulePath)) as {
 				Emitter: new () => { event: unknown; fire(data: unknown): void };
@@ -212,6 +226,10 @@ class RendererChannelServer {
   private vsBufferWrap:
     | ((input: Uint8Array) => { buffer: ArrayBufferLike })
     | undefined;
+
+  async ready(): Promise<void> {
+    await this.ensureReady();
+  }
 
   async acceptMessage(payload: unknown): Promise<void> {
     await this.ensureReady();
@@ -333,7 +351,7 @@ class IpcRendererShim {
     this.validateChannel(channel);
 
     if (channel === 'vscode:hello') {
-      void this.ensureServer();
+      void this.ensureServer().then(server => server.ready());
       return;
     }
 
@@ -643,6 +661,7 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
 
   let zoomLevel = 0;
   let cachedConfiguration: Record<string, unknown> | undefined;
+  let shellEnvPromise: Promise<Record<string, string>> | undefined;
 
   const resolveConfiguration = async (): Promise<Record<string, unknown>> => {
 		if (cachedConfiguration) {
@@ -659,17 +678,21 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
 	};
 
   const shellEnv = async (): Promise<Record<string, string>> => {
-    const [config, processEnvResponse] = await Promise.all([
-      resolveConfiguration(),
-      host.invokeMethod<{ env?: Record<string, string> }>('process.env', {})
-    ]);
+    if (!shellEnvPromise) {
+      shellEnvPromise = Promise.all([
+        resolveConfiguration(),
+        host.invokeMethod<{ env?: Record<string, string> }>('process.env', {})
+      ]).then(([config, processEnvResponse]) => {
+        const userEnv = (config.userEnv as Record<string, string> | undefined) ?? {};
+        const processEnv = processEnvResponse.env ?? {};
+        return {
+          ...processEnv,
+          ...userEnv
+        };
+      });
+    }
 
-    const userEnv = (config.userEnv as Record<string, string> | undefined) ?? {};
-    const processEnv = processEnvResponse.env ?? {};
-    return {
-      ...processEnv,
-      ...userEnv
-    };
+    return shellEnvPromise;
   };
 
   const configuration = await resolveConfiguration();
@@ -778,6 +801,8 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
               });
           };
           channel.port2.onmessageerror = () => closeBridge();
+          channel.port1.addEventListener('close', () => closeBridge(), { once: true });
+          channel.port2.addEventListener('close', () => closeBridge(), { once: true });
           channel.port2.start();
 
           void host
@@ -827,7 +852,7 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
         return processArch;
       },
       get env() {
-        return processEnv;
+        return { ...processEnv };
       },
       get versions() {
         return {

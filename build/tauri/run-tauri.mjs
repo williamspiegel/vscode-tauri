@@ -11,6 +11,7 @@ if (!['dev', 'build'].includes(mode)) {
 	console.error(`Unsupported tauri mode: ${mode}. Use dev or build.`);
 	process.exit(1);
 }
+const appArgs = process.argv.slice(3);
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 
@@ -116,4 +117,8 @@ await run('node', ['build/next/index.ts', 'transpile', '--exclude-tests']);
 await run('node', ['build/tauri/contract-test.mjs']);
 await run('node', ['build/tauri/smoke.mjs']);
 await run('npm', ['--prefix', 'apps/tauri/ui', 'run', 'build']);
-await run('cargo', ['tauri', mode], { cwd: path.join(repoRoot, 'apps/tauri/src-tauri') });
+const tauriArgs = ['tauri', mode];
+if (appArgs.length > 0) {
+	tauriArgs.push('--', ...appArgs);
+}
+await run('cargo', tauriArgs, { cwd: path.join(repoRoot, 'apps/tauri/src-tauri') });

@@ -7,12 +7,16 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 suite('Tauri Desktop Sandbox', () => {
 	const originalWindow = global.window;
 	const originalGlobalProcess = global.process;
 	const originalGlobalAlias = global.global;
+	/** @type {string[]} */
+	let tempModulePaths;
 
 	/** @type {typeof import('../../../../apps/tauri/ui/src/desktopSandbox')} */
 	let sandboxModule;
@@ -29,9 +33,18 @@ suite('Tauri Desktop Sandbox', () => {
 		};
 
 		sandboxModule = require(path.join(compiledUiRoot, 'desktopSandbox.js'));
+		tempModulePaths = [];
 	});
 
 	teardown(() => {
+		for (const modulePath of tempModulePaths) {
+			try {
+				fs.unlinkSync(modulePath);
+			} catch {
+				// ignore cleanup failures for temp test modules
+			}
+		}
+		delete global.__tauriChannelServerState;
 		global.window = originalWindow;
 		global.process = originalGlobalProcess;
 		global.global = originalGlobalAlias;
@@ -39,8 +52,9 @@ suite('Tauri Desktop Sandbox', () => {
 
 	/**
 	 * @param {string} [search]
+	 * @param {{ moduleOverrides?: { event?: string; buffer?: string; ipc?: string } }} [options]
 	 */
-	function createWindow(search = '') {
+	function createWindow(search = '', options = {}) {
 		const storage = new Map();
 		/** @type {unknown[][]} */
 		const postMessages = [];
@@ -64,11 +78,84 @@ suite('Tauri Desktop Sandbox', () => {
 			},
 			addEventListener() { },
 			removeEventListener() { },
+			__VSCODE_DESKTOP_SANDBOX_MODULE_OVERRIDES__: options.moduleOverrides,
 			postMessage(...args) {
 				postMessages.push(args);
 			}
 		};
 		return { postMessages };
+	}
+
+	function createRendererIpcModuleOverrides() {
+		const eventModulePath = path.join(os.tmpdir(), `tauri-event-${Date.now()}-${Math.random()}.js`);
+		const bufferModulePath = path.join(os.tmpdir(), `tauri-buffer-${Date.now()}-${Math.random()}.js`);
+		const ipcModulePath = path.join(os.tmpdir(), `tauri-ipc-${Date.now()}-${Math.random()}.js`);
+		tempModulePaths.push(eventModulePath, bufferModulePath, ipcModulePath);
+		const indent = (line, level = 1) => `${'  '.repeat(level)}${line}`;
+		const eventModuleLines = [];
+		eventModuleLines.push('class Emitter {');
+		eventModuleLines.push(indent('constructor() {'));
+		eventModuleLines.push(indent('this.listeners = new Set();', 2));
+		eventModuleLines.push(indent('this.event = (listener) => {', 2));
+		eventModuleLines.push(indent('this.listeners.add(listener);', 3));
+		eventModuleLines.push(indent('return { dispose: () => this.listeners.delete(listener) };', 3));
+		eventModuleLines.push(indent('};', 2));
+		eventModuleLines.push(indent('}'));
+		eventModuleLines.push('');
+		eventModuleLines.push(indent('fire(data) {'));
+		eventModuleLines.push(indent('for (const listener of [...this.listeners]) {', 2));
+		eventModuleLines.push(indent('listener(data);', 3));
+		eventModuleLines.push(indent('}', 2));
+		eventModuleLines.push(indent('}'));
+		eventModuleLines.push('}');
+		eventModuleLines.push('');
+		eventModuleLines.push('module.exports = { Emitter };');
+		eventModuleLines.push('');
+		fs.writeFileSync(eventModulePath, eventModuleLines.join('\n'), 'utf8');
+
+		const bufferModuleLines = [];
+		bufferModuleLines.push('module.exports = {');
+		bufferModuleLines.push(indent('VSBuffer: {'));
+		bufferModuleLines.push(indent('wrap(input) {', 2));
+		bufferModuleLines.push(indent('return { buffer: input };', 3));
+		bufferModuleLines.push(indent('}', 2));
+		bufferModuleLines.push(indent('}'));
+		bufferModuleLines.push('};');
+		bufferModuleLines.push('');
+		fs.writeFileSync(bufferModulePath, bufferModuleLines.join('\n'), 'utf8');
+
+		const ipcModuleLines = [];
+		ipcModuleLines.push('class ChannelServer {');
+		ipcModuleLines.push(indent('constructor(protocol, ctx) {'));
+		ipcModuleLines.push(indent('const state = {', 2));
+		ipcModuleLines.push(indent('ctx,', 3));
+		ipcModuleLines.push(indent('registered: [],', 3));
+		ipcModuleLines.push(indent('incoming: [],', 3));
+		ipcModuleLines.push(indent('sendToRenderer(bytes) {', 3));
+		ipcModuleLines.push(indent('protocol.send({ buffer: Uint8Array.from(bytes) });', 4));
+		ipcModuleLines.push(indent('}', 3));
+		ipcModuleLines.push(indent('};', 2));
+		ipcModuleLines.push(indent('protocol.onMessage((message) => {', 2));
+		ipcModuleLines.push(indent('const payload = message && message.buffer ? message.buffer : [];', 3));
+		ipcModuleLines.push(indent('state.incoming.push(Array.from(payload));', 3));
+		ipcModuleLines.push(indent('});', 2));
+		ipcModuleLines.push(indent('global.__tauriChannelServerState = state;', 2));
+		ipcModuleLines.push(indent('}'));
+		ipcModuleLines.push('');
+		ipcModuleLines.push(indent('registerChannel(name, channel) {'));
+		ipcModuleLines.push(indent('global.__tauriChannelServerState.registered.push({ name, channel });', 2));
+		ipcModuleLines.push(indent('}'));
+		ipcModuleLines.push('}');
+		ipcModuleLines.push('');
+		ipcModuleLines.push('module.exports = { ChannelServer };');
+		ipcModuleLines.push('');
+		fs.writeFileSync(ipcModulePath, ipcModuleLines.join('\n'), 'utf8');
+
+		return {
+			event: eventModulePath,
+			buffer: bufferModulePath,
+			ipc: ipcModulePath
+		};
 	}
 
 	/**
@@ -124,13 +211,17 @@ suite('Tauri Desktop Sandbox', () => {
 		createWindow('');
 		const { host } = createHost();
 
+		assert.strictEqual(global.window.vscode, undefined);
 		await sandboxModule.installDesktopSandbox(host);
 
 		const vscode = global.window.vscode;
 		assert.ok(vscode);
 		assert.strictEqual(typeof vscode.ipcRenderer.send, 'function');
+		assert.strictEqual(typeof vscode.ipcMessagePort.acquire, 'function');
 		assert.strictEqual(typeof vscode.webFrame.setZoomLevel, 'function');
 		assert.strictEqual(typeof vscode.process.platform, 'string');
+		assert.strictEqual(typeof vscode.context.configuration, 'function');
+		assert.strictEqual(typeof vscode.context.resolveConfiguration, 'function');
 		assert.strictEqual(typeof vscode.webUtils.getPathForFile, 'function');
 		assert.strictEqual(vscode.process.versions.electron, 'tauri-bridge');
 		assert.strictEqual(vscode.process.versions.tauri, '2');
@@ -141,10 +232,18 @@ suite('Tauri Desktop Sandbox', () => {
 		assert.strictEqual(global.window._VSCODE_USE_RELATIVE_IMPORTS, true);
 		assert.strictEqual(global.window._VSCODE_DISABLE_CSS_IMPORT_MAP, false);
 
+		const exposedProcessEnv = vscode.process.env;
+		exposedProcessEnv.MUTATED = 'yes';
+		assert.strictEqual(vscode.process.env.MUTATED, undefined);
+
 		const shellEnv = await vscode.process.shellEnv();
 		assert.strictEqual(shellEnv.PATH, '/usr/bin');
 		assert.strictEqual(shellEnv.SHELL, '/bin/zsh');
 		assert.strictEqual(shellEnv.VSCODE_CWD, '/workspace');
+
+		const resolvedConfiguration = await vscode.context.resolveConfiguration();
+		assert.ok(vscode.context.configuration());
+		assert.strictEqual(vscode.context.configuration(), resolvedConfiguration);
 
 		assert.strictEqual(global.process.type, 'renderer');
 		assert.strictEqual(global.global, globalThis);
@@ -200,6 +299,24 @@ suite('Tauri Desktop Sandbox', () => {
 		await vscode.process.shellEnv();
 		await vscode.context.resolveConfiguration();
 		assert.strictEqual(mock.getResolveCount(), 1);
+	});
+
+	test('process.shellEnv caches the resolved environment across calls', async () => {
+		createWindow('');
+		const mock = createHost();
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		const first = await vscode.process.shellEnv();
+		const second = await vscode.process.shellEnv();
+
+		assert.strictEqual(first, second);
+		assert.strictEqual(
+			mock.methodCalls.filter(call => call.method === 'process.env').length,
+			1
+		);
+		assert.strictEqual(first.PATH, '/usr/bin');
+		assert.strictEqual(first.VSCODE_CWD, '/workspace');
 	});
 
 	test('process platform falls back from os.type and arch falls back to x64', async () => {
@@ -350,6 +467,200 @@ suite('Tauri Desktop Sandbox', () => {
 		vscode.ipcMessagePort.acquire('vscode:otherResponse', 'nonce-fallback');
 		assert.strictEqual(postMessages.length, 1);
 		assert.deepStrictEqual(postMessages[0], ['nonce-fallback', '*', []]);
+	});
+
+	test('ipcRenderer hello/message bootstraps the renderer channel server and forwards payloads', async () => {
+		const { postMessages } = createWindow('', {
+			moduleOverrides: createRendererIpcModuleOverrides()
+		});
+		const mock = createHost();
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		/** @type {unknown[]} */
+		const seenMessages = [];
+		vscode.ipcRenderer.on('vscode:message', (_event, payload) => {
+			seenMessages.push(payload);
+		});
+
+		vscode.ipcRenderer.send('vscode:hello');
+		for (let i = 0; i < 20 && !global.__tauriChannelServerState; i++) {
+			await new Promise(resolve => setTimeout(resolve, 0));
+		}
+
+		const serverState = global.__tauriChannelServerState;
+		assert.ok(serverState, 'renderer channel server should initialize after vscode:hello');
+		assert.strictEqual(serverState.ctx, 'window:1');
+		assert.ok(serverState.registered.some(entry => entry.name === 'nativeHost'));
+
+		vscode.ipcRenderer.send('vscode:message', Uint8Array.from([9, 8, 7]));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.deepStrictEqual(serverState.incoming, [[9, 8, 7]]);
+
+		serverState.sendToRenderer([4, 5, 6]);
+		assert.strictEqual(seenMessages.length, 1);
+		assert.deepStrictEqual(Array.from(seenMessages[0]), [4, 5, 6]);
+		assert.strictEqual(postMessages.length, 0);
+	});
+
+	test('ipcMessagePort bridges extension host frames in both directions', async () => {
+		const { postMessages } = createWindow('');
+		/** @type {(payload: unknown) => void} */
+		let frameListener = () => undefined;
+		/** @type {Array<{ channel: string; method: string; args: unknown[] }>} */
+		const channelCalls = [];
+		const host = {
+			resolveWindowConfig: async () => ({
+				windowId: 1,
+				userEnv: { VSCODE_CWD: '/workspace' },
+				os: { platform: 'darwin', arch: 'arm64' }
+			}),
+			invokeMethod: async () => ({}),
+			desktopChannelCall: async (channel, method, args) => {
+				channelCalls.push({ channel, method, args: Array.isArray(args) ? args : [] });
+				return undefined;
+			},
+			desktopChannelListen: async (channel, event, arg, onEvent) => {
+				if (channel === 'extensionHostStarter' && event === 'onDynamicMessagePortFrame') {
+					assert.strictEqual(arg, 'nonce-bridge');
+					frameListener = onEvent;
+					return async () => undefined;
+				}
+
+				return async () => undefined;
+			}
+		};
+		await sandboxModule.installDesktopSandbox(host);
+		const vscode = global.window.vscode;
+
+		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-bridge');
+		assert.strictEqual(postMessages.length, 1);
+		assert.strictEqual(postMessages[0][0], 'nonce-bridge');
+		assert.strictEqual(postMessages[0][1], '*');
+		assert.strictEqual(postMessages[0][2].length, 1);
+
+		const port = postMessages[0][2][0];
+		const incomingFrames = [];
+		const incomingFramePromise = new Promise(resolve => {
+			port.addEventListener('message', event => {
+				incomingFrames.push(Array.from(event.data));
+				resolve(undefined);
+			}, { once: true });
+		});
+		port.start();
+
+		frameListener(Uint8Array.from([1, 2, 3]));
+		await incomingFramePromise;
+		assert.deepStrictEqual(incomingFrames, [[1, 2, 3]]);
+
+		port.postMessage(Uint8Array.from([4, 5, 6]));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.deepStrictEqual(
+			channelCalls.filter(call => call.method === 'writeMessagePortFrame'),
+			[{
+				channel: 'extensionHostStarter',
+				method: 'writeMessagePortFrame',
+				args: ['nonce-bridge', [4, 5, 6]]
+			}]
+		);
+
+		port.close();
+	});
+
+	test('ipcMessagePort emits a close event when the extension host bridge fails', async () => {
+		const { postMessages } = createWindow('');
+		/** @type {(error: Error) => void} */
+		let rejectListen;
+		const host = {
+			resolveWindowConfig: async () => ({
+				windowId: 1,
+				userEnv: { VSCODE_CWD: '/workspace' },
+				os: { platform: 'darwin', arch: 'arm64' }
+			}),
+			invokeMethod: async () => ({}),
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (channel, event, arg, _onEvent) => {
+				if (channel === 'extensionHostStarter' && event === 'onDynamicMessagePortFrame') {
+					assert.strictEqual(arg, 'nonce-close');
+					return await new Promise((_, reject) => {
+						rejectListen = reject;
+					});
+				}
+
+				return async () => undefined;
+			}
+		};
+		await sandboxModule.installDesktopSandbox(host);
+		const vscode = global.window.vscode;
+
+		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-close');
+		assert.strictEqual(postMessages.length, 1);
+		const port = postMessages[0][2][0];
+		const whenClosed = new Promise(resolve => {
+			port.addEventListener('close', () => resolve(true), { once: true });
+		});
+
+		const originalWarn = console.warn;
+		console.warn = () => { };
+		try {
+			rejectListen(new Error('listen failed'));
+			assert.strictEqual(await whenClosed, true);
+		} finally {
+			console.warn = originalWarn;
+		}
+		port.close();
+	});
+
+	test('ipcMessagePort closes the host bridge when the acquired port is closed', async () => {
+		const { postMessages } = createWindow('');
+		let stopCount = 0;
+		/** @type {Array<{ channel: string; method: string; args: unknown[] }>} */
+		const channelCalls = [];
+		const host = {
+			resolveWindowConfig: async () => ({
+				windowId: 1,
+				userEnv: { VSCODE_CWD: '/workspace' },
+				os: { platform: 'darwin', arch: 'arm64' }
+			}),
+			invokeMethod: async () => ({}),
+			desktopChannelCall: async (channel, method, args) => {
+				channelCalls.push({ channel, method, args: Array.isArray(args) ? args : [] });
+				return undefined;
+			},
+			desktopChannelListen: async (channel, event, arg, _onEvent) => {
+				if (channel === 'extensionHostStarter' && event === 'onDynamicMessagePortFrame') {
+					assert.strictEqual(arg, 'nonce-manual-close');
+				}
+
+				return async () => {
+					stopCount += 1;
+				};
+			}
+		};
+		await sandboxModule.installDesktopSandbox(host);
+		const vscode = global.window.vscode;
+
+		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-manual-close');
+		assert.strictEqual(postMessages.length, 1);
+		const port = postMessages[0][2][0];
+		const whenClosed = new Promise(resolve => {
+			port.addEventListener('close', () => resolve(true), { once: true });
+		});
+
+		port.start();
+		port.close();
+		assert.strictEqual(await whenClosed, true);
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		assert.deepStrictEqual(
+			channelCalls.filter(call => call.method === 'closeMessagePortFrame'),
+			[{
+				channel: 'extensionHostStarter',
+				method: 'closeMessagePortFrame',
+				args: ['nonce-manual-close']
+			}]
+		);
+		assert.strictEqual(stopCount, 1);
 	});
 
 	test('process event emitter helpers and webUtils fallback path behavior are stable', async () => {

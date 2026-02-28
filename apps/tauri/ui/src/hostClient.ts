@@ -407,28 +407,47 @@ export class HostClient {
 			}
 			throw new Error(`host_invoke transport failed for ${method}: ${message}`);
 		}
+		if (!raw || typeof raw !== "object") {
+			throw new Error(`Invalid JSON-RPC envelope for method ${method}`);
+		}
 		const response = raw as JsonRpcResponse<T>;
 
 		if (response.jsonrpc !== "2.0" || response.id !== request.id) {
 			throw new Error(`Invalid JSON-RPC envelope for method ${method}`);
 		}
 
-		if (response.error) {
+		if (typeof response.error !== "undefined") {
+			const errorPayload =
+				response.error && typeof response.error === "object"
+					? (response.error as {
+							code?: unknown;
+							message?: unknown;
+							data?: unknown;
+						})
+					: undefined;
+			const code =
+				typeof errorPayload?.code === "number" &&
+				Number.isFinite(errorPayload.code)
+					? errorPayload.code
+					: "unknown";
+			const message =
+				typeof errorPayload?.message === "string" &&
+				errorPayload.message.length > 0
+					? errorPayload.message
+					: HostClient.formatUnknownError(response.error);
 			const data =
-				typeof response.error.data === "undefined"
+				!errorPayload || typeof errorPayload.data === "undefined"
 					? ""
-					: ` data=${HostClient.formatUnknownError(response.error.data)}`;
+					: ` data=${HostClient.formatUnknownError(errorPayload.data)}`;
 			if (typeof traceParams !== "undefined") {
 				console.error("[tauri.hostRpc] host error", {
 					method,
-					code: response.error.code,
-					message: response.error.message,
-					data: response.error.data,
+					code,
+					message,
+					data: errorPayload?.data,
 				});
 			}
-			throw new Error(
-				`Host error in ${method} (${response.error.code}): ${response.error.message}${data}`,
-			);
+			throw new Error(`Host error in ${method} (${code}): ${message}${data}`);
 		}
 
 		if (typeof traceParams !== "undefined") {
@@ -446,11 +465,14 @@ export class HostClient {
 	}
 
 	async getWorkbenchCssModules(): Promise<string[]> {
-		const result = await this.invokeMethod<{ modules: string[] }>(
+		const result = await this.invokeMethod<unknown>(
 			"host.cssModules",
 			{},
 		);
-		const modules = result.modules;
+		const modules =
+			result && typeof result === "object"
+				? (result as { modules?: unknown }).modules
+				: undefined;
 		if (
 			!Array.isArray(modules) ||
 			modules.some((module) => typeof module !== "string")
@@ -511,7 +533,7 @@ export class HostClient {
 			throw new Error("desktop.channelEvent listener is unavailable");
 		}
 
-		const response = await this.invokeMethod<{ subscriptionId: string }>(
+		const response = await this.invokeMethod<unknown>(
 			"desktop.channelListen",
 			{
 				channel,
@@ -520,7 +542,10 @@ export class HostClient {
 			},
 		);
 
-		const subscriptionId = response.subscriptionId;
+		const subscriptionId =
+			response && typeof response === "object"
+				? (response as { subscriptionId?: unknown }).subscriptionId
+				: undefined;
 		if (typeof subscriptionId !== "string" || subscriptionId.length === 0) {
 			throw new Error(
 				"desktop.channelListen returned an invalid subscription id.",

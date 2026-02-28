@@ -148,12 +148,14 @@ async function openFolderViaWorkbenchPicker(
     const filePaths = Array.isArray(payload.filePaths)
       ? payload.filePaths.filter((value): value is string => typeof value === 'string')
       : [];
+    const filePath = typeof payload.filePath === 'string' ? payload.filePath : undefined;
+    const normalizedFilePaths = filePaths.length > 0 ? filePaths : filePath ? [filePath] : [];
 
-    if (canceled || filePaths.length === 0) {
+    if (canceled || normalizedFilePaths.length === 0) {
       return false;
     }
 
-    const folderPath = filePaths[0];
+    const folderPath = normalizedFilePaths[0];
     const reuseWindow = options?.forceNewWindow ? false : true;
     const opened = await workspaceProvider.open(
       { folderUri: parseWorkspaceUri(folderPath) },
@@ -222,7 +224,10 @@ function createWorkspaceProvider(): WorkspaceProvider {
       }
 
       const opened = window.open(targetHref, '_blank', 'toolbar=no');
-      return opened !== null;
+      if (opened === null) {
+        window.location.href = targetHref;
+      }
+      return true;
     }
   };
 }

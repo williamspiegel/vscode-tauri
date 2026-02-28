@@ -11,6 +11,7 @@ fi
 MODE="dev"
 if [[ "${1:-}" == "--build" ]]; then
 	MODE="build"
+	shift
 fi
 
 cd "$ROOT"
@@ -19,4 +20,4 @@ if [[ -z "${VSCODE_SKIP_PRELAUNCH:-}" ]]; then
 	node build/lib/preLaunch.ts
 fi
 
-node build/tauri/run-tauri.mjs "$MODE"
+node build/tauri/run-tauri.mjs "$MODE" "$@"

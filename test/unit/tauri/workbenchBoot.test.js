@@ -22,6 +22,8 @@ suite('Tauri Workbench Boot', () => {
 	 * 	href?: string;
 	 * 	desktopChannelCall?: (channel: string, method: string, args: unknown[]) => Promise<unknown>;
 	 * 	getWorkbenchCssModules?: () => Promise<string[]>;
+	 * 	getFallbackCounts?: () => Promise<Record<string, number>>;
+	 * 	openReturnsNull?: boolean;
 	 * 	onCreate?: (domElement: HTMLElement, options: Record<string, unknown>) => void;
 	 * }} [options]
 	 */
@@ -102,8 +104,8 @@ suite('Tauri Workbench Boot', () => {
 			}
 		};
 
-		global.window = {
-			__VSCODE_WORKBENCH_MODULE__: modulePath,
+			global.window = {
+				__VSCODE_WORKBENCH_MODULE__: modulePath,
 			location: {
 				href,
 				origin: parsed.origin,
@@ -112,16 +114,17 @@ suite('Tauri Workbench Boot', () => {
 			},
 			localStorage: {
 				getItem() { return null; }
-			},
-			open(url) {
-				openedUrl = String(url);
-				return {};
-			}
-		};
-		global.document = documentStub;
+				},
+				open(url) {
+					openedUrl = String(url);
+					return options.openReturnsNull ? null : {};
+				}
+			};
+			global.document = documentStub;
 
 			const host = {
 				getWorkbenchCssModules: options.getWorkbenchCssModules || (async () => []),
+				getFallbackCounts: options.getFallbackCounts || (async () => ({})),
 				desktopChannelCall: options.desktopChannelCall || (async () => ({ canceled: true }))
 			};
 
@@ -211,7 +214,7 @@ suite('Tauri Workbench Boot', () => {
 		assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/?folder=%2Ftmp%2Freuse-me');
 	});
 
-	test('workspaceProvider.open encodes workspace target and payload for new window flow', async () => {
+		test('workspaceProvider.open encodes workspace target and payload for new window flow', async () => {
 		const booted = await boot({
 			href: 'http://127.0.0.1:1420/'
 		});
@@ -231,8 +234,43 @@ suite('Tauri Workbench Boot', () => {
 		assert.strictEqual(opened, true);
 		assert.match(booted.getOpenedUrl(), /\?workspace=file%3A%2F%2F%2Ftmp%2Fdemo\.code-workspace/);
 		assert.match(booted.getOpenedUrl(), /&payload=%7B%22source%22%3A%22unit-test%22%7D$/);
-		assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/');
-	});
+			assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/');
+		});
+
+		test('workspaceProvider.open falls back to current window when popup is blocked', async () => {
+			const booted = await boot({
+				href: 'http://127.0.0.1:1420/',
+				openReturnsNull: true
+			});
+			const workspaceProvider = booted.createOptions.workspaceProvider;
+
+			const opened = await workspaceProvider.open({
+				folderUri: {
+					scheme: 'file',
+					authority: '',
+					path: '/tmp/blocked-popup'
+				}
+			}, { reuse: false });
+
+			assert.strictEqual(opened, true);
+			assert.match(booted.getOpenedUrl(), /\?folder=file%3A%2F%2F%2Ftmp%2Fblocked-popup$/);
+			assert.match(booted.getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fblocked-popup$/);
+		});
+
+		test('workspaceProvider.open encodes empty-window targets when payload is present', async () => {
+			const booted = await boot({
+				href: 'http://127.0.0.1:1420/?folder=%2Ftmp%2Fcurrent'
+			});
+			const workspaceProvider = booted.createOptions.workspaceProvider;
+
+			const opened = await workspaceProvider.open(undefined, {
+				reuse: true,
+				payload: { from: 'reset' }
+			});
+
+			assert.strictEqual(opened, true);
+			assert.match(booted.getLocationHref(), /\?ew=true&payload=%7B%22from%22%3A%22reset%22%7D$/);
+		});
 
 	test('open-folder command uses nativeHost picker and reuses current window', async () => {
 		/** @type {{ channel?: string; method?: string; args?: unknown[] }} */
@@ -258,6 +296,19 @@ suite('Tauri Workbench Boot', () => {
 			properties: ['openDirectory', 'createDirectory']
 		}]);
 		assert.match(getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fpicked-folder$/);
+	});
+
+	test('open-folder command accepts single filePath dialog results', async () => {
+		const { createOptions, getLocationHref } = await boot({
+			href: 'http://127.0.0.1:1420/',
+			desktopChannelCall: async () => ({ canceled: false, filePath: '/tmp/single-picked-folder' })
+		});
+
+		const openFolderCommand = createOptions.commands.find(command => command.id === 'workbench.action.files.openFolder');
+		assert.ok(openFolderCommand, 'open-folder command should be registered');
+		await openFolderCommand.handler();
+
+		assert.match(getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fsingle-picked-folder$/);
 	});
 
 	test('open-folder command does not navigate when picker is canceled or fails', async () => {
@@ -294,7 +345,7 @@ suite('Tauri Workbench Boot', () => {
 		assert.strictEqual(getLocationHref(), 'http://127.0.0.1:1420/');
 	});
 
-	test('open-folder-in-new-window command reuses current window when forceReuseWindow is set', async () => {
+		test('open-folder-in-new-window command reuses current window when forceReuseWindow is set', async () => {
 		const { createOptions, getOpenedUrl, getLocationHref } = await boot({
 			href: 'http://127.0.0.1:1420/',
 			desktopChannelCall: async () => ({ canceled: false, filePaths: ['/tmp/reused-folder'] })
@@ -303,11 +354,51 @@ suite('Tauri Workbench Boot', () => {
 		const openInNewWindowCommand = createOptions.commands.find(command => command.id === 'workbench.action.files.openFolderInNewWindow');
 		await openInNewWindowCommand.handler({ forceReuseWindow: true });
 
-		assert.strictEqual(getOpenedUrl(), undefined);
-		assert.match(getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Freused-folder$/);
-	});
+			assert.strictEqual(getOpenedUrl(), undefined);
+			assert.match(getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Freused-folder$/);
+		});
 
-	test('bootWorkbench installs import map entries for css modules', async () => {
+		test('open-folder-via-workspace and open-file-folder commands stay in current window', async () => {
+			const booted = await boot({
+				href: 'http://127.0.0.1:1420/',
+				desktopChannelCall: async () => ({ canceled: false, filePaths: ['/tmp/shared-folder'] })
+			});
+
+			const openViaWorkspace = booted.createOptions.commands.find(command => command.id === 'workbench.action.files.openFolderViaWorkspace');
+			const openFileFolder = booted.createOptions.commands.find(command => command.id === 'workbench.action.files.openFileFolder');
+			assert.ok(openViaWorkspace, 'openFolderViaWorkspace command should be registered');
+			assert.ok(openFileFolder, 'openFileFolder command should be registered');
+
+			await openViaWorkspace.handler({ forceNewWindow: true });
+			assert.strictEqual(booted.getOpenedUrl(), undefined);
+			assert.match(booted.getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fshared-folder$/);
+
+			global.window.location.href = 'http://127.0.0.1:1420/';
+			await openFileFolder.handler();
+			assert.strictEqual(booted.getOpenedUrl(), undefined);
+			assert.match(booted.getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fshared-folder$/);
+		});
+
+		test('tauri.host.showFallbackCounts command proxies host values', async () => {
+			const booted = await boot({
+				getFallbackCounts: async () => ({ 'channel:logger:log': 3 })
+			});
+
+			const showFallbackCounts = booted.createOptions.commands.find(command => command.id === 'tauri.host.showFallbackCounts');
+			assert.ok(showFallbackCounts, 'showFallbackCounts command should be registered');
+			const originalLog = console.log;
+			console.log = () => { };
+			let result;
+			try {
+				result = await showFallbackCounts.handler();
+			} finally {
+				console.log = originalLog;
+			}
+
+			assert.deepStrictEqual(result, { 'channel:logger:log': 3 });
+		});
+
+		test('bootWorkbench installs import map entries for css modules', async () => {
 		const { getHeadChildren } = await boot({
 			getWorkbenchCssModules: async () => ['vs/workbench/workbench.desktop.main.css', '/custom.css']
 		});
