@@ -100,6 +100,9 @@ struct AppState {
     cached_window_config: Mutex<Option<Value>>,
 }
 
+static INTEGRATION_STARTUP_RENDERED: AtomicBool = AtomicBool::new(false);
+static INTEGRATION_STARTUP_LAST_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HostHttpRequestParams {
@@ -1006,6 +1009,13 @@ impl AppState {
             .await;
         });
 
+        if is_integration_startup_watchdog_enabled() {
+            eprintln!(
+                "[host.extensionHostStarter.start] id={} pid={:?} responseNonce={}",
+                id, pid, response_nonce
+            );
+        }
+
         Ok(json!({ "pid": pid }))
     }
 
@@ -1167,6 +1177,12 @@ impl AppState {
             if line.trim().is_empty() {
                 continue;
             }
+            if is_integration_startup_watchdog_enabled() {
+                eprintln!(
+                    "[host.extensionHostStarter.stderr] id={} line={}",
+                    extension_host_id, line
+                );
+            }
             if let Some(stripped) = line.strip_prefix("[ext-host:stdout] ") {
                 Self::emit_dynamic_subscription_event(
                     &channel_runtime,
@@ -1224,6 +1240,13 @@ impl AppState {
                 "error": error.to_string()
             }),
         };
+
+        if is_integration_startup_watchdog_enabled() {
+            eprintln!(
+                "[host.extensionHostStarter.exit] id={} nonce={} payload={}",
+                extension_host_id, nonce, exit_payload
+            );
+        }
 
         Self::emit_dynamic_subscription_event(
             &channel_runtime,
@@ -1692,6 +1715,56 @@ async fn perform_host_http_request(params: HostHttpRequestParams) -> Result<Valu
     }
 }
 
+fn is_integration_startup_watchdog_enabled() -> bool {
+    std::env::var("VSCODE_TAURI_INTEGRATION").ok().as_deref() == Some("1")
+}
+
+fn reset_integration_startup_watchdog_state() {
+    INTEGRATION_STARTUP_RENDERED.store(false, Ordering::Relaxed);
+    if let Ok(mut progress) = INTEGRATION_STARTUP_LAST_PROGRESS.lock() {
+        *progress = None;
+    }
+}
+
+fn update_integration_startup_watchdog_progress(source: &str, message: &str) {
+    if !is_integration_startup_watchdog_enabled() || source != "ui.startup" {
+        return;
+    }
+
+    if let Ok(mut progress) = INTEGRATION_STARTUP_LAST_PROGRESS.lock() {
+        *progress = Some(message.to_string());
+    }
+
+    if message == "render complete" {
+        INTEGRATION_STARTUP_RENDERED.store(true, Ordering::Relaxed);
+    }
+}
+
+fn spawn_integration_startup_watchdog() {
+    if !is_integration_startup_watchdog_enabled() {
+        return;
+    }
+
+    reset_integration_startup_watchdog_state();
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(20));
+        if INTEGRATION_STARTUP_RENDERED.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let last_progress = INTEGRATION_STARTUP_LAST_PROGRESS
+            .lock()
+            .ok()
+            .and_then(|progress| progress.clone())
+            .unwrap_or_else(|| "<no ui.startup progress recorded>".to_string());
+        eprintln!(
+            "[integration.startup.timeout] renderer did not report first render within 20s; lastProgress={}",
+            last_progress
+        );
+        std::process::exit(1);
+    });
+}
+
 #[tauri::command]
 async fn host_invoke(
     request: JsonRpcRequest,
@@ -1703,6 +1776,15 @@ async fn host_invoke(
             -32600,
             "Invalid jsonrpc version",
         ));
+    }
+
+    if std::env::var("VSCODE_TAURI_INTEGRATION").ok().as_deref() == Some("1") {
+        match request.method.as_str() {
+            "protocol.handshake" | "desktop.resolveWindowConfig" | "host.log" | "window.close" => {
+                eprintln!("[host.invoke] method={}", request.method);
+            }
+            _ => {}
+        }
     }
 
     if request.method == "protocol.handshake" {
@@ -1768,6 +1850,54 @@ async fn host_invoke(
         };
     }
 
+    if request.method == "host.log" {
+        let object = match request.params.as_object() {
+            Some(value) => value,
+            None => {
+                return Ok(error_response(
+                    request.id,
+                    -32602,
+                    "host.log expects object params",
+                ));
+            }
+        };
+        let level = match required_string_param(object, "level") {
+            Ok(value) => value,
+            Err(error) => return Ok(error_response(request.id, -32602, error)),
+        };
+        let message = match required_string_param(object, "message") {
+            Ok(value) => value,
+            Err(error) => return Ok(error_response(request.id, -32602, error)),
+        };
+        let source = object
+            .get("source")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("ui");
+        let detail = object
+            .get("detail")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("");
+
+        update_integration_startup_watchdog_progress(&source, &message);
+
+        let prefix = format!("[host.log] level={} source={}", level, source);
+        if detail.is_empty() {
+            if level.eq_ignore_ascii_case("error") || level.eq_ignore_ascii_case("warn") {
+                eprintln!("{prefix} message={message}");
+            } else {
+                println!("{prefix} message={message}");
+            }
+        } else if level.eq_ignore_ascii_case("error") || level.eq_ignore_ascii_case("warn") {
+            eprintln!("{prefix} message={message}\n{detail}");
+        } else {
+            println!("{prefix} message={message}\n{detail}");
+        }
+
+        return Ok(ok_response(request.id, json!({ "logged": true })));
+    }
+
     if request.method == "host.httpRequest" {
         let params = match serde_json::from_value::<HostHttpRequestParams>(request.params.clone()) {
             Ok(value) => value,
@@ -1826,6 +1956,13 @@ async fn host_invoke(
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new()));
 
+        if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+            eprintln!(
+                "[host.desktop.channelCall] channel={} method={}",
+                channel, method
+            );
+        }
+
         if channel == "__ipcSend__" {
             return match state.handle_ipc_send(&method, &args) {
                 Ok(value) => Ok(ok_response(request.id, value)),
@@ -1875,13 +2012,17 @@ async fn host_invoke(
             };
         }
 
-        return match state
-            .router
-            .dispatch_channel(&channel, &method, &args)
-            .await
-        {
+        return match state.router.dispatch_channel(&channel, &method, &args).await {
             Ok(value) => Ok(ok_response(request.id, value)),
-            Err(error) => Ok(error_response(request.id, 1003, error)),
+            Err(error) => {
+                if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                    eprintln!(
+                        "[host.desktop.channelCall.error] channel={} method={} error={}",
+                        channel, method, error
+                    );
+                }
+                Ok(error_response(request.id, 1003, error))
+            }
         };
     }
 
@@ -2323,7 +2464,169 @@ fn apply_default_extensions_gallery_config(product: &mut Value) {
     eprintln!("[tauri.extensionsGallery] injected default extensionsGallery config");
 }
 
+#[derive(Default)]
+struct ParsedDesktopCliArgs {
+    args: serde_json::Map<String, Value>,
+    positional_args: Vec<String>,
+    workspace: Option<Value>,
+    user_data_dir: Option<PathBuf>,
+}
+
+fn stable_short_hex_id(input: &str) -> String {
+    let mut hash: i32 = 0;
+    hash = hash
+        .wrapping_shl(5)
+        .wrapping_sub(hash)
+        .wrapping_add(149_417);
+    for byte in input.bytes() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(byte));
+    }
+    format!("{:08x}", hash as u32)
+}
+
+fn to_forward_slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn absolutize_cli_path(value: &str) -> PathBuf {
+    let candidate = PathBuf::from(value);
+    if candidate.is_absolute() {
+        return candidate;
+    }
+
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("/"))
+        .join(candidate)
+}
+
+fn workspace_value_from_cli_target(value: &str) -> Value {
+    let path = absolutize_cli_path(value);
+    let normalized = to_forward_slash_path(&path);
+    let workspace_id = stable_short_hex_id(&normalized);
+
+    if normalized.to_ascii_lowercase().ends_with(".code-workspace") {
+        json!({
+            "id": workspace_id,
+            "configPath": file_uri_components(&path)
+        })
+    } else {
+        json!({
+            "id": workspace_id,
+            "uri": file_uri_components(&path)
+        })
+    }
+}
+
+fn parse_desktop_cli_args_from_iter<I>(args: I) -> ParsedDesktopCliArgs
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut parsed = ParsedDesktopCliArgs::default();
+    let mut iter = args.into_iter().peekable();
+
+    while let Some(arg) = iter.next() {
+        if let Some(raw_name) = arg.strip_prefix("--") {
+            let (name, inline_value) = match raw_name.split_once('=') {
+                Some((key, value)) => (key, Some(value.to_string())),
+                None => (raw_name, None),
+            };
+
+            let next_value = inline_value.or_else(|| {
+                if matches!(iter.peek(), Some(next) if !next.starts_with("--")) {
+                    iter.next()
+                } else {
+                    None
+                }
+            });
+
+            match name {
+                "extensionDevelopmentPath" => {
+                    if let Some(value) = next_value {
+                        let entry = parsed
+                            .args
+                            .entry("extensionDevelopmentPath".to_string())
+                            .or_insert_with(|| Value::Array(Vec::new()));
+                        if let Some(array) = entry.as_array_mut() {
+                            array.push(Value::String(
+                                absolutize_cli_path(&value).to_string_lossy().to_string(),
+                            ));
+                        }
+                    }
+                }
+                "extensionTestsPath" | "logsPath" | "crash-reporter-directory" => {
+                    if let Some(value) = next_value {
+                        parsed.args.insert(
+                            name.to_string(),
+                            Value::String(absolutize_cli_path(&value).to_string_lossy().to_string()),
+                        );
+                    }
+                }
+                "user-data-dir" => {
+                    if let Some(value) = next_value {
+                        let path = absolutize_cli_path(&value);
+                        parsed.user_data_dir = Some(path.clone());
+                        parsed.args.insert(
+                            "user-data-dir".to_string(),
+                            Value::String(path.to_string_lossy().to_string()),
+                        );
+                    }
+                }
+                "enable-proposed-api" => {
+                    let entry = parsed
+                        .args
+                        .entry("enable-proposed-api".to_string())
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Some(array) = entry.as_array_mut() {
+                        if let Some(value) = next_value {
+                            array.push(Value::String(value));
+                        }
+                    }
+                }
+                "disable-extensions"
+                | "skip-welcome"
+                | "skip-release-notes"
+                | "disable-workspace-trust"
+                | "disable-telemetry"
+                | "disable-experiments"
+                | "disable-updates"
+                | "use-inmemory-secretstorage"
+                | "no-cached-data" => {
+                    parsed.args.insert(name.to_string(), Value::Bool(true));
+                }
+                _ => {
+                    if let Some(value) = next_value {
+                        parsed
+                            .args
+                            .insert(name.to_string(), Value::String(value));
+                    } else {
+                        parsed.args.insert(name.to_string(), Value::Bool(true));
+                    }
+                }
+            }
+
+            continue;
+        }
+
+        parsed.positional_args.push(arg);
+    }
+
+    if let Some(first_positional) = parsed.positional_args.first() {
+        parsed.workspace = Some(workspace_value_from_cli_target(first_positional));
+    }
+
+    parsed
+}
+
+fn parse_desktop_cli_args() -> ParsedDesktopCliArgs {
+    parse_desktop_cli_args_from_iter(std::env::args().skip(1))
+}
+
 fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
+    let cli = parse_desktop_cli_args();
+    let cli_args = cli.args.clone();
     let nls_messages = read_nls_messages(repo_root)?;
     let mut product = read_json_file(&repo_root.join("product.json"))?;
     apply_default_extensions_gallery_config(&mut product);
@@ -2334,7 +2637,10 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| "/tmp".to_string());
     let tmp_dir = std::env::temp_dir();
-    let user_data_dir = repo_root.join(".vscode-tauri").join("user-data");
+    let user_data_dir = cli
+        .user_data_dir
+        .clone()
+        .unwrap_or_else(|| repo_root.join(".vscode-tauri").join("user-data"));
     let _ = fs::create_dir_all(&user_data_dir);
     let _ = fs::create_dir_all(user_data_dir.join("User/profiles/default"));
     let builtin_extensions_dir = repo_root.join("extensions");
@@ -2389,7 +2695,7 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         "true".to_string(),
     );
 
-    let window_config = json!({
+    let mut window_config = json!({
         "windowId": 1,
         "appRoot": repo_root.to_string_lossy(),
         "userEnv": user_env,
@@ -2401,7 +2707,8 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
             "language": "en"
         },
         "cssModules": css_modules,
-        "_": [],
+        "args": cli_args,
+        "_": cli.positional_args,
         "builtin-extensions-dir": builtin_extensions_dir.to_string_lossy(),
         "extensions-dir": user_extensions_dir.to_string_lossy(),
 
@@ -2426,7 +2733,7 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         "tmpDir": tmp_dir.to_string_lossy(),
         "userDataDir": user_data_dir.to_string_lossy(),
 
-        "workspace": Value::Null,
+        "workspace": cli.workspace.unwrap_or(Value::Null),
         "isInitialStartup": true,
         "logLevel": 3,
         "loggers": [],
@@ -2453,6 +2760,10 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
         },
         "isSessionsWindow": false
     });
+
+    if let Some(object) = window_config.as_object_mut() {
+        object.extend(cli.args);
+    }
 
     Ok(window_config)
 }
@@ -2986,6 +3297,100 @@ mod tests {
             Some("default")
         );
     }
+
+    #[test]
+    fn parse_desktop_cli_args_preserves_extension_test_and_workspace_flags() {
+        let parsed = parse_desktop_cli_args_from_iter(vec![
+            "/tmp/workspace".to_string(),
+            "--extensionDevelopmentPath=/tmp/ext-dev".to_string(),
+            "--extensionTestsPath".to_string(),
+            "/tmp/ext-tests".to_string(),
+            "--enable-proposed-api".to_string(),
+            "vscode.vscode-api-tests".to_string(),
+            "--disable-extensions".to_string(),
+            "--logsPath".to_string(),
+            "/tmp/logs".to_string(),
+            "--user-data-dir".to_string(),
+            "/tmp/user-data".to_string(),
+        ]);
+
+        assert_eq!(parsed.positional_args, vec!["/tmp/workspace".to_string()]);
+        assert_eq!(
+            parsed
+                .args
+                .get("extensionDevelopmentPath")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(Value::as_str),
+            Some("/tmp/ext-dev")
+        );
+        assert_eq!(
+            parsed
+                .args
+                .get("extensionTestsPath")
+                .and_then(Value::as_str),
+            Some("/tmp/ext-tests")
+        );
+        assert_eq!(
+            parsed
+                .args
+                .get("enable-proposed-api")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            parsed
+                .args
+                .get("disable-extensions")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.user_data_dir,
+            Some(PathBuf::from("/tmp/user-data"))
+        );
+        assert_eq!(
+            parsed
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.get("uri"))
+                .and_then(|uri| uri.get("path"))
+                .and_then(Value::as_str),
+            Some("/tmp/workspace")
+        );
+        assert_eq!(
+            parsed
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.get("uri"))
+                .and_then(|uri| uri.get("scheme"))
+                .and_then(Value::as_str),
+            Some("file")
+        );
+    }
+
+    #[test]
+    fn parse_desktop_cli_args_treats_workspace_files_as_config_workspaces() {
+        let parsed = parse_desktop_cli_args_from_iter(vec![
+            "/tmp/project.code-workspace".to_string(),
+            "--skip-welcome".to_string(),
+        ]);
+
+        assert_eq!(
+            parsed
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.get("configPath"))
+                .and_then(|uri| uri.get("path"))
+                .and_then(Value::as_str),
+            Some("/tmp/project.code-workspace")
+        );
+        assert_eq!(
+            parsed.args.get("skip-welcome").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
 }
 
 fn main() {
@@ -3057,6 +3462,7 @@ fn main() {
             }
         }))
         .setup(|app| {
+            spawn_integration_startup_watchdog();
             capabilities::window::set_app_handle(app.handle().clone());
             let app_handle = app.handle().clone();
             let listener_handle = app_handle.clone();

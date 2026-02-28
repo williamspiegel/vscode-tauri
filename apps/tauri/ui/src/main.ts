@@ -178,6 +178,8 @@ let startupBootstrapBuildId = "unknown";
 let startupPhaseActive = true;
 let startupRecoveryTriggered = false;
 let startupCurrentAttemptPath: string | undefined;
+let startupHost: HostClient | undefined;
+let startupWindowConfig: Record<string, unknown> | undefined;
 
 function isHttpOrigin(): boolean {
 	return (
@@ -1134,6 +1136,9 @@ function installGlobalStartupErrorHandlers(): void {
 			event.preventDefault();
 			return;
 		}
+		if (!startupPhaseActive) {
+			return;
+		}
 		const detailParts: string[] = [];
 		if (event.error instanceof Error) {
 			if (event.error.message) {
@@ -1154,6 +1159,9 @@ function installGlobalStartupErrorHandlers(): void {
 		const message =
 			detailParts.length > 0 ? detailParts.join("\n") : "Unknown window error";
 		setStatus(`Startup failed:\n${message}`, "error", true);
+		void reportStartupFailureToHost(message).finally(() =>
+			closeWindowAfterStartupFailure(),
+		);
 	});
 
 	window.addEventListener("unhandledrejection", (event) => {
@@ -1162,12 +1170,18 @@ function installGlobalStartupErrorHandlers(): void {
 			event.preventDefault();
 			return;
 		}
+		if (!startupPhaseActive) {
+			return;
+		}
 		const reason = event.reason;
 		const message =
 			reason instanceof Error
 				? (reason.stack ?? reason.message)
 				: String(reason ?? "Unknown rejection");
 		setStatus(`Startup failed:\n${message}`, "error", true);
+		void reportStartupFailureToHost(message).finally(() =>
+			closeWindowAfterStartupFailure(),
+		);
 	});
 }
 
@@ -1193,6 +1207,69 @@ function formatErrorDetails(error: unknown): string {
 		return JSON.stringify(error);
 	} catch {
 		return String(error);
+	}
+}
+
+function shouldFailFastOnStartupFailure(): boolean {
+	return (
+		typeof startupWindowConfig?.extensionTestsPath === "string" &&
+		startupWindowConfig.extensionTestsPath.length > 0
+	);
+}
+
+async function reportStartupFailureToHost(message: string): Promise<void> {
+	if (!startupHost) {
+		return;
+	}
+
+	try {
+		await startupHost.invokeMethod("host.log", {
+			level: "error",
+			source: "ui.startup",
+			message,
+		});
+	} catch (error) {
+		console.warn("[startup.log] failed to report startup failure to host", {
+			error,
+			message,
+		});
+	}
+}
+
+async function reportStartupProgressToHost(message: string): Promise<void> {
+	if (!shouldFailFastOnStartupFailure() || !startupHost) {
+		return;
+	}
+
+	try {
+		await startupHost.invokeMethod("host.log", {
+			level: "info",
+			source: "ui.startup",
+			message,
+		});
+	} catch (error) {
+		console.warn("[startup.log] failed to report startup progress to host", {
+			error,
+			message,
+		});
+	}
+}
+
+async function closeWindowAfterStartupFailure(): Promise<void> {
+	if (
+		!startupPhaseActive ||
+		!shouldFailFastOnStartupFailure() ||
+		!startupHost
+	) {
+		return;
+	}
+
+	try {
+		await startupHost.invokeMethod("window.close", {
+			target: "main",
+		});
+	} catch (error) {
+		console.warn("[startup.close] failed to close main window", error);
 	}
 }
 
@@ -1404,15 +1481,18 @@ async function main(): Promise<void> {
 	}
 	setStatus("Launching Tauri host...");
 	const host = new HostClient();
+	startupHost = host;
 	installHostFetchFallback(host);
 
 	const step = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
 		setStatus(label);
+		await reportStartupProgressToHost(`start ${label}`);
 		const stepStart = performance.now();
 		try {
 			const result = await run();
 			const durationMs = Math.round(performance.now() - stepStart);
 			stepTimings.push({ label, durationMs });
+			await reportStartupProgressToHost(`done ${label} (${durationMs}ms)`);
 			if (startupProfileEnabled) {
 				console.info(`[startup.step] ${label} ${durationMs}ms`);
 			}
@@ -1430,6 +1510,7 @@ async function main(): Promise<void> {
 	const windowConfig = await step("Resolving window config...", () =>
 		host.resolveWindowConfig(),
 	);
+	startupWindowConfig = windowConfig;
 	const appRoot =
 		typeof windowConfig.appRoot === "string" ? windowConfig.appRoot : "";
 	console.info("[startup] using appRoot", appRoot);
@@ -1518,6 +1599,7 @@ async function main(): Promise<void> {
 
 	if (rendered) {
 		markBootstrapSuccess(startupBootstrapBuildId, loadedWorkbenchPath);
+		await reportStartupProgressToHost("render complete");
 		startupPhaseActive = false;
 		setStatus("", "info", false);
 		const runDeferredStartupPatches = () => {
@@ -1585,13 +1667,17 @@ async function main(): Promise<void> {
 		"error",
 		true,
 	);
+	throw new Error(
+		"Workbench did not render within 15s.\n" +
+			`Loaded runtime: ${loadedWorkbenchPath}\n` +
+			"Run with ?hostDebug=1 and share console errors.",
+	);
 }
 
 main().catch((error) => {
 	if (tryRecoverStartupWithLegacy(`main.catch: ${formatErrorDetails(error)}`)) {
 		return;
 	}
-	startupPhaseActive = false;
 
 	const message =
 		error instanceof Error
@@ -1599,4 +1685,19 @@ main().catch((error) => {
 			: String(error);
 	setStatus(`Startup failed:\n${message}`, "error", true);
 	console.error(error);
+	const shouldCloseWindow = shouldFailFastOnStartupFailure();
+	startupPhaseActive = false;
+	void reportStartupFailureToHost(message).finally(async () => {
+		if (!shouldCloseWindow || !startupHost) {
+			return;
+		}
+
+		try {
+			await startupHost.invokeMethod("window.close", {
+				target: "main",
+			});
+		} catch (closeError) {
+			console.warn("[startup.close] failed to close main window", closeError);
+		}
+	});
 });

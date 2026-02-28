@@ -21,6 +21,7 @@ suite('Tauri Workbench Boot', () => {
 	 * @param {{
 	 * 	href?: string;
 	 * 	desktopChannelCall?: (channel: string, method: string, args: unknown[]) => Promise<unknown>;
+	 * 	resolveWindowConfig?: () => Promise<Record<string, unknown>>;
 	 * 	getWorkbenchCssModules?: () => Promise<string[]>;
 	 * 	getFallbackCounts?: () => Promise<Record<string, number>>;
 	 * 	openReturnsNull?: boolean;
@@ -123,6 +124,10 @@ suite('Tauri Workbench Boot', () => {
 			global.document = documentStub;
 
 			const host = {
+				resolveWindowConfig: options.resolveWindowConfig || (async () => ({
+					windowId: 1,
+					workspace: null
+				})),
 				getWorkbenchCssModules: options.getWorkbenchCssModules || (async () => []),
 				getFallbackCounts: options.getFallbackCounts || (async () => ({})),
 				desktopChannelCall: options.desktopChannelCall || (async () => ({ canceled: true }))
@@ -175,6 +180,54 @@ suite('Tauri Workbench Boot', () => {
 		});
 		assert.deepStrictEqual(workspaceProvider.payload, { source: 'test' });
 		assert.strictEqual(workspaceProvider.trusted, true);
+	});
+
+	test('bootWorkbench derives workspace, development options, and trust from host window config', async () => {
+		const { createOptions } = await boot({
+			resolveWindowConfig: async () => ({
+				windowId: 1,
+				workspace: {
+					id: 'ws-1',
+					uri: {
+						scheme: 'file',
+						authority: '',
+						path: '/tmp/from-config'
+					}
+				},
+				extensionDevelopmentPath: ['/tmp/ext-dev'],
+				extensionTestsPath: '/tmp/ext-tests',
+				'enable-proposed-api': ['vscode.vscode-api-tests'],
+				'skip-welcome': true,
+				'skip-release-notes': true,
+				'disable-workspace-trust': true
+			})
+		});
+
+		const workspaceProvider = createOptions.workspaceProvider;
+		assert.strictEqual(workspaceProvider.workspace.folderUri.scheme, 'file');
+		assert.strictEqual(workspaceProvider.workspace.folderUri.authority, '');
+		assert.strictEqual(workspaceProvider.workspace.folderUri.path, '/tmp/from-config');
+		assert.deepStrictEqual(workspaceProvider.payload, [
+			['skipWelcome', 'true'],
+			['skipReleaseNotes', 'true'],
+			['extensionDevelopmentPath', '/tmp/ext-dev'],
+			['extensionTestsPath', '/tmp/ext-tests'],
+			['enableProposedApi', 'vscode.vscode-api-tests']
+		]);
+		assert.strictEqual(createOptions.enableWorkspaceTrust, false);
+		assert.deepStrictEqual(createOptions.developmentOptions, {
+			extensions: [{
+				scheme: 'file',
+				authority: '',
+				path: '/tmp/ext-dev'
+			}],
+			extensionTestsPath: {
+				scheme: 'file',
+				authority: '',
+				path: '/tmp/ext-tests'
+			},
+			enableSmokeTestDriver: false
+		});
 	});
 
 	test('bootWorkbench parses workspace URI query and invalid payload fallback', async () => {

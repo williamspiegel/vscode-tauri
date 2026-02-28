@@ -12,6 +12,12 @@ if (!['dev', 'build'].includes(mode)) {
 	process.exit(1);
 }
 const appArgs = process.argv.slice(3);
+const useStaticFrontendInDev =
+	mode === 'dev' &&
+	['1', 'true', 'on'].includes(String(process.env.VSCODE_TAURI_NO_DEV_SERVER ?? '').toLowerCase());
+const disableWatchInDev =
+	mode === 'dev' &&
+	['1', 'true', 'on'].includes(String(process.env.VSCODE_TAURI_NO_WATCH ?? '').toLowerCase());
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 
@@ -118,7 +124,22 @@ await run('node', ['build/tauri/contract-test.mjs']);
 await run('node', ['build/tauri/smoke.mjs']);
 await run('npm', ['--prefix', 'apps/tauri/ui', 'run', 'build']);
 const tauriArgs = ['tauri', mode];
+if (useStaticFrontendInDev) {
+	tauriArgs.push(
+		'--config',
+		JSON.stringify({
+			build: {
+				beforeDevCommand: '',
+				devUrl: null
+			}
+		}),
+		'--no-dev-server'
+	);
+}
+if (disableWatchInDev) {
+	tauriArgs.push('--no-watch');
+}
 if (appArgs.length > 0) {
-	tauriArgs.push('--', ...appArgs);
+	tauriArgs.push('--', '--', ...appArgs);
 }
 await run('cargo', tauriArgs, { cwd: path.join(repoRoot, 'apps/tauri/src-tauri') });

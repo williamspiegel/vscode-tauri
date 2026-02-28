@@ -119,8 +119,18 @@ function forwardStream(stream, prefix) {
   });
 }
 
+function sanitizeWorkerExecArgv(execArgv) {
+  const sanitized = execArgv.filter(value => value !== '--expose-gc');
+  if (sanitized.length !== execArgv.length) {
+    process.stderr.write('[bridge] dropping unsupported Worker execArgv: --expose-gc\n');
+  }
+
+  return sanitized;
+}
+
 const config = parseConfig();
 const workerScript = new URL('./extension-host-worker.mjs', import.meta.url);
+const workerExecArgv = sanitizeWorkerExecArgv(config.execArgv);
 
 const worker = new Worker(workerScript, {
   type: 'module',
@@ -132,7 +142,7 @@ const worker = new Worker(workerScript, {
   },
   stdout: true,
   stderr: true,
-  execArgv: config.execArgv,
+  execArgv: workerExecArgv,
 });
 
 forwardStream(worker.stdout, '[ext-host:stdout] ');

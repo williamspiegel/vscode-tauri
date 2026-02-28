@@ -58,7 +58,10 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
   const workbenchModulePath = workbenchWindow.__VSCODE_WORKBENCH_MODULE__;
   const resolvedWorkbenchModulePath = workbenchModulePath ?? '/out/vs/workbench/workbench.web.main.internal.js';
   const fileRoot = new URL('/out/', window.location.origin).toString();
-  const workspaceProvider = createWorkspaceProvider();
+  const windowConfig = await host.resolveWindowConfig();
+  const workspaceProvider = createWorkspaceProvider(windowConfig);
+  const developmentOptions = createDevelopmentOptions(windowConfig);
+  const enableWorkspaceTrust = windowConfig['disable-workspace-trust'] !== true;
   workbenchWindow._VSCODE_FILE_ROOT = fileRoot;
 
   const cssModules = await host.getWorkbenchCssModules();
@@ -70,8 +73,9 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
     remoteAuthority: undefined,
     serverBasePath: '/',
     workspaceProvider,
-    enableWorkspaceTrust: true,
+    enableWorkspaceTrust,
     additionalTrustedDomains: [],
+    developmentOptions,
     secretStorageProvider: {
       type: 'in-memory',
       async get() {
@@ -167,9 +171,31 @@ async function openFolderViaWorkbenchPicker(
   }
 }
 
-function createWorkspaceProvider(): WorkspaceProvider {
+function createDevelopmentOptions(windowConfig: Record<string, unknown>): Record<string, unknown> | undefined {
+  const extensions = Array.isArray(windowConfig.extensionDevelopmentPath)
+    ? windowConfig.extensionDevelopmentPath
+      .filter((value): value is string => typeof value === 'string')
+      .map(value => parseWorkspaceUri(value))
+    : [];
+  const extensionTestsPath = typeof windowConfig.extensionTestsPath === 'string'
+    ? parseWorkspaceUri(windowConfig.extensionTestsPath)
+    : undefined;
+  const enableSmokeTestDriver = windowConfig['enable-smoke-test-driver'] === true;
+
+  if (extensions.length === 0 && !extensionTestsPath && !enableSmokeTestDriver) {
+    return undefined;
+  }
+
+  return {
+    extensions: extensions.length > 0 ? extensions : undefined,
+    extensionTestsPath,
+    enableSmokeTestDriver
+  };
+}
+
+function createWorkspaceProvider(windowConfig: Record<string, unknown>): WorkspaceProvider {
   let workspace: WorkspaceToOpen = undefined;
-  let payload: object = {};
+  let payload: object = createWindowPayload(windowConfig);
   let foundWorkspace = false;
 
   const query = new URL(window.location.href).searchParams;
@@ -201,7 +227,7 @@ function createWorkspaceProvider(): WorkspaceProvider {
   });
 
   if (!foundWorkspace) {
-    workspace = undefined;
+    workspace = workspaceFromWindowConfig(windowConfig);
   }
 
   return {
@@ -229,6 +255,76 @@ function createWorkspaceProvider(): WorkspaceProvider {
       }
       return true;
     }
+  };
+}
+
+function createWindowPayload(windowConfig: Record<string, unknown>): object {
+  const payloadEntries: [string, string][] = [];
+  if (windowConfig['skip-welcome'] === true) {
+    payloadEntries.push(['skipWelcome', 'true']);
+  }
+  if (windowConfig['skip-release-notes'] === true) {
+    payloadEntries.push(['skipReleaseNotes', 'true']);
+  }
+  if (Array.isArray(windowConfig.extensionDevelopmentPath) && windowConfig.extensionDevelopmentPath.length > 0) {
+    for (const extensionPath of windowConfig.extensionDevelopmentPath) {
+      if (typeof extensionPath === 'string' && extensionPath.length > 0) {
+        payloadEntries.push(['extensionDevelopmentPath', extensionPath]);
+      }
+    }
+  }
+  if (typeof windowConfig.extensionTestsPath === 'string' && windowConfig.extensionTestsPath.length > 0) {
+    payloadEntries.push(['extensionTestsPath', windowConfig.extensionTestsPath]);
+  }
+  if (Array.isArray(windowConfig['enable-proposed-api'])) {
+    for (const extensionId of windowConfig['enable-proposed-api']) {
+      if (typeof extensionId === 'string' && extensionId.length > 0) {
+        payloadEntries.push(['enableProposedApi', extensionId]);
+      }
+    }
+  } else if (windowConfig['enable-proposed-api'] === true) {
+    payloadEntries.push(['enableProposedApi', 'true']);
+  }
+
+  return payloadEntries;
+}
+
+function workspaceFromWindowConfig(windowConfig: Record<string, unknown>): WorkspaceToOpen {
+  const candidate = windowConfig.workspace;
+  if (!candidate || typeof candidate !== 'object') {
+    return undefined;
+  }
+
+  const workspace = candidate as Record<string, unknown>;
+  const folderUri = uriComponentsFromConfig(workspace.uri);
+  if (folderUri) {
+    return { folderUri };
+  }
+
+  const workspaceUri = uriComponentsFromConfig(workspace.configPath);
+  if (workspaceUri) {
+    return { workspaceUri };
+  }
+
+  return undefined;
+}
+
+function uriComponentsFromConfig(value: unknown): UriComponents | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const objectValue = value as Record<string, unknown>;
+  if (typeof objectValue.path !== 'string' || typeof objectValue.scheme !== 'string') {
+    return undefined;
+  }
+
+  return {
+    scheme: objectValue.scheme,
+    authority: typeof objectValue.authority === 'string' ? objectValue.authority : undefined,
+    path: objectValue.path,
+    query: typeof objectValue.query === 'string' && objectValue.query.length > 0 ? objectValue.query : undefined,
+    fragment: typeof objectValue.fragment === 'string' && objectValue.fragment.length > 0 ? objectValue.fragment : undefined
   };
 }
 
