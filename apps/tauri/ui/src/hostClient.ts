@@ -337,7 +337,6 @@ export class HostClient {
 				try {
 					eventId = await invoke("plugin:event|listen", {
 						event,
-						target: { kind: "Any" },
 						handler: callbackId,
 					});
 				} catch (error) {
@@ -360,6 +359,32 @@ export class HostClient {
 		throw new Error(
 			"Tauri event API is unavailable. Run this UI inside the Tauri host.",
 		);
+	}
+
+	private static tryListenDomEvent<T>(
+		event: string,
+		handler: TauriEventListener<T>,
+	): (() => void) | undefined {
+		if (
+			event !== "desktop_channel_event" ||
+			typeof window.addEventListener !== "function" ||
+			typeof window.removeEventListener !== "function"
+		) {
+			return undefined;
+		}
+
+		const listener = (rawEvent: Event | { detail?: T }) => {
+			const payload =
+				rawEvent && typeof rawEvent === "object" && "detail" in rawEvent
+					? (rawEvent as { detail?: T }).detail
+					: undefined;
+			handler({ payload: payload as T });
+		};
+
+		window.addEventListener(event, listener as EventListener);
+		return () => {
+			window.removeEventListener(event, listener as EventListener);
+		};
 	}
 
 	async handshake(): Promise<ProtocolHandshakeResponse> {
@@ -554,6 +579,15 @@ export class HostClient {
 
 		this.desktopChannelHandlers.set(subscriptionId, handler);
 		const buffered = this.desktopChannelBufferedEvents.get(subscriptionId);
+		if (channel === "extensionHostStarter") {
+			void this
+				.invokeMethod("host.log", {
+					level: "info",
+					source: "hostClient.channelListen",
+					message: `event=${event} subscriptionId=${subscriptionId} buffered=${buffered?.length ?? 0}`,
+				})
+				.catch(() => undefined);
+		}
 		if (buffered && buffered.length > 0) {
 			this.desktopChannelBufferedEvents.delete(subscriptionId);
 			for (const payload of buffered) {
@@ -589,6 +623,15 @@ export class HostClient {
 					HostClient.normalizeDesktopChannelPayload(payload);
 
 				const handler = this.desktopChannelHandlers.get(subscriptionId);
+				if (payload.channel === "extensionHostStarter") {
+					void this
+						.invokeMethod("host.log", {
+							level: "info",
+							source: "hostClient.channelEvent",
+							message: `channel=${payload.channel} event=${payload.event} subscriptionId=${payload.subscriptionId} hasHandler=${handler ? 1 : 0}`,
+						})
+						.catch(() => undefined);
+				}
 				if (handler) {
 					handler(normalizedPayload);
 					return;
@@ -617,8 +660,18 @@ export class HostClient {
 		eventName: E,
 		handler: (payload: HostEventPayload<E>) => void,
 	): Promise<() => void> {
-		const listen = HostClient.resolveListen();
 		const tauriEventName = HostClient.toTauriEventName(eventName as string);
+		const domStop = HostClient.tryListenDomEvent<HostEventPayload<E>>(
+			tauriEventName,
+			(event) => {
+				handler(event.payload);
+			},
+		);
+		if (domStop) {
+			return domStop;
+		}
+
+		const listen = HostClient.resolveListen();
 		try {
 			return await listen<HostEventPayload<E>>(tauriEventName, (event) => {
 				handler(event.payload);

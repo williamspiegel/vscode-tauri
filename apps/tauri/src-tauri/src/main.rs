@@ -162,6 +162,13 @@ impl AppState {
             self.next_subscription_id.fetch_add(1, Ordering::Relaxed)
         );
 
+        if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+            eprintln!(
+                "[host.desktop.channelListen] channel={} event={} arg={}",
+                channel, event, arg
+            );
+        }
+
         let runtime = self
             .build_subscription_runtime(&id, channel.as_str(), event.as_str(), &arg)
             .await?;
@@ -392,15 +399,48 @@ impl AppState {
 
     fn emit_channel_event(subscription_id: &str, channel: &str, event: &str, payload: Value) {
         if let Some(app_handle) = capabilities::window::app_handle() {
-            let _ = app_handle.emit(
-                "desktop_channel_event",
-                json!({
-                    "subscriptionId": subscription_id,
-                    "channel": channel,
-                    "event": event,
-                    "payload": payload
-                }),
-            );
+            let envelope = json!({
+                "subscriptionId": subscription_id,
+                "channel": channel,
+                "event": event,
+                "payload": payload
+            });
+
+            if let Some(window) = app_handle.get_webview_window("main") {
+                if let Ok(envelope_json) = serde_json::to_string(&envelope) {
+                    if let Ok(envelope_literal) = serde_json::to_string(&envelope_json) {
+                        let script = format!(
+                            "window.dispatchEvent(new CustomEvent('desktop_channel_event', {{ detail: JSON.parse({}) }}));",
+                            envelope_literal
+                        );
+                        if window.eval(script.as_str()).is_ok() {
+                            if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                                eprintln!(
+                                    "[host.desktop.channelEvent.emit] via=eval channel={} event={} subscriptionId={}",
+                                    channel, event, subscription_id
+                                );
+                            }
+                            return;
+                        } else if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                            eprintln!(
+                                "[host.desktop.channelEvent.emit] via=eval-failed channel={} event={} subscriptionId={}",
+                                channel, event, subscription_id
+                            );
+                        }
+                    }
+                }
+
+                if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+                    eprintln!(
+                        "[host.desktop.channelEvent.emit] via=window.emit channel={} event={} subscriptionId={}",
+                        channel, event, subscription_id
+                    );
+                }
+                let _ = window.emit("desktop_channel_event", envelope);
+                return;
+            }
+
+            let _ = app_handle.emit("desktop_channel_event", envelope);
         }
     }
 
@@ -491,6 +531,16 @@ impl AppState {
                 .collect::<Vec<_>>(),
             Err(_) => Vec::new(),
         };
+
+        if is_integration_startup_watchdog_enabled() && channel == "extensionHostStarter" {
+            eprintln!(
+                "[host.desktop.channelEvent.match] channel={} event={} arg={} subscriptions={}",
+                channel,
+                event,
+                dynamic_arg,
+                subscription_ids.len()
+            );
+        }
 
         for subscription_id in subscription_ids {
             Self::emit_channel_event(&subscription_id, channel, event, payload.clone());
@@ -1148,6 +1198,15 @@ impl AppState {
                 }
                 let frame = raw_buffer[4..(4 + frame_length)].to_vec();
                 raw_buffer.drain(..(4 + frame_length));
+
+                if is_integration_startup_watchdog_enabled() {
+                    eprintln!(
+                        "[host.extensionHostStarter.frame] id={} nonce={} bytes={}",
+                        extension_host_id,
+                        nonce,
+                        frame.len()
+                    );
+                }
 
                 Self::emit_dynamic_subscription_event(
                     &channel_runtime,

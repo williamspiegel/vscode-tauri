@@ -18,6 +18,8 @@ suite('Tauri Host Client', () => {
 	let modulePath;
 
 	function createBaseWindow() {
+		/** @type {Map<string, Set<(event: unknown) => void>>} */
+		const listeners = new Map();
 		return {
 			location: {
 				search: '',
@@ -27,6 +29,34 @@ suite('Tauri Host Client', () => {
 			},
 			localStorage: {
 				getItem() { return null; }
+			},
+			addEventListener(type, listener) {
+				const eventListeners = listeners.get(type) || new Set();
+				eventListeners.add(listener);
+				listeners.set(type, eventListeners);
+			},
+			removeEventListener(type, listener) {
+				const eventListeners = listeners.get(type);
+				if (!eventListeners) {
+					return;
+				}
+
+				eventListeners.delete(listener);
+				if (eventListeners.size === 0) {
+					listeners.delete(type);
+				}
+			},
+			dispatchEvent(event) {
+				const eventListeners = listeners.get(event.type);
+				if (!eventListeners) {
+					return true;
+				}
+
+				for (const listener of [...eventListeners]) {
+					listener.call(global.window, event);
+				}
+
+				return !event.defaultPrevented;
 			}
 		};
 	}
@@ -240,8 +270,6 @@ suite('Tauri Host Client', () => {
 	});
 
 	test('desktopChannelListen buffers pre-registration events, normalizes payloads, and unlistens cleanly', async () => {
-		/** @type {((event: { payload: unknown }) => void) | undefined} */
-		let desktopEventListener;
 		/** @type {string[]} */
 		const methods = [];
 		loadHostClient({
@@ -250,9 +278,9 @@ suite('Tauri Host Client', () => {
 				methods.push(request.method);
 
 				if (request.method === 'desktop.channelListen') {
-					assert.ok(desktopEventListener, 'desktop.channelEvent listener should be registered first');
-					desktopEventListener({
-						payload: {
+					global.window.dispatchEvent({
+						type: 'desktop_channel_event',
+						detail: {
 							subscriptionId: 'sub-1',
 							channel: 'storage',
 							event: 'onDidChangeStorage',
@@ -273,11 +301,6 @@ suite('Tauri Host Client', () => {
 				}
 
 				throw new Error(`Unexpected method ${request.method}`);
-			},
-			listen: async (event, handler) => {
-				assert.strictEqual(event, 'desktop_channel_event');
-				desktopEventListener = handler;
-				return async () => undefined;
 			}
 		});
 
@@ -305,6 +328,8 @@ suite('Tauri Host Client', () => {
 				return jsonRpcResponse(args.request, { result: {} });
 			}
 		});
+		delete global.window.addEventListener;
+		delete global.window.removeEventListener;
 
 		const client = new hostClientModule.HostClient();
 		await assert.rejects(
@@ -373,7 +398,6 @@ suite('Tauri Host Client', () => {
 			command: 'plugin:event|listen',
 			args: {
 				event: 'filesystem_changed',
-				target: { kind: 'Any' },
 				handler: 12
 			}
 		});
@@ -393,10 +417,50 @@ suite('Tauri Host Client', () => {
 		assert.strictEqual(unregisteredId, 12);
 	});
 
+	test('listenEvent uses the DOM bridge for desktop.channelEvent before Tauri listeners', async () => {
+		let invokeCalls = 0;
+		let tauriListenCalls = 0;
+		loadHostClient({
+			invoke: async () => {
+				invokeCalls += 1;
+				throw new Error('invoke should not be used');
+			},
+			listen: async () => {
+				tauriListenCalls += 1;
+				throw new Error('tauri listen should not be used');
+			}
+		});
+
+		const client = new hostClientModule.HostClient();
+		let seenPayload;
+		const stop = await client.listenEvent('desktop.channelEvent', payload => {
+			seenPayload = payload;
+		});
+
+		global.window.dispatchEvent({
+			type: 'desktop_channel_event',
+			detail: { subscriptionId: 'sub-dom', payload: { ok: true } }
+		});
+		assert.deepStrictEqual(seenPayload, {
+			subscriptionId: 'sub-dom',
+			payload: { ok: true }
+		});
+		assert.strictEqual(invokeCalls, 0);
+		assert.strictEqual(tauriListenCalls, 0);
+
+		await stop();
+		seenPayload = undefined;
+		global.window.dispatchEvent({
+			type: 'desktop_channel_event',
+			detail: { subscriptionId: 'sub-dom', payload: { ok: false } }
+		});
+		assert.strictEqual(seenPayload, undefined);
+	});
+
 	test('listenEvent wraps underlying listen failures with the original and mapped event names', async () => {
 		loadHostClient({
 			listen: async (event) => {
-				assert.strictEqual(event, 'desktop_channel_event');
+				assert.strictEqual(event, 'filesystem_changed');
 				throw new Error('permission denied');
 			},
 			invoke: async () => {
@@ -406,8 +470,8 @@ suite('Tauri Host Client', () => {
 
 		const client = new hostClientModule.HostClient();
 		await assert.rejects(
-			client.listenEvent('desktop.channelEvent', () => undefined),
-			/Failed to listen to host event 'desktop\.channelEvent' as 'desktop_channel_event': permission denied/
+			client.listenEvent('filesystem.changed', () => undefined),
+			/Failed to listen to host event 'filesystem\.changed' as 'filesystem_changed': permission denied/
 		);
 	});
 });

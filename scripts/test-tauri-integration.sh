@@ -15,15 +15,21 @@ node build/tauri/contract-test.mjs
 node build/tauri/smoke.mjs
 
 VSCODEUSERDATADIR=$(mktemp -d 2>/dev/null)
+VSCODEAPITESTDIR=$(mktemp -d 2>/dev/null)
 VSCODECRASHDIR=$ROOT/.build/crashes
 VSCODELOGSDIR=$ROOT/.build/logs/integration-tests
 INTEGRATION_TEST_ELECTRON_PATH=${INTEGRATION_TEST_ELECTRON_PATH:-"./scripts/code-tauri.sh"}
 API_TESTS_EXTRA_ARGS="--disable-telemetry --disable-experiments --skip-welcome --skip-release-notes --crash-reporter-directory=$VSCODECRASHDIR --logsPath=$VSCODELOGSDIR --no-cached-data --disable-updates --use-inmemory-secretstorage --disable-extensions --disable-workspace-trust --user-data-dir=$VSCODEUSERDATADIR"
+API_TEST_WORKSPACE_FOLDER="$VSCODEAPITESTDIR/testWorkspace"
+API_TEST_WORKSPACE_FILE="$VSCODEAPITESTDIR/testworkspace.code-workspace"
 
 mkdir -p "$VSCODECRASHDIR" "$VSCODELOGSDIR"
+cp -R "$ROOT/extensions/vscode-api-tests/testWorkspace" "$API_TEST_WORKSPACE_FOLDER"
+cp "$ROOT/extensions/vscode-api-tests/testworkspace.code-workspace" "$API_TEST_WORKSPACE_FILE"
 
 cleanup() {
 	rm -rf "$VSCODEUSERDATADIR"
+	rm -rf "$VSCODEAPITESTDIR"
 }
 
 trap cleanup EXIT
@@ -50,7 +56,7 @@ if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	echo
 	echo "### API tests (folder)"
 	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
-		"$ROOT/extensions/vscode-api-tests/testWorkspace" \
+		"$API_TEST_WORKSPACE_FOLDER" \
 		--enable-proposed-api=vscode.vscode-api-tests \
 		--extensionDevelopmentPath="$ROOT/extensions/vscode-api-tests" \
 		--extensionTestsPath="$ROOT/extensions/vscode-api-tests/out/singlefolder-tests" \
@@ -61,7 +67,7 @@ if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	echo
 	echo "### API tests (workspace)"
 	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
-		"$ROOT/extensions/vscode-api-tests/testworkspace.code-workspace" \
+		"$API_TEST_WORKSPACE_FILE" \
 		--enable-proposed-api=vscode.vscode-api-tests \
 		--extensionDevelopmentPath="$ROOT/extensions/vscode-api-tests" \
 		--extensionTestsPath="$ROOT/extensions/vscode-api-tests/out/workspace-tests" \

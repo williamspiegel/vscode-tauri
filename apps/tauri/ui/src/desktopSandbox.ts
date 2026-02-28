@@ -557,6 +557,10 @@ function toUint8Array(payload: unknown): Uint8Array {
     return payload;
   }
 
+  if (Array.isArray(payload)) {
+    return Uint8Array.from(payload as number[]);
+  }
+
   if (payload instanceof ArrayBuffer) {
     return new Uint8Array(payload);
   }
@@ -716,6 +720,19 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
     typeof configuration.execPath === 'string' ? configuration.execPath : '/Applications/Code Tauri.app';
   const processListeners = new Map<string, Set<(...args: unknown[]) => void>>();
   const messagePortBridgeStops = new Map<string, () => Promise<void>>();
+  const shouldLogMessagePortBridge = processEnv.VSCODE_TAURI_INTEGRATION === '1';
+
+  const logMessagePortBridge = (message: string): void => {
+    if (!shouldLogMessagePortBridge) {
+      return;
+    }
+
+    void host.invokeMethod('host.log', {
+      level: 'info',
+      source: 'desktopSandbox.port',
+      message
+    }).catch(() => undefined);
+  };
 
   const processOn = (type: string, callback: (...args: unknown[]) => void): void => {
     const listeners = processListeners.get(type) ?? new Set<(...args: unknown[]) => void>();
@@ -762,14 +779,45 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
           throw new Error(`Unsupported event IPC channel '${responseChannel}'`);
         }
 
+        const postResponse = (ports: Transferable[]) => {
+          queueMicrotask(() => {
+            logMessagePortBridge(`dispatch response nonce=${nonce} ports=${ports.length}`);
+            if (typeof window.dispatchEvent === 'function' && typeof Event === 'function') {
+              const event = new Event('message');
+              Object.defineProperties(event, {
+                data: { configurable: true, value: nonce },
+                ports: { configurable: true, value: ports },
+                source: { configurable: true, value: window }
+              });
+              window.dispatchEvent(event);
+              return;
+            }
+
+            window.postMessage(nonce, '*', ports);
+          });
+        };
+
         if (responseChannel === 'vscode:startExtensionHostMessagePortResult') {
           const channel = new MessageChannel();
           let closed = false;
+          let rendererPortReady = false;
+          const pendingFrames: Uint8Array[] = [];
           const existingStop = messagePortBridgeStops.get(nonce);
           if (existingStop) {
             void existingStop();
             messagePortBridgeStops.delete(nonce);
           }
+
+          const flushPendingFrames = () => {
+            if (closed || !rendererPortReady || pendingFrames.length === 0) {
+              return;
+            }
+
+            logMessagePortBridge(`flush pending nonce=${nonce} frames=${pendingFrames.length}`);
+            for (const frame of pendingFrames.splice(0)) {
+              channel.port2.postMessage(frame);
+            }
+          };
 
           const closeBridge = () => {
             if (closed) {
@@ -793,6 +841,7 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
               return;
             }
             const frame = Array.from(toUint8Array(event.data));
+            logMessagePortBridge(`write frame nonce=${nonce} bytes=${frame.length}`);
             void host
               .desktopChannelCall('extensionHostStarter', 'writeMessagePortFrame', [nonce, frame])
               .catch(error => {
@@ -814,6 +863,12 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
               if (frame.byteLength === 0) {
                 return;
               }
+              if (!rendererPortReady) {
+                logMessagePortBridge(`queue frame nonce=${nonce} bytes=${frame.byteLength}`);
+                pendingFrames.push(frame);
+                return;
+              }
+              logMessagePortBridge(`forward frame nonce=${nonce} bytes=${frame.byteLength}`);
               channel.port2.postMessage(frame);
             })
             .then(stop => {
@@ -828,11 +883,16 @@ export async function installDesktopSandbox(host: HostClient): Promise<void> {
               closeBridge();
             });
 
-          window.postMessage(nonce, '*', [channel.port1]);
+          postResponse([channel.port1]);
+          setTimeout(() => {
+            rendererPortReady = true;
+            logMessagePortBridge(`renderer ready nonce=${nonce}`);
+            flushPendingFrames();
+          }, 0);
           return;
         }
 
-        window.postMessage(nonce, '*', []);
+        postResponse([]);
       }
     },
     webFrame: {

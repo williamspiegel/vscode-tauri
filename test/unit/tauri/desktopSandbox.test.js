@@ -58,6 +58,8 @@ suite('Tauri Desktop Sandbox', () => {
 		const storage = new Map();
 		/** @type {unknown[][]} */
 		const postMessages = [];
+		/** @type {Map<string, Set<(event: unknown) => void>>} */
+		const eventListeners = new Map();
 		global.window = {
 			location: {
 				search,
@@ -76,14 +78,58 @@ suite('Tauri Desktop Sandbox', () => {
 					storage.delete(key);
 				}
 			},
-			addEventListener() { },
-			removeEventListener() { },
+			addEventListener(type, listener) {
+				const listeners = eventListeners.get(type) || new Set();
+				listeners.add(listener);
+				eventListeners.set(type, listeners);
+			},
+			removeEventListener(type, listener) {
+				const listeners = eventListeners.get(type);
+				if (!listeners) {
+					return;
+				}
+
+				listeners.delete(listener);
+				if (listeners.size === 0) {
+					eventListeners.delete(type);
+				}
+			},
+			dispatchEvent(event) {
+				const listeners = eventListeners.get(event.type);
+				if (!listeners) {
+					return true;
+				}
+
+				for (const listener of [...listeners]) {
+					listener.call(global.window, event);
+				}
+
+				return !event.defaultPrevented;
+			},
 			__VSCODE_DESKTOP_SANDBOX_MODULE_OVERRIDES__: options.moduleOverrides,
 			postMessage(...args) {
 				postMessages.push(args);
 			}
 		};
 		return { postMessages };
+	}
+
+	/**
+	 * @param {string} nonce
+	 */
+	function waitForMessageEvent(nonce) {
+		return new Promise(resolve => {
+			const listener = (event) => {
+				if (event.data !== nonce) {
+					return;
+				}
+
+				global.window.removeEventListener('message', listener);
+				resolve(event);
+			};
+
+			global.window.addEventListener('message', listener);
+		});
 	}
 
 	function createRendererIpcModuleOverrides() {
@@ -454,7 +500,7 @@ suite('Tauri Desktop Sandbox', () => {
 	});
 
 	test('ipcMessagePort acquire validates channel and falls back for unsupported response channels', async () => {
-		const { postMessages } = createWindow('');
+		createWindow('');
 		const mock = createHost();
 		await sandboxModule.installDesktopSandbox(mock.host);
 		const vscode = global.window.vscode;
@@ -464,9 +510,11 @@ suite('Tauri Desktop Sandbox', () => {
 			/Unsupported event IPC channel/
 		);
 
+		const messageEventPromise = waitForMessageEvent('nonce-fallback');
 		vscode.ipcMessagePort.acquire('vscode:otherResponse', 'nonce-fallback');
-		assert.strictEqual(postMessages.length, 1);
-		assert.deepStrictEqual(postMessages[0], ['nonce-fallback', '*', []]);
+		const messageEvent = await messageEventPromise;
+		assert.strictEqual(messageEvent.source, global.window);
+		assert.deepStrictEqual(messageEvent.ports, []);
 	});
 
 	test('ipcRenderer hello/message bootstraps the renderer channel server and forwards payloads', async () => {
@@ -504,7 +552,7 @@ suite('Tauri Desktop Sandbox', () => {
 	});
 
 	test('ipcMessagePort bridges extension host frames in both directions', async () => {
-		const { postMessages } = createWindow('');
+		createWindow('');
 		/** @type {(payload: unknown) => void} */
 		let frameListener = () => undefined;
 		/** @type {Array<{ channel: string; method: string; args: unknown[] }>} */
@@ -533,13 +581,13 @@ suite('Tauri Desktop Sandbox', () => {
 		await sandboxModule.installDesktopSandbox(host);
 		const vscode = global.window.vscode;
 
+		const messageEventPromise = waitForMessageEvent('nonce-bridge');
 		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-bridge');
-		assert.strictEqual(postMessages.length, 1);
-		assert.strictEqual(postMessages[0][0], 'nonce-bridge');
-		assert.strictEqual(postMessages[0][1], '*');
-		assert.strictEqual(postMessages[0][2].length, 1);
+		const messageEvent = await messageEventPromise;
+		assert.strictEqual(messageEvent.source, global.window);
+		assert.strictEqual(messageEvent.ports.length, 1);
 
-		const port = postMessages[0][2][0];
+		const port = messageEvent.ports[0];
 		const incomingFrames = [];
 		const incomingFramePromise = new Promise(resolve => {
 			port.addEventListener('message', event => {
@@ -549,7 +597,7 @@ suite('Tauri Desktop Sandbox', () => {
 		});
 		port.start();
 
-		frameListener(Uint8Array.from([1, 2, 3]));
+		frameListener([1, 2, 3]);
 		await incomingFramePromise;
 		assert.deepStrictEqual(incomingFrames, [[1, 2, 3]]);
 
@@ -567,8 +615,52 @@ suite('Tauri Desktop Sandbox', () => {
 		port.close();
 	});
 
+	test('ipcMessagePort buffers extension host frames until the acquired port is ready', async () => {
+		createWindow('');
+		/** @type {(payload: unknown) => void} */
+		let frameListener = () => undefined;
+		const host = {
+			resolveWindowConfig: async () => ({
+				windowId: 1,
+				userEnv: { VSCODE_CWD: '/workspace' },
+				os: { platform: 'darwin', arch: 'arm64' }
+			}),
+			invokeMethod: async () => ({}),
+			desktopChannelCall: async () => undefined,
+			desktopChannelListen: async (channel, event, arg, onEvent) => {
+				if (channel === 'extensionHostStarter' && event === 'onDynamicMessagePortFrame') {
+					assert.strictEqual(arg, 'nonce-buffered');
+					frameListener = onEvent;
+				}
+
+				return async () => undefined;
+			}
+		};
+		await sandboxModule.installDesktopSandbox(host);
+		const vscode = global.window.vscode;
+
+		const messageEventPromise = waitForMessageEvent('nonce-buffered');
+		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-buffered');
+		frameListener([7, 8, 9]);
+
+		const messageEvent = await messageEventPromise;
+		const port = messageEvent.ports[0];
+		const incomingFrames = [];
+		const incomingFramePromise = new Promise(resolve => {
+			port.addEventListener('message', event => {
+				incomingFrames.push(Array.from(event.data));
+				resolve(undefined);
+			}, { once: true });
+		});
+		port.start();
+
+		await incomingFramePromise;
+		assert.deepStrictEqual(incomingFrames, [[7, 8, 9]]);
+		port.close();
+	});
+
 	test('ipcMessagePort emits a close event when the extension host bridge fails', async () => {
-		const { postMessages } = createWindow('');
+		createWindow('');
 		/** @type {(error: Error) => void} */
 		let rejectListen;
 		const host = {
@@ -593,9 +685,10 @@ suite('Tauri Desktop Sandbox', () => {
 		await sandboxModule.installDesktopSandbox(host);
 		const vscode = global.window.vscode;
 
+		const messageEventPromise = waitForMessageEvent('nonce-close');
 		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-close');
-		assert.strictEqual(postMessages.length, 1);
-		const port = postMessages[0][2][0];
+		const messageEvent = await messageEventPromise;
+		const port = messageEvent.ports[0];
 		const whenClosed = new Promise(resolve => {
 			port.addEventListener('close', () => resolve(true), { once: true });
 		});
@@ -612,7 +705,7 @@ suite('Tauri Desktop Sandbox', () => {
 	});
 
 	test('ipcMessagePort closes the host bridge when the acquired port is closed', async () => {
-		const { postMessages } = createWindow('');
+		createWindow('');
 		let stopCount = 0;
 		/** @type {Array<{ channel: string; method: string; args: unknown[] }>} */
 		const channelCalls = [];
@@ -640,9 +733,10 @@ suite('Tauri Desktop Sandbox', () => {
 		await sandboxModule.installDesktopSandbox(host);
 		const vscode = global.window.vscode;
 
+		const messageEventPromise = waitForMessageEvent('nonce-manual-close');
 		vscode.ipcMessagePort.acquire('vscode:startExtensionHostMessagePortResult', 'nonce-manual-close');
-		assert.strictEqual(postMessages.length, 1);
-		const port = postMessages[0][2][0];
+		const messageEvent = await messageEventPromise;
+		const port = messageEvent.ports[0];
 		const whenClosed = new Promise(resolve => {
 			port.addEventListener('close', () => resolve(true), { once: true });
 		});

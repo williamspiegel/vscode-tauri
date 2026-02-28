@@ -1,14 +1,56 @@
+import { EventEmitter } from 'node:events';
 import { parentPort, workerData } from 'node:worker_threads';
 
 if (!parentPort) {
   throw new Error('extension-host-worker requires parentPort');
 }
 
+function wrapTransferredPort(port) {
+  return {
+    on(event, listener) {
+      if (event === 'message') {
+        port.on('message', (value) => listener({ data: value }));
+        return this;
+      }
+
+      if (event === 'close') {
+        port.on('close', listener);
+        return this;
+      }
+
+      port.on(event, listener);
+      return this;
+    },
+    start() {
+      port.start();
+    },
+    postMessage(value, transferList) {
+      port.postMessage(value, transferList);
+    },
+    close() {
+      port.close();
+    }
+  };
+}
+
+const parentPortBridge = new EventEmitter();
+parentPort.on('message', (message) => {
+  if (message && typeof message === 'object' && Array.isArray(message.ports)) {
+    parentPortBridge.emit('message', {
+      ...message,
+      ports: message.ports.map(port => wrapTransferredPort(port))
+    });
+    return;
+  }
+
+  parentPortBridge.emit('message', message);
+});
+
 Object.defineProperty(process, 'parentPort', {
   configurable: true,
   enumerable: false,
   writable: true,
-  value: parentPort,
+  value: parentPortBridge,
 });
 
 if (Array.isArray(workerData?.env)) {
