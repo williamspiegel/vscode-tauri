@@ -15,6 +15,7 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 set VSCODEUSERDATADIR=%TEMP%\vscodeuserfolder-%RANDOM%-%TIME:~6,2%
 set VSCODEAPITESTDIR=%TEMP%\vscode-api-tests-%RANDOM%-%TIME:~6,2%
 set VSCODECONFEDITDIR=%TEMP%\vscode-confedit-%RANDOM%-%TIME:~6,2%
+set VSCODEMARKDOWNDIR=%TEMP%\vscode-markdown-%RANDOM%-%TIME:~6,2%
 set VSCODECRASHDIR=%CD%\.build\crashes
 set VSCODELOGSDIR=%CD%\.build\logs\integration-tests
 if "%INTEGRATION_TEST_ELECTRON_PATH%"=="" set INTEGRATION_TEST_ELECTRON_PATH=.\scripts\code-tauri.bat
@@ -25,8 +26,10 @@ set API_TEST_WORKSPACE_FILE=%VSCODEAPITESTDIR%\testworkspace.code-workspace
 mkdir "%VSCODECRASHDIR%" >nul 2>nul
 mkdir "%VSCODELOGSDIR%" >nul 2>nul
 mkdir "%VSCODEAPITESTDIR%" >nul 2>nul
+mkdir "%VSCODEMARKDOWNDIR%" >nul 2>nul
 xcopy /E /I /Q /Y "%CD%\extensions\vscode-api-tests\testWorkspace" "%API_TEST_WORKSPACE_FOLDER%" >nul
 copy /Y "%CD%\extensions\vscode-api-tests\testworkspace.code-workspace" "%API_TEST_WORKSPACE_FILE%" >nul
+xcopy /E /I /Q /Y "%CD%\extensions\markdown-language-features\test-workspace" "%VSCODEMARKDOWNDIR%" >nul
 
 set VSCODE_CLI=1
 set VSCODE_SKIP_PRELAUNCH=1
@@ -66,7 +69,23 @@ if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 
 echo.
 echo ### Built-in extension integration suites for Tauri
-echo SKIP typescript/markdown/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146
+echo SKIP typescript/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146
+
+if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
+	echo.
+	echo ### Markdown tests
+	call .\node_modules\.bin\tsc.cmd -p "%CD%\extensions\markdown-language-features\tsconfig.json"
+	if !errorlevel! neq 0 exit /b !errorlevel!
+
+	call "%INTEGRATION_TEST_ELECTRON_PATH%" "%VSCODEMARKDOWNDIR%" --extensionDevelopmentPath=%CD%\extensions\markdown-language-features --extensionTestsPath=%CD%\extensions\markdown-language-features\out\test %API_TESTS_EXTRA_ARGS% %*
+	if !errorlevel! neq 0 exit /b !errorlevel!
+
+	if not "%INTEGRATION_TEST_APP_NAME%"=="" (
+		killall "%INTEGRATION_TEST_APP_NAME%" >nul 2>nul
+	)
+) else (
+	echo SKIP markdown-language-features: TODO https://github.com/microsoft/vscode/issues/244146 ^(set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute^)
+)
 
 if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 	echo.
@@ -88,3 +107,4 @@ if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 rmdir /s /q %VSCODEUSERDATADIR% >nul 2>nul
 rmdir /s /q %VSCODEAPITESTDIR% >nul 2>nul
 rmdir /s /q %VSCODECONFEDITDIR% >nul 2>nul
+rmdir /s /q %VSCODEMARKDOWNDIR% >nul 2>nul

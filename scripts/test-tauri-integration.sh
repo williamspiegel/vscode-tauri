@@ -20,6 +20,7 @@ echo "### Tauri API extension build"
 VSCODEUSERDATADIR=$(mktemp -d 2>/dev/null)
 VSCODEAPITESTDIR=$(mktemp -d 2>/dev/null)
 VSCODECONFEDITDIR=$(mktemp -d 2>/dev/null)
+VSCODEMARKDOWNDIR=$(mktemp -d 2>/dev/null)
 VSCODECRASHDIR=$ROOT/.build/crashes
 VSCODELOGSDIR=$ROOT/.build/logs/integration-tests
 INTEGRATION_TEST_ELECTRON_PATH=${INTEGRATION_TEST_ELECTRON_PATH:-"./scripts/code-tauri.sh"}
@@ -30,11 +31,13 @@ API_TEST_WORKSPACE_FILE="$VSCODEAPITESTDIR/testworkspace.code-workspace"
 mkdir -p "$VSCODECRASHDIR" "$VSCODELOGSDIR"
 cp -R "$ROOT/extensions/vscode-api-tests/testWorkspace" "$API_TEST_WORKSPACE_FOLDER"
 cp "$ROOT/extensions/vscode-api-tests/testworkspace.code-workspace" "$API_TEST_WORKSPACE_FILE"
+cp -R "$ROOT/extensions/markdown-language-features/test-workspace/." "$VSCODEMARKDOWNDIR"
 
 cleanup() {
 	rm -rf "$VSCODEUSERDATADIR"
 	rm -rf "$VSCODEAPITESTDIR"
 	rm -rf "$VSCODECONFEDITDIR"
+	rm -rf "$VSCODEMARKDOWNDIR"
 }
 
 trap cleanup EXIT
@@ -85,7 +88,22 @@ fi
 
 echo
 echo "### Built-in extension integration suites for Tauri"
-echo "SKIP typescript/markdown/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146"
+echo "SKIP typescript/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146"
+
+if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
+	echo
+	echo "### Markdown tests"
+	./node_modules/.bin/tsc -p "$ROOT/extensions/markdown-language-features/tsconfig.json"
+	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
+		"$VSCODEMARKDOWNDIR" \
+		--extensionDevelopmentPath="$ROOT/extensions/markdown-language-features" \
+		--extensionTestsPath="$ROOT/extensions/markdown-language-features/out/test" \
+		$API_TESTS_EXTRA_ARGS \
+		"$@"
+	kill_app
+else
+	echo "SKIP markdown-language-features: TODO https://github.com/microsoft/vscode/issues/244146 (set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute)"
+fi
 
 if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	echo
