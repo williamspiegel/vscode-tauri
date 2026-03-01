@@ -6,14 +6,16 @@
 import { timeout } from '../../../base/common/async.js';
 import { DisposableStore, dispose } from '../../../base/common/lifecycle.js';
 import { equals } from '../../../base/common/objects.js';
+import { isEqual } from '../../../base/common/resources.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { EditorActivation } from '../../../platform/editor/common/editor.js';
 import { getNotebookEditorFromEditorPane, INotebookEditor, INotebookEditorOptions } from '../../contrib/notebook/browser/notebookBrowser.js';
 import { INotebookEditorService } from '../../contrib/notebook/browser/services/notebookEditorService.js';
 import { ICellRange } from '../../contrib/notebook/common/notebookRange.js';
+import { IEditorPane } from '../../common/editor.js';
 import { columnToEditorGroup, editorGroupToColumn } from '../../services/editor/common/editorGroupColumn.js';
-import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
+import { IEditorGroup, IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../services/editor/common/editorService.js';
 import { IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
 import { ExtHostContext, ExtHostNotebookEditorsShape, INotebookDocumentShowOptions, INotebookEditorViewColumnInfo, MainThreadNotebookEditorsShape, NotebookEditorRevealType } from '../common/extHost.protocol.js';
@@ -31,7 +33,7 @@ class MainThreadNotebook {
 }
 
 export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape {
-	private static readonly _editorSettleAttempts = 100;
+	private static readonly _editorSettleAttempts = 300;
 
 	private readonly _disposables = new DisposableStore();
 
@@ -99,6 +101,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 	}
 
 	async $tryShowNotebookDocument(resource: UriComponents, viewType: string, options: INotebookDocumentShowOptions): Promise<string> {
+		const revivedResource = URI.revive(resource);
 		const editorOptions: INotebookEditorOptions = {
 			cellSelections: options.selections,
 			preserveFocus: options.preserveFocus,
@@ -111,8 +114,9 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			override: viewType
 		};
 
-		const editorPane = await this._editorService.openEditor({ resource: URI.revive(resource), options: editorOptions }, columnToEditorGroup(this._editorGroupService, this._configurationService, options.position));
-		const notebookEditor = await this._waitForNotebookEditor(editorPane);
+		const targetGroup = columnToEditorGroup(this._editorGroupService, this._configurationService, options.position);
+		const editorPane = await this._editorService.openEditor({ resource: revivedResource, options: editorOptions }, targetGroup);
+		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, targetGroup);
 
 		if (notebookEditor) {
 			return notebookEditor.getId();
@@ -121,14 +125,42 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 	}
 
-	private async _waitForNotebookEditor(editorPane: unknown): Promise<INotebookEditor | undefined> {
+	private async _waitForNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup): Promise<INotebookEditor | undefined> {
 		for (let attempt = 0; attempt < MainThreadNotebookEditors._editorSettleAttempts; attempt++) {
-			const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+			const notebookEditor = this._resolveNotebookEditor(editorPane, resource, targetGroup);
 			if (notebookEditor) {
 				return notebookEditor;
 			}
 
 			await timeout(50);
+		}
+
+		return undefined;
+	}
+
+	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup): INotebookEditor | undefined {
+		const candidateEditorPane = editorPane as IEditorPane | undefined;
+		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		if (directNotebookEditor && candidateEditorPane?.group === targetGroup) {
+			return directNotebookEditor;
+		}
+
+		for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
+			if (visibleEditorPane.group !== targetGroup) {
+				continue;
+			}
+
+			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
+			if (visibleNotebookEditor && (!visibleNotebookEditor.textModel || isEqual(visibleNotebookEditor.textModel.uri, resource))) {
+				return visibleNotebookEditor;
+			}
+		}
+
+		const matchingNotebookEditors = this._notebookEditorService.listNotebookEditors().filter(notebookEditor =>
+			notebookEditor.textModel && isEqual(notebookEditor.textModel.uri, resource)
+		);
+		if (matchingNotebookEditors.length === 1) {
+			return matchingNotebookEditors[0];
 		}
 
 		return undefined;

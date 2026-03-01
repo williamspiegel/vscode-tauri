@@ -10,7 +10,7 @@ import * as vscode from 'vscode';
 import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, DeferredPromise, disposeAll, revertAllDirty, saveAllEditors } from '../utils';
 
 const skipNotebookKernelSuiteForTauri =
-	vscode.env.uiKind === vscode.UIKind.Web || process.env.VSCODE_TAURI_INTEGRATION === '1';
+	vscode.env.uiKind === vscode.UIKind.Web;
 
 async function createRandomNotebookFile() {
 	return createRandomFile('', undefined, '.vsctestnb');

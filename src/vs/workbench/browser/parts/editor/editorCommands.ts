@@ -29,7 +29,7 @@ import { ActiveGroupEditorsByMostRecentlyUsedQuickAccess } from './editorQuickAc
 import { SideBySideEditor } from './sideBySideEditor.js';
 import { TextDiffEditor } from './textDiffEditor.js';
 import { ActiveEditorCanSplitInGroupContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupLockedContext, ActiveEditorStickyContext, EditorPartModalContext, EditorPartModalMaximizedContext, EditorPartModalNavigationContext, IsSessionsWindowContext, MultipleEditorGroupsContext, SideBySideEditorActiveContext, TextCompareEditorActiveContext } from '../../../common/contextkeys.js';
-import { CloseDirection, EditorInputCapabilities, EditorsOrder, IResourceDiffEditorInput, IUntitledTextResourceEditorInput, isEditorInputWithOptionsAndGroup } from '../../../common/editor.js';
+import { CloseDirection, EditorInputCapabilities, EditorsOrder, IEditorPane, IResourceDiffEditorInput, IUntitledTextResourceEditorInput, isEditorInputWithOptionsAndGroup } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { SideBySideEditorInput } from '../../../common/editor/sideBySideEditorInput.js';
 import { EditorGroupColumn, columnToEditorGroup } from '../../../services/editor/common/editorGroupColumn.js';
@@ -423,6 +423,17 @@ function registerEditorGroupsLayoutCommands(): void {
 }
 
 function registerOpenEditorAPICommands(): void {
+	const dirtyEditorSettleAttempts = 100;
+
+	async function waitForDirtyEditorInput(editorPane: IEditorPane | undefined): Promise<void> {
+		for (let attempt = 0; attempt < dirtyEditorSettleAttempts; attempt++) {
+			if (editorPane?.input?.isDirty()) {
+				return;
+			}
+
+			await timeout(50);
+		}
+	}
 
 	function mixinContext(context: IOpenEvent<unknown> | undefined, options: ITextEditorOptions | undefined, column: EditorGroupColumn | undefined): [ITextEditorOptions | undefined, EditorGroupColumn | undefined] {
 		if (!context) {
@@ -440,7 +451,7 @@ function registerOpenEditorAPICommands(): void {
 	// complements https://github.com/microsoft/vscode/blob/2b164efb0e6a5de3826bff62683eaeafe032284f/src/vs/workbench/api/common/extHostApiCommands.ts#L373
 	CommandsRegistry.registerCommand({
 		id: 'vscode.open',
-		handler: (accessor, resourceArg, columnOrOptions?: EditorGroupColumn | ITextEditorOptions | [EditorGroupColumn?, ITextEditorOptions?], label?: string) => {
+		handler: async (accessor, resourceArg, columnOrOptions?: EditorGroupColumn | ITextEditorOptions | [EditorGroupColumn?, ITextEditorOptions?], label?: string) => {
 			let normalizedColumnAndOptions: typeof columnOrOptions = columnOrOptions;
 			if (typeof columnOrOptions === 'number') {
 				normalizedColumnAndOptions = [columnOrOptions, undefined];
@@ -448,7 +459,8 @@ function registerOpenEditorAPICommands(): void {
 				normalizedColumnAndOptions = [columnOrOptions.viewColumn, columnOrOptions];
 			}
 
-			accessor.get(ICommandService).executeCommand(API_OPEN_EDITOR_COMMAND_ID, resourceArg, normalizedColumnAndOptions, label);
+			await accessor.get(ICommandService).executeCommand(API_OPEN_EDITOR_COMMAND_ID, resourceArg, normalizedColumnAndOptions, label);
+			await timeout(0);
 		},
 		metadata: {
 			description: 'Opens the provided resource in the editor.',
@@ -469,7 +481,7 @@ function registerOpenEditorAPICommands(): void {
 
 		// use editor options or editor view column or resource scheme
 		// as a hint to use the editor service for opening directly
-		if (optionsArg || typeof columnArg === 'number' || matchesScheme(resourceOrString, Schemas.untitled)) {
+		if (optionsArg || typeof columnArg === 'number' || matchesScheme(resourceOrString, Schemas.untitled) || matchesScheme(resourceOrString, Schemas.vscodeNotebookCell)) {
 			const [options, column] = mixinContext(context, optionsArg, columnArg);
 			const resource = URI.isUri(resourceOrString) ? resourceOrString : URI.parse(resourceOrString);
 
@@ -487,7 +499,10 @@ function registerOpenEditorAPICommands(): void {
 				input = { resource, options, label };
 			}
 
-			await editorService.openEditor(input, columnToEditorGroup(editorGroupsService, configurationService, column));
+			const editorPane = await editorService.openEditor(input, columnToEditorGroup(editorGroupsService, configurationService, column));
+			if (untitledTextEditorService.isUntitledWithAssociatedResource(resource)) {
+				await waitForDirtyEditorInput(editorPane);
+			}
 			await timeout(0);
 		}
 

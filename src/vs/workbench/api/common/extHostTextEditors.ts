@@ -7,6 +7,7 @@ import * as arrays from '../../../base/common/arrays.js';
 import { timeout } from '../../../base/common/async.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
+import { isEqual } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
 import { IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
 import { ExtHostEditorsShape, IEditorPropertiesChangeData, IMainContext, ITextDocumentShowOptions, ITextEditorDiffInformation, ITextEditorPositionData, MainContext, MainThreadTextEditorsShape } from './extHost.protocol.js';
@@ -17,7 +18,7 @@ import { TextEditorSelectionChangeKind, TextEditorChangeKind } from './extHostTy
 import * as vscode from 'vscode';
 
 export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
-	private static readonly _editorSettleAttempts = 100;
+	private static readonly _editorSettleAttempts = 300;
 
 	private readonly _onDidChangeTextEditorSelection = this._register(new Emitter<vscode.TextEditorSelectionChangeEvent>());
 	private readonly _onDidChangeTextEditorOptions = this._register(new Emitter<vscode.TextEditorOptionsChangeEvent>());
@@ -85,7 +86,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 
 		const editorId = await this._proxy.$tryShowTextDocument(document.uri, options);
-		const editor = editorId && await this._waitForEditor(editorId);
+		const editor = editorId && await this._waitForEditor(editorId, document.uri);
 		if (editor) {
 			return editor.value;
 		}
@@ -98,11 +99,16 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 	}
 
-	private async _waitForEditor(editorId: string): Promise<ExtHostTextEditor | undefined> {
+	private async _waitForEditor(editorId: string, resource: URI): Promise<ExtHostTextEditor | undefined> {
 		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
 			const editor = this._extHostDocumentsAndEditors.getEditor(editorId);
 			if (editor) {
 				return editor;
+			}
+
+			const editorByResource = this.getVisibleTextEditors(true).find(candidate => isEqual(candidate.document.uri, resource));
+			if (editorByResource) {
+				return editorByResource;
 			}
 
 			await timeout(50);

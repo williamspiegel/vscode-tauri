@@ -4,8 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { illegalArgument } from '../../../base/common/errors.js';
+import { timeout } from '../../../base/common/async.js';
 import { IDisposable, dispose, DisposableStore } from '../../../base/common/lifecycle.js';
 import { equals as objectEquals } from '../../../base/common/objects.js';
+import { Schemas } from '../../../base/common/network.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { ICodeEditorService } from '../../../editor/browser/services/codeEditorService.js';
 import { IRange } from '../../../editor/common/core/range.js';
@@ -25,7 +27,7 @@ import { IWorkingCopyService } from '../../services/workingCopy/common/workingCo
 import { ExtensionIdentifier } from '../../../platform/extensions/common/extensions.js';
 import { IChange } from '../../../editor/common/diff/legacyLinesDiffComputer.js';
 import { IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
-import { IEditorControl } from '../../common/editor.js';
+import { IEditorControl, IEditorPane } from '../../common/editor.js';
 import { getCodeEditor, ICodeEditor } from '../../../editor/browser/editorBrowser.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IQuickDiffModelService } from '../../contrib/scm/browser/quickDiffModel.js';
@@ -44,6 +46,7 @@ export interface IMainThreadEditorLocator {
 }
 
 export class MainThreadTextEditors implements MainThreadTextEditorsShape {
+	private static readonly _notebookCellEditorSettleAttempts = 300;
 
 	private static INSTANCE_COUNT: number = 0;
 
@@ -264,7 +267,43 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		// Composite editors are made up of many editors so we return the active one at the time of opening
 		const editorControl = editor.getControl();
 		const codeEditor = getCodeEditor(editorControl);
-		return codeEditor ? this._editorLocator.getIdOfCodeEditor(codeEditor) : undefined;
+		if (codeEditor) {
+			return this._editorLocator.getIdOfCodeEditor(codeEditor);
+		}
+
+		if (uri.scheme === Schemas.vscodeNotebookCell) {
+			return this._waitForNotebookCellCodeEditor(editor, uri);
+		}
+
+		return undefined;
+	}
+
+	private async _waitForNotebookCellCodeEditor(editor: IEditorPane, resource: URI): Promise<string | undefined> {
+		for (let attempt = 0; attempt < MainThreadTextEditors._notebookCellEditorSettleAttempts; attempt++) {
+			const editorControl = editor.getControl();
+			const directCodeEditor = getCodeEditor(editorControl);
+			const directCodeEditorId = directCodeEditor && this._editorLocator.getIdOfCodeEditor(directCodeEditor);
+			if (directCodeEditorId) {
+				return directCodeEditorId;
+			}
+
+			for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
+				const candidateCodeEditor = getCodeEditor(visibleEditorPane.getControl());
+				const candidateModel = candidateCodeEditor?.getModel();
+				if (!candidateCodeEditor || !isITextModel(candidateModel) || !this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
+					continue;
+				}
+
+				const candidateCodeEditorId = this._editorLocator.getIdOfCodeEditor(candidateCodeEditor);
+				if (candidateCodeEditorId) {
+					return candidateCodeEditorId;
+				}
+			}
+
+			await timeout(50);
+		}
+
+		return undefined;
 	}
 
 	async $tryShowEditor(id: string, position?: EditorGroupColumn): Promise<void> {

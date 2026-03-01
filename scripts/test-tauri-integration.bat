@@ -14,6 +14,7 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 
 set VSCODEUSERDATADIR=%TEMP%\vscodeuserfolder-%RANDOM%-%TIME:~6,2%
 set VSCODEAPITESTDIR=%TEMP%\vscode-api-tests-%RANDOM%-%TIME:~6,2%
+set VSCODECONFEDITDIR=%TEMP%\vscode-confedit-%RANDOM%-%TIME:~6,2%
 set VSCODECRASHDIR=%CD%\.build\crashes
 set VSCODELOGSDIR=%CD%\.build\logs\integration-tests
 if "%INTEGRATION_TEST_ELECTRON_PATH%"=="" set INTEGRATION_TEST_ELECTRON_PATH=.\scripts\code-tauri.bat
@@ -65,7 +66,25 @@ if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 
 echo.
 echo ### Built-in extension integration suites for Tauri
-echo SKIP typescript/markdown/emmet/git/ipynb/configuration-editing: TODO https://github.com/microsoft/vscode/issues/244146
+echo SKIP typescript/markdown/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146
+
+if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
+	echo.
+	echo ### Configuration editing tests
+	call .\node_modules\.bin\tsc.cmd -p "%CD%\extensions\configuration-editing\tsconfig.json"
+	if !errorlevel! neq 0 exit /b !errorlevel!
+
+	mkdir "%VSCODECONFEDITDIR%" >nul 2>nul
+	call "%INTEGRATION_TEST_ELECTRON_PATH%" "%VSCODECONFEDITDIR%" --extensionDevelopmentPath=%CD%\extensions\configuration-editing --extensionTestsPath=%CD%\extensions\configuration-editing\out\test %API_TESTS_EXTRA_ARGS% %*
+	if !errorlevel! neq 0 exit /b !errorlevel!
+
+	if not "%INTEGRATION_TEST_APP_NAME%"=="" (
+		killall "%INTEGRATION_TEST_APP_NAME%" >nul 2>nul
+	)
+) else (
+	echo SKIP configuration-editing: TODO https://github.com/microsoft/vscode/issues/244146 ^(set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute^)
+)
 
 rmdir /s /q %VSCODEUSERDATADIR% >nul 2>nul
 rmdir /s /q %VSCODEAPITESTDIR% >nul 2>nul
+rmdir /s /q %VSCODECONFEDITDIR% >nul 2>nul

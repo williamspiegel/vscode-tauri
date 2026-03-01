@@ -19,6 +19,7 @@ echo "### Tauri API extension build"
 
 VSCODEUSERDATADIR=$(mktemp -d 2>/dev/null)
 VSCODEAPITESTDIR=$(mktemp -d 2>/dev/null)
+VSCODECONFEDITDIR=$(mktemp -d 2>/dev/null)
 VSCODECRASHDIR=$ROOT/.build/crashes
 VSCODELOGSDIR=$ROOT/.build/logs/integration-tests
 INTEGRATION_TEST_ELECTRON_PATH=${INTEGRATION_TEST_ELECTRON_PATH:-"./scripts/code-tauri.sh"}
@@ -33,6 +34,7 @@ cp "$ROOT/extensions/vscode-api-tests/testworkspace.code-workspace" "$API_TEST_W
 cleanup() {
 	rm -rf "$VSCODEUSERDATADIR"
 	rm -rf "$VSCODEAPITESTDIR"
+	rm -rf "$VSCODECONFEDITDIR"
 }
 
 trap cleanup EXIT
@@ -83,4 +85,19 @@ fi
 
 echo
 echo "### Built-in extension integration suites for Tauri"
-echo "SKIP typescript/markdown/emmet/git/ipynb/configuration-editing: TODO https://github.com/microsoft/vscode/issues/244146"
+echo "SKIP typescript/markdown/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146"
+
+if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
+	echo
+	echo "### Configuration editing tests"
+	./node_modules/.bin/tsc -p "$ROOT/extensions/configuration-editing/tsconfig.json"
+	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
+		"$VSCODECONFEDITDIR" \
+		--extensionDevelopmentPath="$ROOT/extensions/configuration-editing" \
+		--extensionTestsPath="$ROOT/extensions/configuration-editing/out/test" \
+		$API_TESTS_EXTRA_ARGS \
+		"$@"
+	kill_app
+else
+	echo "SKIP configuration-editing: TODO https://github.com/microsoft/vscode/issues/244146 (set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute)"
+fi

@@ -43,7 +43,7 @@ import { ILogService } from '../../../platform/log/common/log.js';
 
 export class ExtHostNotebookController implements ExtHostNotebookShape {
 	private static _notebookStatusBarItemProviderHandlePool: number = 0;
-	private static readonly _editorSettleAttempts = 100;
+	private static readonly _editorSettleAttempts = 300;
 
 	private readonly _notebookProxy: MainThreadNotebookShape;
 	private readonly _notebookDocumentsProxy: MainThreadNotebookDocumentsShape;
