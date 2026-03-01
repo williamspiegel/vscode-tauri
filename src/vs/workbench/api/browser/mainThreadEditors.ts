@@ -23,6 +23,7 @@ import { editorGroupToColumn, columnToEditorGroup, EditorGroupColumn } from '../
 import { IEditorService } from '../../services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 import { IEnvironmentService } from '../../../platform/environment/common/environment.js';
+import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
 import { IWorkingCopyService } from '../../services/workingCopy/common/workingCopyService.js';
 import { ExtensionIdentifier } from '../../../platform/extensions/common/extensions.js';
 import { IChange } from '../../../editor/common/diff/legacyLinesDiffComputer.js';
@@ -244,6 +245,7 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 
 	async $tryShowTextDocument(resource: UriComponents, options: ITextDocumentShowOptions): Promise<string | undefined> {
 		const uri = URI.revive(resource);
+		const openUri = uri.scheme === Schemas.vscodeNotebookCell ? (parseNotebookCellUri(uri)?.notebook ?? uri) : uri;
 
 		const editorOptions: ITextEditorOptions = {
 			preserveFocus: options.preserveFocus,
@@ -256,7 +258,7 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		};
 
 		const input: IResourceEditorInput = {
-			resource: uri,
+			resource: openUri,
 			options: editorOptions
 		};
 

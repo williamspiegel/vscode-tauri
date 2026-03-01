@@ -37,6 +37,7 @@ import { EditorGroupLayout, GroupDirection, GroupLocation, GroupsOrder, IEditorG
 import { mainWindow } from '../../../../base/browser/window.js';
 import { IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
+import { parse as parseNotebookCellUri } from '../../../services/notebook/common/notebookDocumentService.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { IUntitledTextEditorService } from '../../../services/untitled/common/untitledTextEditorService.js';
 import { DIFF_FOCUS_OTHER_SIDE, DIFF_FOCUS_PRIMARY_SIDE, DIFF_FOCUS_SECONDARY_SIDE, registerDiffEditorCommands } from './diffEditorCommands.js';
@@ -484,6 +485,7 @@ function registerOpenEditorAPICommands(): void {
 		if (optionsArg || typeof columnArg === 'number' || matchesScheme(resourceOrString, Schemas.untitled) || matchesScheme(resourceOrString, Schemas.vscodeNotebookCell)) {
 			const [options, column] = mixinContext(context, optionsArg, columnArg);
 			const resource = URI.isUri(resourceOrString) ? resourceOrString : URI.parse(resourceOrString);
+			const openResource = matchesScheme(resource, Schemas.vscodeNotebookCell) ? (parseNotebookCellUri(resource)?.notebook ?? resource) : resource;
 
 			let input: IResourceEditorInput | IUntitledTextResourceEditorInput;
 			if (untitledTextEditorService.isUntitledWithAssociatedResource(resource)) {
@@ -496,12 +498,15 @@ function registerOpenEditorAPICommands(): void {
 				input = { resource: resource.with({ scheme: pathService.defaultUriScheme }), forceUntitled: true, options, label };
 			} else {
 				// use any other resource as is
-				input = { resource, options, label };
+				input = { resource: openResource, options, label };
 			}
 
 			const editorPane = await editorService.openEditor(input, columnToEditorGroup(editorGroupsService, configurationService, column));
 			if (untitledTextEditorService.isUntitledWithAssociatedResource(resource)) {
 				await waitForDirtyEditorInput(editorPane);
+			}
+			if (matchesScheme(resource, Schemas.vscodeNotebookCell)) {
+				await timeout(100);
 			}
 			await timeout(0);
 		}

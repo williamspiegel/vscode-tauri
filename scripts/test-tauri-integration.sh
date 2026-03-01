@@ -21,6 +21,7 @@ VSCODEUSERDATADIR=$(mktemp -d 2>/dev/null)
 VSCODEAPITESTDIR=$(mktemp -d 2>/dev/null)
 VSCODECONFEDITDIR=$(mktemp -d 2>/dev/null)
 VSCODEMARKDOWNDIR=$(mktemp -d 2>/dev/null)
+VSCODEIPYNBDIR=$(mktemp -d 2>/dev/null)
 VSCODECRASHDIR=$ROOT/.build/crashes
 VSCODELOGSDIR=$ROOT/.build/logs/integration-tests
 INTEGRATION_TEST_ELECTRON_PATH=${INTEGRATION_TEST_ELECTRON_PATH:-"./scripts/code-tauri.sh"}
@@ -38,6 +39,7 @@ cleanup() {
 	rm -rf "$VSCODEAPITESTDIR"
 	rm -rf "$VSCODECONFEDITDIR"
 	rm -rf "$VSCODEMARKDOWNDIR"
+	rm -rf "$VSCODEIPYNBDIR"
 }
 
 trap cleanup EXIT
@@ -88,7 +90,7 @@ fi
 
 echo
 echo "### Built-in extension integration suites for Tauri"
-echo "SKIP typescript/emmet/git/ipynb: TODO https://github.com/microsoft/vscode/issues/244146"
+echo "SKIP typescript/emmet/git: TODO https://github.com/microsoft/vscode/issues/244146"
 
 if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	echo
@@ -103,6 +105,21 @@ if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	kill_app
 else
 	echo "SKIP markdown-language-features: TODO https://github.com/microsoft/vscode/issues/244146 (set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute)"
+fi
+
+if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
+	echo
+	echo "### Ipynb tests"
+	./node_modules/.bin/tsc -p "$ROOT/extensions/ipynb/tsconfig.json"
+	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
+		"$VSCODEIPYNBDIR" \
+		--extensionDevelopmentPath="$ROOT/extensions/ipynb" \
+		--extensionTestsPath="$ROOT/extensions/ipynb/out/test" \
+		$API_TESTS_EXTRA_ARGS \
+		"$@"
+	kill_app
+else
+	echo "SKIP ipynb: TODO https://github.com/microsoft/vscode/issues/244146 (set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute)"
 fi
 
 if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then

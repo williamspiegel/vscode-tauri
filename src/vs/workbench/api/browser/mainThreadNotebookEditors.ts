@@ -141,7 +141,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup): INotebookEditor | undefined {
 		const candidateEditorPane = editorPane as IEditorPane | undefined;
 		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
-		if (directNotebookEditor && candidateEditorPane?.group === targetGroup) {
+		if (directNotebookEditor) {
 			return directNotebookEditor;
 		}
 
@@ -159,6 +159,10 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		const matchingNotebookEditors = this._notebookEditorService.listNotebookEditors().filter(notebookEditor =>
 			notebookEditor.textModel && isEqual(notebookEditor.textModel.uri, resource)
 		);
+		const unseenMatchingNotebookEditors = matchingNotebookEditors.filter(notebookEditor => !this._mainThreadEditors.has(notebookEditor.getId()));
+		if (unseenMatchingNotebookEditors.length === 1) {
+			return unseenMatchingNotebookEditors[0];
+		}
 		if (matchingNotebookEditors.length === 1) {
 			return matchingNotebookEditors[0];
 		}

@@ -7,6 +7,7 @@ import * as arrays from '../../../base/common/arrays.js';
 import { timeout } from '../../../base/common/async.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
+import { Schemas } from '../../../base/common/network.js';
 import { isEqual } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
 import { IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
@@ -88,7 +89,16 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		const editorId = await this._proxy.$tryShowTextDocument(document.uri, options);
 		const editor = editorId && await this._waitForEditor(editorId, document.uri);
 		if (editor) {
+			if (document.uri.scheme === Schemas.vscodeNotebookCell) {
+				await timeout(100);
+			}
 			return editor.value;
+		}
+		if (!editorId && document.uri.scheme === Schemas.vscodeNotebookCell) {
+			const editorByResource = await this._waitForEditorByResource(document.uri);
+			if (editorByResource) {
+				return editorByResource.value;
+			}
 		}
 		// we have no editor... having an id means that we had an editor
 		// on the main side and that it isn't the current editor anymore...
@@ -106,6 +116,19 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 				return editor;
 			}
 
+			const editorByResource = this.getVisibleTextEditors(true).find(candidate => isEqual(candidate.document.uri, resource));
+			if (editorByResource) {
+				return editorByResource;
+			}
+
+			await timeout(50);
+		}
+
+		return undefined;
+	}
+
+	private async _waitForEditorByResource(resource: URI): Promise<ExtHostTextEditor | undefined> {
+		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
 			const editorByResource = this.getVisibleTextEditors(true).find(candidate => isEqual(candidate.document.uri, resource));
 			if (editorByResource) {
 				return editorByResource;
