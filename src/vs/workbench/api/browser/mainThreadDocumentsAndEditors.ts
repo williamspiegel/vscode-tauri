@@ -33,6 +33,9 @@ import { IPaneCompositePartService } from '../../services/panecomposite/browser/
 import { ViewContainerLocation } from '../../common/views.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IQuickDiffModelService } from '../../contrib/scm/browser/quickDiffModel.js';
+import { getNotebookEditorFromEditorPane } from '../../contrib/notebook/browser/notebookBrowser.js';
+import { INotebookService } from '../../contrib/notebook/common/notebookService.js';
+import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
 
 
 class TextEditorSnapshot {
@@ -243,6 +246,19 @@ class MainThreadDocumentAndEditorStateComputer {
 			}
 		}
 
+		if (!activeEditor) {
+			const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
+			if (activeNotebookEditor?.textModel) {
+				for (const snapshot of editors.values()) {
+					const notebookCell = parseNotebookCellUri(snapshot.editor.getModel().uri);
+					if (notebookCell && notebookCell.notebook.toString() === activeNotebookEditor.textModel.uri.toString()) {
+						activeEditor = snapshot.id;
+						break;
+					}
+				}
+			}
+		}
+
 		// compute new state and compare against old
 		const newState = new DocumentAndEditorState(models, editors, activeEditor);
 		const delta = DocumentAndEditorState.compute(this._currentState, newState);
@@ -298,14 +314,15 @@ export class MainThreadDocumentsAndEditors implements IMainThreadEditorLocator {
 		@IClipboardService private readonly _clipboardService: IClipboardService,
 		@IPathService pathService: IPathService,
 		@IConfigurationService configurationService: IConfigurationService,
-		@IQuickDiffModelService quickDiffModelService: IQuickDiffModelService
+		@IQuickDiffModelService quickDiffModelService: IQuickDiffModelService,
+		@INotebookService notebookService: INotebookService
 	) {
 		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostDocumentsAndEditors);
 
 		this._mainThreadDocuments = this._toDispose.add(new MainThreadDocuments(extHostContext, this._modelService, this._textFileService, fileService, textModelResolverService, environmentService, uriIdentityService, workingCopyFileService, pathService));
 		extHostContext.set(MainContext.MainThreadDocuments, this._mainThreadDocuments);
 
-		this._mainThreadEditors = this._toDispose.add(new MainThreadTextEditors(this, extHostContext, codeEditorService, this._editorService, this._editorGroupService, configurationService, quickDiffModelService, uriIdentityService));
+		this._mainThreadEditors = this._toDispose.add(new MainThreadTextEditors(this, extHostContext, codeEditorService, this._editorService, this._editorGroupService, configurationService, quickDiffModelService, uriIdentityService, notebookService));
 		extHostContext.set(MainContext.MainThreadTextEditors, this._mainThreadEditors);
 
 		// It is expected that the ctor of the state computer calls our `_onDelta`.

@@ -983,25 +983,7 @@ impl AppState {
             args: vec!["--skipWorkspaceStorageLock".to_string()],
             exec_argv,
             env: env_entries,
-            vscode_version: read_json_file(&self.repo_root.join("product.json"))
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-                .or_else(|| {
-                    read_json_file(&self.repo_root.join("package.json"))
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("version")
-                                .and_then(Value::as_str)
-                                .map(ToOwned::to_owned)
-                        })
-                })
-                .unwrap_or_else(|| "0.0.0".to_string()),
+            vscode_version: resolve_product_version(&self.repo_root),
         };
         let encoded =
             BASE64_STANDARD.encode(serde_json::to_vec(&config).map_err(|error| error.to_string())?);
@@ -2821,6 +2803,7 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     let nls_messages = read_nls_messages(repo_root)?;
     let mut product = read_json_file(&repo_root.join("product.json"))?;
     apply_default_extensions_gallery_config(&mut product);
+    apply_product_defaults(&mut product, repo_root);
     let css_modules = workbench_css_modules(repo_root)?;
     let workbench_bootstrap = resolve_workbench_bootstrap_config(repo_root, &product);
 
@@ -2957,6 +2940,48 @@ fn build_desktop_window_config(repo_root: &Path) -> Result<Value, String> {
     }
 
     Ok(window_config)
+}
+
+fn resolve_product_version(repo_root: &Path) -> String {
+    read_json_file(&repo_root.join("product.json"))
+        .ok()
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            read_json_file(&repo_root.join("package.json"))
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "0.0.0".to_string())
+}
+
+fn apply_product_defaults(product: &mut Value, repo_root: &Path) {
+    let Some(product_object) = product.as_object_mut() else {
+        return;
+    };
+
+    let needs_version = product_object
+        .get("version")
+        .and_then(Value::as_str)
+        .map(|value| value.is_empty())
+        .unwrap_or(true);
+    if needs_version {
+        product_object.insert(
+            "version".to_string(),
+            Value::String(resolve_product_version(repo_root)),
+        );
+    }
 }
 
 fn ensure_user_data_default_file(path: &Path, contents: &str) {
@@ -3443,6 +3468,7 @@ fn is_stale_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn file_change_type_mapping_is_stable() {
@@ -3581,6 +3607,34 @@ mod tests {
             parsed.args.get("skip-welcome").and_then(Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn apply_product_defaults_injects_version_from_package_json() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "vscode-tauri-product-defaults-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_root).expect("temp root should be created");
+        fs::write(temp_root.join("product.json"), "{ \"nameLong\": \"Code - OSS\" }")
+            .expect("product.json should be written");
+        fs::write(temp_root.join("package.json"), "{ \"version\": \"1.2.3-test\" }")
+            .expect("package.json should be written");
+
+        let mut product = read_json_file(&temp_root.join("product.json"))
+            .expect("product.json should parse");
+        apply_product_defaults(&mut product, &temp_root);
+
+        assert_eq!(
+            product.get("version").and_then(Value::as_str),
+            Some("1.2.3-test")
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 }
 

@@ -40,11 +40,15 @@ import { INotebookCellMatchNoModel, INotebookFileMatchNoModel, IRawClosedNoteboo
 import { NotebookPriorityInfo } from '../../contrib/search/common/search.js';
 import { globMatchesResource, RegisteredEditorPriority } from '../../services/editor/common/editorResolverService.js';
 import { ILogService } from '../../../platform/log/common/log.js';
+import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
+import { isEqual } from '../../../base/common/resources.js';
 
 export class ExtHostNotebookController implements ExtHostNotebookShape {
 	private static _notebookStatusBarItemProviderHandlePool: number = 0;
 	private static readonly _editorSettleAttempts = 300;
+	private static readonly _textEditorSettleAttempts = 20;
 
+	private readonly _disposables = new DisposableStore();
 	private readonly _notebookProxy: MainThreadNotebookShape;
 	private readonly _notebookDocumentsProxy: MainThreadNotebookDocumentsShape;
 	private readonly _notebookEditorsProxy: MainThreadNotebookEditorsShape;
@@ -89,6 +93,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		this._notebookDocumentsProxy = mainContext.getProxy(MainContext.MainThreadNotebookDocuments);
 		this._notebookEditorsProxy = mainContext.getProxy(MainContext.MainThreadNotebookEditors);
 		this._commandsConverter = commands.converter;
+		this._disposables.add(this._textDocumentsAndEditors.onDidChangeActiveTextEditor(activeTextEditor => this._syncActiveNotebookEditorFromActiveTextEditor(activeTextEditor)));
 
 		commands.registerArgumentProcessor({
 			// Serialized INotebookCellActionContext
@@ -138,6 +143,14 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		return [...this._documents.values()];
 	}
 
+	dispose(): void {
+		this._disposables.dispose();
+		this._onDidChangeActiveNotebookEditor.dispose();
+		this._onDidOpenNotebookDocument.dispose();
+		this._onDidCloseNotebookDocument.dispose();
+		this._onDidChangeVisibleNotebookEditors.dispose();
+	}
+
 	getNotebookDocument(uri: URI, relaxed: true): ExtHostNotebookDocument | undefined;
 	getNotebookDocument(uri: URI): ExtHostNotebookDocument;
 	getNotebookDocument(uri: URI, relaxed?: true): ExtHostNotebookDocument | undefined {
@@ -166,6 +179,33 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			filenamePattern: viewOptionsFilenamePattern,
 			priority: registration.exclusive ? RegisteredEditorPriority.exclusive : undefined
 		};
+	}
+
+	private _syncActiveNotebookEditorFromActiveTextEditor(activeTextEditor: vscode.TextEditor | undefined): void {
+		const activeTextEditorUri = activeTextEditor?.document.uri;
+		if (!activeTextEditorUri) {
+			return;
+		}
+
+		let notebookUri: URI | undefined;
+		if (activeTextEditorUri.scheme === Schemas.vscodeNotebookCell) {
+			notebookUri = parseNotebookCellUri(activeTextEditorUri)?.notebook;
+		} else if (this._documents.has(activeTextEditorUri)) {
+			notebookUri = activeTextEditorUri;
+		}
+
+		if (!notebookUri) {
+			return;
+		}
+
+		const inferredActiveNotebookEditor = this._visibleNotebookEditors.find(editor => isEqual(editor.notebookData.uri, notebookUri))
+			?? [...this._editors.values()].find(editor => isEqual(editor.notebookData.uri, notebookUri));
+		if (!inferredActiveNotebookEditor || this._activeNotebookEditor?.id === inferredActiveNotebookEditor.id) {
+			return;
+		}
+
+		this._activeNotebookEditor = inferredActiveNotebookEditor;
+		this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor.apiEditor);
 	}
 
 	registerNotebookCellStatusBarItemProvider(extension: IExtensionDescription, notebookType: string, provider: vscode.NotebookCellStatusBarItemProvider) {
@@ -234,6 +274,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		if (editor) {
 			if (!resolvedOptions.preserveFocus) {
 				await this._waitForActiveEditor(editorId, editor);
+				await this._waitForNotebookTextEditor(editor.notebook.uri);
 			}
 			return editor;
 		}
@@ -269,6 +310,24 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 
 		if (this._editors.get(editorId)?.apiEditor === editor) {
 			this._activeNotebookEditor = this._editors.get(editorId);
+		}
+	}
+
+	private async _waitForNotebookTextEditor(resource: URI): Promise<void> {
+		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
+			const activeTextEditorUri = this._textDocumentsAndEditors.activeEditor()?.document.uri;
+			if (activeTextEditorUri) {
+				if (isEqual(activeTextEditorUri, resource)) {
+					return;
+				}
+
+				const notebookCell = activeTextEditorUri.scheme === Schemas.vscodeNotebookCell ? parseNotebookCellUri(activeTextEditorUri) : undefined;
+				if (notebookCell && isEqual(notebookCell.notebook, resource)) {
+					return;
+				}
+			}
+
+			await timeout(50);
 		}
 	}
 
@@ -739,7 +798,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			this._onDidChangeVisibleNotebookEditors.fire(this.visibleNotebookEditors);
 		}
 
-		let inferredActiveEditor = false;
+		const previousActiveNotebookEditorId = this._activeNotebookEditor?.id;
 		if (delta.value.newActiveEditor === null) {
 			// clear active notebook as current active editor is non-notebook editor
 			this._activeNotebookEditor = undefined;
@@ -755,20 +814,20 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 				const inferredEditor = this._editors.get(addedEditors[0].id);
 				if (inferredEditor) {
 					this._activeNotebookEditor = inferredEditor;
-					inferredActiveEditor = true;
 				}
 			} else if (addedEditors.length > 0 && this._visibleNotebookEditors.length === 1) {
 				this._activeNotebookEditor = this._visibleNotebookEditors[0];
-				inferredActiveEditor = true;
 			} else if (delta.value.visibleEditors?.length === 1) {
 				const inferredEditor = this._editors.get(delta.value.visibleEditors[0]);
 				if (inferredEditor) {
 					this._activeNotebookEditor = inferredEditor;
-					inferredActiveEditor = true;
 				}
 			}
 		}
-		if (delta.value.newActiveEditor !== undefined || inferredActiveEditor) {
+		if (delta.value.newActiveEditor === undefined) {
+			this._syncActiveNotebookEditorFromActiveTextEditor(this._textDocumentsAndEditors.activeEditor());
+		}
+		if (delta.value.newActiveEditor !== undefined || this._activeNotebookEditor?.id !== previousActiveNotebookEditorId) {
 			this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor?.apiEditor);
 		}
 	}

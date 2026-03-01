@@ -22,18 +22,22 @@ VSCODEAPITESTDIR=$(mktemp -d 2>/dev/null)
 VSCODECONFEDITDIR=$(mktemp -d 2>/dev/null)
 VSCODEMARKDOWNDIR=$(mktemp -d 2>/dev/null)
 VSCODEIPYNBDIR=$(mktemp -d 2>/dev/null)
+VSCODEEMMETDIR=$(mktemp -d 2>/dev/null)
 VSCODEGITDIR=$(mktemp -d 2>/dev/null)
 VSCODECRASHDIR=$ROOT/.build/crashes
 VSCODELOGSDIR=$ROOT/.build/logs/integration-tests
 INTEGRATION_TEST_ELECTRON_PATH=${INTEGRATION_TEST_ELECTRON_PATH:-"./scripts/code-tauri.sh"}
 API_TESTS_EXTRA_ARGS="--disable-telemetry --disable-experiments --skip-welcome --skip-release-notes --crash-reporter-directory=$VSCODECRASHDIR --logsPath=$VSCODELOGSDIR --no-cached-data --disable-updates --use-inmemory-secretstorage --disable-extensions --disable-workspace-trust --user-data-dir=$VSCODEUSERDATADIR"
 API_TEST_WORKSPACE_FOLDER="$VSCODEAPITESTDIR/testWorkspace"
+API_TEST_WORKSPACE_FOLDER_2="$VSCODEAPITESTDIR/testWorkspace2"
 API_TEST_WORKSPACE_FILE="$VSCODEAPITESTDIR/testworkspace.code-workspace"
 
 mkdir -p "$VSCODECRASHDIR" "$VSCODELOGSDIR"
 cp -R "$ROOT/extensions/vscode-api-tests/testWorkspace" "$API_TEST_WORKSPACE_FOLDER"
+cp -R "$ROOT/extensions/vscode-api-tests/testWorkspace2" "$API_TEST_WORKSPACE_FOLDER_2"
 cp "$ROOT/extensions/vscode-api-tests/testworkspace.code-workspace" "$API_TEST_WORKSPACE_FILE"
 cp -R "$ROOT/extensions/markdown-language-features/test-workspace/." "$VSCODEMARKDOWNDIR"
+cp -R "$ROOT/extensions/emmet/test-workspace/." "$VSCODEEMMETDIR"
 
 cleanup() {
 	rm -rf "$VSCODEUSERDATADIR"
@@ -41,6 +45,7 @@ cleanup() {
 	rm -rf "$VSCODECONFEDITDIR"
 	rm -rf "$VSCODEMARKDOWNDIR"
 	rm -rf "$VSCODEIPYNBDIR"
+	rm -rf "$VSCODEEMMETDIR"
 	rm -rf "$VSCODEGITDIR"
 }
 
@@ -67,7 +72,11 @@ echo "### API tests (folder/workspace) for Tauri"
 if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	echo
 	echo "### API tests (folder)"
-	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
+	VSCODE_TAURI_INTEGRATION=1 \
+	VSCODE_TAURI_EXPECTED_WORKSPACE_ROOT="$API_TEST_WORKSPACE_FOLDER" \
+	VSCODE_TAURI_EXPECTED_WORKSPACE_ROOT_2= \
+	VSCODE_TAURI_EXPECTED_WORKSPACE_FILE= \
+	"$INTEGRATION_TEST_ELECTRON_PATH" \
 		"$API_TEST_WORKSPACE_FOLDER" \
 		--enable-proposed-api=vscode.vscode-api-tests \
 		--extensionDevelopmentPath="$ROOT/extensions/vscode-api-tests" \
@@ -78,7 +87,11 @@ if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 
 	echo
 	echo "### API tests (workspace)"
-	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
+	VSCODE_TAURI_INTEGRATION=1 \
+	VSCODE_TAURI_EXPECTED_WORKSPACE_ROOT="$API_TEST_WORKSPACE_FOLDER" \
+	VSCODE_TAURI_EXPECTED_WORKSPACE_ROOT_2="$API_TEST_WORKSPACE_FOLDER_2" \
+	VSCODE_TAURI_EXPECTED_WORKSPACE_FILE="$API_TEST_WORKSPACE_FILE" \
+	"$INTEGRATION_TEST_ELECTRON_PATH" \
 		"$API_TEST_WORKSPACE_FILE" \
 		--enable-proposed-api=vscode.vscode-api-tests \
 		--extensionDevelopmentPath="$ROOT/extensions/vscode-api-tests" \
@@ -92,7 +105,7 @@ fi
 
 echo
 echo "### Built-in extension integration suites for Tauri"
-echo "SKIP typescript/emmet: TODO https://github.com/microsoft/vscode/issues/244146"
+echo "SKIP typescript: TODO https://github.com/microsoft/vscode/issues/244146"
 
 if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	echo
@@ -122,6 +135,21 @@ if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
 	kill_app
 else
 	echo "SKIP ipynb: TODO https://github.com/microsoft/vscode/issues/244146 (set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute)"
+fi
+
+if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then
+	echo
+	echo "### Emmet tests"
+	./node_modules/.bin/tsc -p "$ROOT/extensions/emmet/tsconfig.json"
+	VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
+		"$VSCODEEMMETDIR" \
+		--extensionDevelopmentPath="$ROOT/extensions/emmet" \
+		--extensionTestsPath="$ROOT/extensions/emmet/out/test" \
+		$API_TESTS_EXTRA_ARGS \
+		"$@"
+	kill_app
+else
+	echo "SKIP emmet: TODO https://github.com/microsoft/vscode/issues/244146 (set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute)"
 fi
 
 if [[ "${VSCODE_TAURI_RUN_API_INTEGRATION:-0}" == "1" ]]; then

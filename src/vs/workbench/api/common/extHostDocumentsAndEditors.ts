@@ -178,7 +178,16 @@ export class ExtHostDocumentsAndEditors implements ExtHostDocumentsAndEditorsSha
 	activeEditor(internal: true): ExtHostTextEditor | undefined;
 	activeEditor(internal?: true): vscode.TextEditor | ExtHostTextEditor | undefined {
 		if (!this._activeEditorId) {
-			return undefined;
+			if (this._editors.size !== 1) {
+				return undefined;
+			}
+
+			const editor = this._editors.values().next().value;
+			if (internal) {
+				return editor;
+			} else {
+				return editor?.value;
+			}
 		}
 		const editor = this._editors.get(this._activeEditorId);
 		if (internal) {

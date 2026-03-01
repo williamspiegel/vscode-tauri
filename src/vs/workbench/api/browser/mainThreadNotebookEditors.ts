@@ -103,6 +103,11 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 
 	async $tryShowNotebookDocument(resource: UriComponents, viewType: string, options: INotebookDocumentShowOptions): Promise<string> {
 		const revivedResource = URI.revive(resource);
+		const knownMatchingEditorIds = new Set(
+			this._notebookEditorService.listNotebookEditors()
+				.filter(notebookEditor => notebookEditor.textModel && isEqual(notebookEditor.textModel.uri, revivedResource))
+				.map(notebookEditor => notebookEditor.getId())
+		);
 		const editorOptions: INotebookEditorOptions = {
 			cellSelections: options.selections,
 			preserveFocus: options.preserveFocus,
@@ -126,7 +131,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		const resolvedTargetGroup = typeof targetGroup === 'number' && targetGroup < 0
 			? targetGroup
 			: (editorPane as IEditorPane | undefined)?.group ?? targetGroup;
-		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, resolvedTargetGroup);
+		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, resolvedTargetGroup, knownMatchingEditorIds);
 
 		if (notebookEditor) {
 			return notebookEditor.getId();
@@ -135,9 +140,9 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 	}
 
-	private async _waitForNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number): Promise<INotebookEditor | undefined> {
+	private async _waitForNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number, knownMatchingEditorIds: ReadonlySet<string>): Promise<INotebookEditor | undefined> {
 		for (let attempt = 0; attempt < MainThreadNotebookEditors._editorSettleAttempts; attempt++) {
-			const notebookEditor = this._resolveNotebookEditor(editorPane, resource, targetGroup);
+			const notebookEditor = this._resolveNotebookEditor(editorPane, resource, targetGroup, knownMatchingEditorIds);
 			if (notebookEditor) {
 				return notebookEditor;
 			}
@@ -148,11 +153,19 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		return undefined;
 	}
 
-	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number): INotebookEditor | undefined {
+	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number, knownMatchingEditorIds: ReadonlySet<string>): INotebookEditor | undefined {
 		const candidateEditorPane = editorPane as IEditorPane | undefined;
 		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
 		if (directNotebookEditor) {
 			return directNotebookEditor;
+		}
+
+		const matchingNotebookEditors = this._notebookEditorService.listNotebookEditors().filter(notebookEditor =>
+			notebookEditor.textModel && isEqual(notebookEditor.textModel.uri, resource)
+		);
+		const newlyAddedMatchingNotebookEditors = matchingNotebookEditors.filter(notebookEditor => !knownMatchingEditorIds.has(notebookEditor.getId()));
+		if (newlyAddedMatchingNotebookEditors.length === 1) {
+			return newlyAddedMatchingNotebookEditors[0];
 		}
 
 		if (typeof targetGroup === 'number' && targetGroup < 0 && candidateEditorPane?.group) {
@@ -179,9 +192,6 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			}
 		}
 
-		const matchingNotebookEditors = this._notebookEditorService.listNotebookEditors().filter(notebookEditor =>
-			notebookEditor.textModel && isEqual(notebookEditor.textModel.uri, resource)
-		);
 		const unseenMatchingNotebookEditors = matchingNotebookEditors.filter(notebookEditor => !this._mainThreadEditors.has(notebookEditor.getId()));
 		if (unseenMatchingNotebookEditors.length === 1) {
 			return unseenMatchingNotebookEditors[0];

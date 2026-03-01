@@ -10,6 +10,8 @@ import * as vscode from 'vscode';
 import { TestFS } from '../memfs';
 import { assertNoRpc, closeAllEditors, createRandomFile, delay, deleteFile, disposeAll, Mutable, pathEquals, revertAllDirty, rndName, testFs, withLogDisabled } from '../utils';
 
+const expectedWorkspaceRoot = process.env['VSCODE_TAURI_EXPECTED_WORKSPACE_ROOT'] || join(__dirname, '../../testWorkspace');
+
 suite('vscode API - workspace', () => {
 
 	let root: vscode.Uri;
@@ -45,7 +47,7 @@ suite('vscode API - workspace', () => {
 	});
 
 	test('rootPath', () => {
-		assert.ok(pathEquals(vscode.workspace.rootPath!, join(__dirname, '../../testWorkspace')));
+		assert.ok(pathEquals(vscode.workspace.rootPath!, expectedWorkspaceRoot));
 
 		assert.throws(() => (vscode.workspace as Mutable<typeof vscode.workspace>).rootPath = 'farboo');
 	});
@@ -57,16 +59,16 @@ suite('vscode API - workspace', () => {
 	test('workspaceFolders', () => {
 		if (vscode.workspace.workspaceFolders) {
 			assert.strictEqual(vscode.workspace.workspaceFolders.length, 1);
-			assert.ok(pathEquals(vscode.workspace.workspaceFolders[0].uri.fsPath, join(__dirname, '../../testWorkspace')));
+			assert.ok(pathEquals(vscode.workspace.workspaceFolders[0].uri.fsPath, expectedWorkspaceRoot));
 		}
 	});
 
 	test('getWorkspaceFolder', () => {
-		const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(join(__dirname, '../../testWorkspace/far.js')));
+		const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(join(expectedWorkspaceRoot, 'far.js')));
 		assert.ok(!!folder);
 
 		if (folder) {
-			assert.ok(pathEquals(folder.uri.fsPath, join(__dirname, '../../testWorkspace')));
+			assert.ok(pathEquals(folder.uri.fsPath, expectedWorkspaceRoot));
 		}
 	});
 

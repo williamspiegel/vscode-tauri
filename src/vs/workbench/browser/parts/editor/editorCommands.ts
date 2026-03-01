@@ -86,6 +86,28 @@ export const TOGGLE_MAXIMIZE_EDITOR_GROUP = 'workbench.action.toggleMaximizeEdit
 export const SPLIT_EDITOR_IN_GROUP = 'workbench.action.splitEditorInGroup';
 export const TOGGLE_SPLIT_EDITOR_IN_GROUP = 'workbench.action.toggleSplitEditorInGroup';
 export const JOIN_EDITOR_IN_GROUP = 'workbench.action.joinEditorInGroup';
+
+type NotebookCellLike = { handle: number };
+type NotebookTextModelLike = { uri: URI; cells: readonly NotebookCellLike[] };
+type NotebookEditorLike = {
+	textModel?: NotebookTextModelLike;
+	revealCellRangeInView?(range: { start: number; end: number }): void;
+	focusNotebookCell?(cell: NotebookCellLike, focus: 'editor'): Promise<void> | void;
+};
+
+function getNotebookEditorFromPane(editorPane?: IEditorPane): NotebookEditorLike | undefined {
+	const control = editorPane?.getControl();
+	if (!control || typeof control !== 'object') {
+		return undefined;
+	}
+
+	const candidate = control as NotebookEditorLike;
+	if (!candidate.textModel || typeof candidate.revealCellRangeInView !== 'function' || typeof candidate.focusNotebookCell !== 'function') {
+		return undefined;
+	}
+
+	return candidate;
+}
 export const TOGGLE_SPLIT_EDITOR_IN_GROUP_LAYOUT = 'workbench.action.toggleSplitEditorInGroupLayout';
 
 export const FOCUS_FIRST_SIDE_EDITOR = 'workbench.action.focusFirstSideEditor';
@@ -450,6 +472,17 @@ function registerOpenEditorAPICommands(): void {
 		}
 	}
 
+	async function waitForActiveNotebookEditor(editorService: IEditorService, resource: URI): Promise<void> {
+		for (let attempt = 0; attempt < editorOpenSettleAttempts; attempt++) {
+			const activeNotebookEditor = getNotebookEditorFromPane(editorService.activeEditorPane);
+			if (activeNotebookEditor?.textModel && isEqual(activeNotebookEditor.textModel.uri, resource)) {
+				return;
+			}
+
+			await timeout(50);
+		}
+	}
+
 	async function waitForNextEditorChange(editorService: IEditorService): Promise<void> {
 		let resolved = false;
 		let resolvePromise: (() => void) | undefined;
@@ -575,9 +608,9 @@ function registerOpenEditorAPICommands(): void {
 			}
 			await waitForEditorGroupInput(editorGroup, editorPane);
 			if (matchesScheme(resource, Schemas.vscodeNotebookCell)) {
-				await timeout(100);
+				await waitForActiveNotebookEditor(editorService, openResource);
 			}
-			await timeout(0);
+			await timeout(typeof column === 'number' || matchesScheme(resource, Schemas.vscodeNotebookCell) ? 100 : 0);
 		}
 
 		// do not allow to execute commands from here

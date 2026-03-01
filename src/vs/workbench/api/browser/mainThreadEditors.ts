@@ -32,6 +32,8 @@ import { IEditorControl, IEditorPane } from '../../common/editor.js';
 import { getCodeEditor, ICodeEditor } from '../../../editor/browser/editorBrowser.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IQuickDiffModelService } from '../../contrib/scm/browser/quickDiffModel.js';
+import { getNotebookEditorFromEditorPane, INotebookEditor } from '../../contrib/notebook/browser/notebookBrowser.js';
+import { INotebookService } from '../../contrib/notebook/common/notebookService.js';
 import { autorun, constObservable, derived, derivedOpts, IObservable, observableFromEvent } from '../../../base/common/observable.js';
 import { IUriIdentityService } from '../../../platform/uriIdentity/common/uriIdentity.js';
 import { isITextModel } from '../../../editor/common/model.js';
@@ -67,7 +69,8 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		@IEditorGroupsService private readonly _editorGroupService: IEditorGroupsService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@IQuickDiffModelService private readonly _quickDiffModelService: IQuickDiffModelService,
-		@IUriIdentityService private readonly _uriIdentityService: IUriIdentityService
+		@IUriIdentityService private readonly _uriIdentityService: IUriIdentityService,
+		private readonly _notebookService: INotebookService
 	) {
 		this._instanceId = String(++MainThreadTextEditors.INSTANCE_COUNT);
 		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostEditors);
@@ -257,6 +260,12 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 			activation: options.preserveFocus ? EditorActivation.RESTORE : undefined,
 			override: EditorResolution.EXCLUSIVE_ONLY
 		};
+		if (uri.scheme === Schemas.vscodeNotebookCell) {
+			const notebookEditors = this._notebookService.getContributedNotebookTypes(openUri);
+			if (notebookEditors.length === 1) {
+				editorOptions.override = notebookEditors[0].id;
+			}
+		}
 
 		const input: IResourceEditorInput = {
 			resource: openUri,
@@ -277,10 +286,38 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		}
 
 		if (uri.scheme === Schemas.vscodeNotebookCell) {
+			await this._focusNotebookCellEditor(editor, uri);
+			await this._waitForNotebookCellOwner(openUri);
 			return this._waitForNotebookCellCodeEditor(editor, uri);
 		}
 
 		return undefined;
+	}
+
+	private async _focusNotebookCellEditor(editor: IEditorPane, resource: URI): Promise<void> {
+		const notebookEditor = getNotebookEditorFromEditorPane(editor);
+		const parsedCellUri = parseNotebookCellUri(resource);
+		if (!notebookEditor || !parsedCellUri?.notebook || !notebookEditor.textModel || !this._uriIdentityService.extUri.isEqual(notebookEditor.textModel.uri, parsedCellUri.notebook)) {
+			return;
+		}
+
+		const cellIndex = notebookEditor.textModel.cells.findIndex(cell => cell.handle === parsedCellUri.handle);
+		if (cellIndex < 0) {
+			return;
+		}
+
+		const focusRange = { start: cellIndex, end: cellIndex + 1 };
+		notebookEditor.setSelections([focusRange]);
+		notebookEditor.setFocus(focusRange);
+		notebookEditor.revealCellRangeInView(focusRange);
+
+		const cell = notebookEditor.cellAt(cellIndex);
+		if (!cell) {
+			return;
+		}
+
+		const focusPromise = notebookEditor.focusNotebookCell(cell, 'editor').catch(() => undefined);
+		await Promise.race([focusPromise, timeout(500)]);
 	}
 
 	private async _waitForNotebookCellCodeEditor(editor: IEditorPane, resource: URI): Promise<string | undefined> {
@@ -292,7 +329,17 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 				return directCodeEditorId;
 			}
 
+			const directNotebookCodeEditorId = this._findNotebookCellCodeEditorId(getNotebookEditorFromEditorPane(editor), resource);
+			if (directNotebookCodeEditorId) {
+				return directNotebookCodeEditorId;
+			}
+
 			for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
+				const visibleNotebookCodeEditorId = this._findNotebookCellCodeEditorId(getNotebookEditorFromEditorPane(visibleEditorPane), resource);
+				if (visibleNotebookCodeEditorId) {
+					return visibleNotebookCodeEditorId;
+				}
+
 				const candidateCodeEditor = getCodeEditor(visibleEditorPane.getControl());
 				const candidateModel = candidateCodeEditor?.getModel();
 				if (!candidateCodeEditor || !isITextModel(candidateModel) || !this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
@@ -309,6 +356,61 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		}
 
 		return undefined;
+	}
+
+	private _findNotebookCellCodeEditorId(notebookEditor: INotebookEditor | undefined, resource: URI): string | undefined {
+		if (!notebookEditor) {
+			return undefined;
+		}
+
+		const targetNotebook = parseNotebookCellUri(resource)?.notebook;
+		let fallbackCodeEditorId: string | undefined;
+		const candidateCodeEditors = notebookEditor.activeCodeEditor
+			? [notebookEditor.activeCodeEditor, ...notebookEditor.codeEditors.map(([, codeEditor]) => codeEditor).filter(codeEditor => codeEditor !== notebookEditor.activeCodeEditor)]
+			: notebookEditor.codeEditors.map(([, codeEditor]) => codeEditor);
+
+		for (const candidateCodeEditor of candidateCodeEditors) {
+			const candidateModel = candidateCodeEditor.getModel();
+			if (!candidateModel || !isITextModel(candidateModel)) {
+				continue;
+			}
+
+			const candidateCodeEditorId = this._editorLocator.getIdOfCodeEditor(candidateCodeEditor);
+			if (!candidateCodeEditorId) {
+				continue;
+			}
+
+			if (this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
+				return candidateCodeEditorId;
+			}
+
+			if (!fallbackCodeEditorId && targetNotebook) {
+				const candidateNotebook = parseNotebookCellUri(candidateModel.uri)?.notebook;
+				if (candidateNotebook && this._uriIdentityService.extUri.isEqual(candidateNotebook, targetNotebook)) {
+					fallbackCodeEditorId = candidateCodeEditorId;
+				}
+			}
+		}
+
+		return fallbackCodeEditorId;
+	}
+
+	private async _waitForNotebookCellOwner(resource: URI): Promise<void> {
+		for (let attempt = 0; attempt < MainThreadTextEditors._notebookCellEditorSettleAttempts; attempt++) {
+			const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
+			if (activeNotebookEditor?.textModel && this._uriIdentityService.extUri.isEqual(activeNotebookEditor.textModel.uri, resource)) {
+				return;
+			}
+
+			for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
+				const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
+				if (visibleNotebookEditor?.textModel && this._uriIdentityService.extUri.isEqual(visibleNotebookEditor.textModel.uri, resource)) {
+					return;
+				}
+			}
+
+			await timeout(50);
+		}
 	}
 
 	private async _waitForNextEditorChange(): Promise<void> {

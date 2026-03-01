@@ -16,6 +16,7 @@ import { ExtHostDocumentsAndEditors } from './extHostDocumentsAndEditors.js';
 import { ExtHostTextEditor, TextEditorDecorationType } from './extHostTextEditor.js';
 import * as TypeConverters from './extHostTypeConverters.js';
 import { TextEditorSelectionChangeKind, TextEditorChangeKind } from './extHostTypes.js';
+import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
 import * as vscode from 'vscode';
 
 export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
@@ -99,6 +100,11 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 			if (editorByResource) {
 				return editorByResource.value;
 			}
+
+			const activeEditor = this._extHostDocumentsAndEditors.activeEditor(true);
+			if (activeEditor && this._matchesRequestedResource(activeEditor.document.uri, document.uri)) {
+				return activeEditor.value;
+			}
 		}
 		// we have no editor... having an id means that we had an editor
 		// on the main side and that it isn't the current editor anymore...
@@ -116,7 +122,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 				return editor;
 			}
 
-			const editorByResource = this.getVisibleTextEditors(true).find(candidate => isEqual(candidate.document.uri, resource));
+			const editorByResource = this.getVisibleTextEditors(true).find(candidate => this._matchesRequestedResource(candidate.document.uri, resource));
 			if (editorByResource) {
 				return editorByResource;
 			}
@@ -129,7 +135,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 
 	private async _waitForEditorByResource(resource: URI): Promise<ExtHostTextEditor | undefined> {
 		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
-			const editorByResource = this.getVisibleTextEditors(true).find(candidate => isEqual(candidate.document.uri, resource));
+			const editorByResource = this.getVisibleTextEditors(true).find(candidate => this._matchesRequestedResource(candidate.document.uri, resource));
 			if (editorByResource) {
 				return editorByResource;
 			}
@@ -138,6 +144,28 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 
 		return undefined;
+	}
+
+	private _matchesRequestedResource(candidate: URI, requested: URI): boolean {
+		if (isEqual(candidate, requested)) {
+			return true;
+		}
+
+		if (requested.scheme !== Schemas.vscodeNotebookCell) {
+			return false;
+		}
+
+		const requestedNotebook = parseNotebookCellUri(requested)?.notebook;
+		if (!requestedNotebook) {
+			return false;
+		}
+
+		if (isEqual(candidate, requestedNotebook)) {
+			return true;
+		}
+
+		const candidateNotebook = candidate.scheme === Schemas.vscodeNotebookCell ? parseNotebookCellUri(candidate)?.notebook : undefined;
+		return !!candidateNotebook && isEqual(candidateNotebook, requestedNotebook);
 	}
 
 	createTextEditorDecorationType(extension: IExtensionDescription, options: vscode.DecorationRenderOptions): vscode.TextEditorDecorationType {
