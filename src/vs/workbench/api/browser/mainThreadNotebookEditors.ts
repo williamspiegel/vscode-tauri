@@ -15,7 +15,7 @@ import { INotebookEditorService } from '../../contrib/notebook/browser/services/
 import { ICellRange } from '../../contrib/notebook/common/notebookRange.js';
 import { IEditorPane } from '../../common/editor.js';
 import { columnToEditorGroup, editorGroupToColumn } from '../../services/editor/common/editorGroupColumn.js';
-import { IEditorGroup, IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
+import { GroupsOrder, IEditorGroup, IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../services/editor/common/editorService.js';
 import { IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
 import { ExtHostContext, ExtHostNotebookEditorsShape, INotebookDocumentShowOptions, INotebookEditorViewColumnInfo, MainThreadNotebookEditorsShape, NotebookEditorRevealType } from '../common/extHost.protocol.js';
@@ -34,6 +34,7 @@ class MainThreadNotebook {
 
 export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape {
 	private static readonly _editorSettleAttempts = 300;
+	private static readonly _groupSettleTimeout = 250;
 
 	private readonly _disposables = new DisposableStore();
 
@@ -115,8 +116,17 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		};
 
 		const targetGroup = columnToEditorGroup(this._editorGroupService, this._configurationService, options.position);
+		const needsNewGroup = typeof targetGroup === 'number'
+			&& (targetGroup < 0 || !this._editorGroupService.getGroups(GroupsOrder.GRID_APPEARANCE)[targetGroup]);
+		const groupAdd = needsNewGroup ? this._waitForNextGroupAdd() : undefined;
 		const editorPane = await this._editorService.openEditor({ resource: revivedResource, options: editorOptions }, targetGroup);
-		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, targetGroup);
+		if (groupAdd) {
+			await groupAdd;
+		}
+		const resolvedTargetGroup = typeof targetGroup === 'number' && targetGroup < 0
+			? targetGroup
+			: (editorPane as IEditorPane | undefined)?.group ?? targetGroup;
+		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, resolvedTargetGroup);
 
 		if (notebookEditor) {
 			return notebookEditor.getId();
@@ -125,7 +135,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 	}
 
-	private async _waitForNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup): Promise<INotebookEditor | undefined> {
+	private async _waitForNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number): Promise<INotebookEditor | undefined> {
 		for (let attempt = 0; attempt < MainThreadNotebookEditors._editorSettleAttempts; attempt++) {
 			const notebookEditor = this._resolveNotebookEditor(editorPane, resource, targetGroup);
 			if (notebookEditor) {
@@ -138,15 +148,28 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		return undefined;
 	}
 
-	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup): INotebookEditor | undefined {
+	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number): INotebookEditor | undefined {
 		const candidateEditorPane = editorPane as IEditorPane | undefined;
 		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
 		if (directNotebookEditor) {
 			return directNotebookEditor;
 		}
 
+		if (typeof targetGroup === 'number' && targetGroup < 0 && candidateEditorPane?.group) {
+			const sideGroupNotebookEditors = this._editorService.visibleEditorPanes
+				.filter(visibleEditorPane => visibleEditorPane.group !== candidateEditorPane.group)
+				.map(visibleEditorPane => getNotebookEditorFromEditorPane(visibleEditorPane))
+				.filter((visibleNotebookEditor): visibleNotebookEditor is INotebookEditor =>
+					!!visibleNotebookEditor && (!visibleNotebookEditor.textModel || isEqual(visibleNotebookEditor.textModel.uri, resource))
+				);
+
+			if (sideGroupNotebookEditors.length === 1) {
+				return sideGroupNotebookEditors[0];
+			}
+		}
+
 		for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
-			if (visibleEditorPane.group !== targetGroup) {
+			if (!this._isInTargetGroup(visibleEditorPane, targetGroup)) {
 				continue;
 			}
 
@@ -168,6 +191,36 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 
 		return undefined;
+	}
+
+	private _isInTargetGroup(editorPane: IEditorPane, targetGroup: IEditorGroup | number): boolean {
+		if (typeof targetGroup === 'number') {
+			return editorPane.group.id === targetGroup;
+		}
+
+		return editorPane.group === targetGroup || editorPane.group.id === targetGroup.id;
+	}
+
+	private async _waitForNextGroupAdd(): Promise<void> {
+		let resolved = false;
+		let resolvePromise: (() => void) | undefined;
+		const eventPromise = new Promise<void>(resolve => {
+			resolvePromise = resolve;
+		});
+		const listener = this._editorGroupService.onDidAddGroup(() => {
+			if (!resolved) {
+				resolved = true;
+				listener.dispose();
+				resolvePromise?.();
+			}
+		});
+
+		await Promise.race([eventPromise, timeout(MainThreadNotebookEditors._groupSettleTimeout)]);
+
+		if (!resolved) {
+			resolved = true;
+			listener.dispose();
+		}
 	}
 
 	async $tryRevealRange(id: string, range: ICellRange, revealType: NotebookEditorRevealType): Promise<void> {

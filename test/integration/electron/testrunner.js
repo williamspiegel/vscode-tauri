@@ -68,7 +68,10 @@ exports.run = function run(testsRoot, clb) {
 				traceTauriIntegration(`test pending ${test.fullTitle()}`);
 			});
 			runner.on('fail', function (test, err) {
-				traceTauriIntegration(`test fail ${test.fullTitle()}`, err);
+				const errorText = err instanceof Error
+					? `${err.name}: ${err.message}${err.stack ? `\n${err.stack}` : ''}`
+					: String(err);
+				traceTauriIntegration(`test fail ${test.fullTitle()} ${errorText}`);
 			});
 		}
 		catch (error) {

@@ -383,6 +383,65 @@ suite('NotebookCell#Document', function () {
 		assert.strictEqual(count, 1);
 	});
 
+	test('infers active notebook editor from a newly added visible editor when active delta is missing', function () {
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
+		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
+
+		let count = 0;
+		disposables.add(extHostNotebooks.onDidChangeActiveNotebookEditor(() => count += 1));
+
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({
+			addedEditors: [{
+				documentUri: notebookUri,
+				id: '_notebook_editor_3',
+				selections: [{ start: 0, end: 1 }],
+				visibleRanges: [],
+				viewType: 'test'
+			}],
+			visibleEditors: ['_notebook_editor_3']
+		}));
+
+		assert.ok(extHostNotebooks.activeNotebookEditor);
+		assert.strictEqual(count, 1);
+	});
+
+	test('keeps processing added notebook editors after an already-known editor id', function () {
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
+		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
+
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({
+			addedEditors: [{
+				documentUri: notebookUri,
+				id: '_notebook_editor_0',
+				selections: [{ start: 0, end: 1 }],
+				visibleRanges: [],
+				viewType: 'test'
+			}, {
+				documentUri: notebookUri,
+				id: '_notebook_editor_4',
+				selections: [{ start: 0, end: 1 }],
+				visibleRanges: [],
+				viewType: 'test'
+			}],
+			visibleEditors: ['_notebook_editor_4']
+		}));
+
+		assert.ok(extHostNotebooks.activeNotebookEditor);
+		assert.strictEqual(extHostNotebooks.getIdByEditor(extHostNotebooks.activeNotebookEditor!), '_notebook_editor_4');
+	});
+
+	test('infers active notebook editor from a single visible editor when active delta is missing', function () {
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
+		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
+
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({
+			visibleEditors: ['_notebook_editor_0']
+		}));
+
+		assert.ok(extHostNotebooks.activeNotebookEditor);
+		assert.strictEqual(extHostNotebooks.getIdByEditor(extHostNotebooks.activeNotebookEditor!), '_notebook_editor_0');
+	});
+
 	test('unset active notebook editor', function () {
 
 		const editor = extHostNotebooks.activeNotebookEditor;

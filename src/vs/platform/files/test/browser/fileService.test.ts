@@ -14,6 +14,7 @@ import { consumeStream, newWriteableStream, ReadableStreamEvents } from '../../.
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { IFileOpenOptions, IFileReadStreamOptions, FileSystemProviderCapabilities, FileType, IFileSystemProviderCapabilitiesChangeEvent, IFileSystemProviderRegistrationEvent, IStat, IFileAtomicReadOptions, IFileAtomicWriteOptions, IFileAtomicDeleteOptions, IFileSystemProviderWithFileAtomicReadCapability, IFileSystemProviderWithFileAtomicDeleteCapability, IFileSystemProviderWithFileAtomicWriteCapability, IFileAtomicOptions, IFileChange, isFileSystemWatcher, FileChangesEvent, FileChangeType } from '../../common/files.js';
+import { DiskFileSystemProviderClient } from '../../common/diskFileSystemProviderClient.js';
 import { FileService } from '../../common/fileService.js';
 import { NullFileSystemProvider } from '../common/nullFileSystemProvider.js';
 import { NullLogService } from '../../../log/common/log.js';
@@ -417,6 +418,36 @@ suite('File Service', () => {
 		assert.strictEqual(atomicReadCounter, 2);
 		assert.strictEqual(atomicWriteCounter, 3);
 		assert.strictEqual(atomicDeleteCounter, 1);
+	});
+
+	test('disk file system provider client accepts empty base64 readFile payloads', async () => {
+		const client = disposables.add(new DiskFileSystemProviderClient({
+			call(command) {
+				assert.strictEqual(command, 'readFile');
+				return Promise.resolve({ base64: '' });
+			},
+			listen() {
+				return Event.None;
+			}
+		}, {}));
+
+		const bytes = await client.readFile(URI.file('/tmp/empty.bin'));
+		assert.strictEqual(bytes.byteLength, 0);
+	});
+
+	test('disk file system provider client accepts empty object buffer readFile payloads', async () => {
+		const client = disposables.add(new DiskFileSystemProviderClient({
+			call(command) {
+				assert.strictEqual(command, 'readFile');
+				return Promise.resolve({ buffer: {} });
+			},
+			listen() {
+				return Event.None;
+			}
+		}, {}));
+
+		const bytes = await client.readFile(URI.file('/tmp/empty-buffer.bin'));
+		assert.strictEqual(bytes.byteLength, 0);
 	});
 
 	ensureNoDisposablesAreLeakedInTestSuite();

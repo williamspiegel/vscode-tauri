@@ -556,6 +556,18 @@ suite('Tauri Desktop Channels', () => {
 		assert.deepStrictEqual(Array.from(readFile.buffer), [9, 8, 7]);
 	});
 
+	test('localFilesystem readFile accepts empty base64 payloads', async () => {
+		const host = {
+			desktopChannelCall: async () => ({ base64: '' }),
+			desktopChannelListen: async () => async () => undefined
+		};
+		const registry = desktopChannelsModule.createDesktopChannelRegistry(host);
+
+		const readFile = await registry.call('localFilesystem', 'readFile', [{ path: '/tmp/empty.bin' }]);
+		assert.strictEqual(readFile.buffer instanceof Uint8Array, true);
+		assert.strictEqual(readFile.buffer.byteLength, 0);
+	});
+
 	test('localFilesystem stat infers directory type from path hint', async () => {
 		const host = {
 			desktopChannelCall: async () => ({}),

@@ -48,6 +48,7 @@ export interface IMainThreadEditorLocator {
 
 export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 	private static readonly _notebookCellEditorSettleAttempts = 300;
+	private static readonly _editorChangeSettleTimeout = 250;
 
 	private static INSTANCE_COUNT: number = 0;
 
@@ -262,7 +263,9 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 			options: editorOptions
 		};
 
+		const editorChange = this._waitForNextEditorChange();
 		const editor = await this._editorService.openEditor(input, columnToEditorGroup(this._editorGroupService, this._configurationService, options.position));
+		await editorChange;
 		if (!editor) {
 			return undefined;
 		}
@@ -306,6 +309,28 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		}
 
 		return undefined;
+	}
+
+	private async _waitForNextEditorChange(): Promise<void> {
+		let resolved = false;
+		let resolvePromise: (() => void) | undefined;
+		const eventPromise = new Promise<void>(resolve => {
+			resolvePromise = resolve;
+		});
+		const listener = this._editorService.onDidVisibleEditorsChange(() => {
+			if (!resolved) {
+				resolved = true;
+				listener.dispose();
+				resolvePromise?.();
+			}
+		});
+
+		await Promise.race([eventPromise, timeout(MainThreadTextEditors._editorChangeSettleTimeout)]);
+
+		if (!resolved) {
+			resolved = true;
+			listener.dispose();
+		}
 	}
 
 	async $tryShowEditor(id: string, position?: EditorGroupColumn): Promise<void> {

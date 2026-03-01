@@ -151,22 +151,34 @@ export class MainThreadNotebooksAndEditors {
 		}
 
 		const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
+		const activeEditorPaneGroup = this._editorService.activeEditorPane?.group;
 		let activeEditor: string | null = null;
 		if (activeNotebookEditor) {
 			activeEditor = activeNotebookEditor.getId();
 		} else if (focusedEditor?.textModel) {
 			activeEditor = focusedEditor.getId();
 		}
-		if (activeEditor && !editors.has(activeEditor)) {
-			this._logService.trace('MainThreadNotebooksAndEditors#_updateState: active editor is not in editors list', activeEditor, editors.keys());
-			activeEditor = null;
-		}
+
+		let visibleEditorInActiveGroup: IActiveNotebookEditor | undefined;
 
 		for (const editorPane of this._editorService.visibleEditorPanes) {
 			const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
 			if (notebookEditor?.hasModel() && editors.has(notebookEditor.getId())) {
 				visibleEditorsMap.set(notebookEditor.getId(), notebookEditor);
+				if (!visibleEditorInActiveGroup && activeEditorPaneGroup && editorPane.group === activeEditorPaneGroup) {
+					visibleEditorInActiveGroup = notebookEditor;
+				}
 			}
+		}
+
+		if (!activeEditor && visibleEditorInActiveGroup) {
+			activeEditor = visibleEditorInActiveGroup.getId();
+		} else if (!activeEditor && visibleEditorsMap.size === 1) {
+			activeEditor = visibleEditorsMap.keys().next().value ?? null;
+		}
+		if (activeEditor && !editors.has(activeEditor)) {
+			this._logService.trace('MainThreadNotebooksAndEditors#_updateState: active editor is not in editors list', activeEditor, editors.keys());
+			activeEditor = null;
 		}
 
 		const newState = new NotebookAndEditorState(new Set(this._notebookService.listNotebookDocuments()), editors, activeEditor, visibleEditorsMap);

@@ -18,6 +18,10 @@ import { reviveFileChanges } from './watcher.js';
 export const LOCAL_FILE_SYSTEM_CHANNEL_NAME = 'localFilesystem';
 
 function decodeBase64ToBytes(value: string): Uint8Array | undefined {
+	if (value.length === 0) {
+		return new Uint8Array(0);
+	}
+
 	try {
 		return decodeBase64(value);
 	} catch {
@@ -58,7 +62,7 @@ function normalizeReadFileBytes(value: unknown): Uint8Array | undefined {
 			return Uint8Array.from(objectValue.data.map(item => Number(item) & 0xff));
 		}
 
-		if (typeof objectValue.base64 === 'string' && objectValue.base64.length > 0) {
+		if (typeof objectValue.base64 === 'string') {
 			const decoded = decodeBase64ToBytes(objectValue.base64);
 			if (decoded) {
 				return decoded;
@@ -73,6 +77,15 @@ function normalizeReadFileBytes(value: unknown): Uint8Array | undefined {
 						? Math.max(0, Math.floor(objectValue.byteLength))
 						: undefined;
 				return typeof requestedLength === 'number' ? nested.slice(0, requestedLength) : nested;
+			}
+
+			if (
+				objectValue.buffer &&
+				typeof objectValue.buffer === 'object' &&
+				!Array.isArray(objectValue.buffer) &&
+				Object.keys(objectValue.buffer as Record<string, unknown>).length === 0
+			) {
+				return new Uint8Array(0);
 			}
 		}
 
@@ -326,8 +339,17 @@ export class DiskFileSystemProviderClient extends Disposable implements
 			return normalized;
 		}
 
+		let payloadSummary = `type=${typeof result}`;
+		if (Array.isArray(result)) {
+			payloadSummary = `array(length=${result.length})`;
+		} else if (result && typeof result === 'object') {
+			payloadSummary = `object(keys=${Object.keys(result as Record<string, unknown>).join(',')})`;
+		} else if (typeof result === 'string') {
+			payloadSummary = `string(length=${result.length})`;
+		}
+
 		throw createFileSystemProviderError(
-			`Invalid readFile payload for ${resource.toString()}`,
+			`Invalid readFile payload for ${resource.toString()} (${payloadSummary})`,
 			FileSystemProviderErrorCode.Unknown
 		);
 	}

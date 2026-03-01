@@ -205,8 +205,12 @@ function toUint8Array(value: unknown): Uint8Array | undefined {
 }
 
 function decodeBase64ToUint8Array(value: unknown): Uint8Array | undefined {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (typeof value !== 'string') {
     return undefined;
+  }
+
+  if (value.length === 0) {
+    return new Uint8Array(0);
   }
 
   try {

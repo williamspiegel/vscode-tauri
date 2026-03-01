@@ -425,6 +425,8 @@ function registerEditorGroupsLayoutCommands(): void {
 
 function registerOpenEditorAPICommands(): void {
 	const dirtyEditorSettleAttempts = 100;
+	const editorOpenSettleAttempts = 100;
+	const editorChangeSettleTimeout = 250;
 
 	async function waitForDirtyEditorInput(editorPane: IEditorPane | undefined): Promise<void> {
 		for (let attempt = 0; attempt < dirtyEditorSettleAttempts; attempt++) {
@@ -433,6 +435,62 @@ function registerOpenEditorAPICommands(): void {
 			}
 
 			await timeout(50);
+		}
+	}
+
+	async function waitForEditorGroupInput(editorGroup: IEditorGroup | undefined, editorPane: IEditorPane | undefined): Promise<void> {
+		const expectedInput = editorPane?.input;
+
+		for (let attempt = 0; attempt < editorOpenSettleAttempts; attempt++) {
+			if (editorGroup?.activeEditor && (!expectedInput || editorGroup.activeEditor === expectedInput)) {
+				return;
+			}
+
+			await timeout(50);
+		}
+	}
+
+	async function waitForNextEditorChange(editorService: IEditorService): Promise<void> {
+		let resolved = false;
+		let resolvePromise: (() => void) | undefined;
+		const eventPromise = new Promise<void>(resolve => {
+			resolvePromise = resolve;
+		});
+		const listener = editorService.onDidEditorsChange(() => {
+			if (!resolved) {
+				resolved = true;
+				listener.dispose();
+				resolvePromise?.();
+			}
+		});
+
+		await Promise.race([eventPromise, timeout(editorChangeSettleTimeout)]);
+
+		if (!resolved) {
+			resolved = true;
+			listener.dispose();
+		}
+	}
+
+	async function waitForNextGroupAdd(editorGroupsService: IEditorGroupsService): Promise<void> {
+		let resolved = false;
+		let resolvePromise: (() => void) | undefined;
+		const eventPromise = new Promise<void>(resolve => {
+			resolvePromise = resolve;
+		});
+		const listener = editorGroupsService.onDidAddGroup(() => {
+			if (!resolved) {
+				resolved = true;
+				listener.dispose();
+				resolvePromise?.();
+			}
+		});
+
+		await Promise.race([eventPromise, timeout(editorChangeSettleTimeout)]);
+
+		if (!resolved) {
+			resolved = true;
+			listener.dispose();
 		}
 	}
 
@@ -461,7 +519,7 @@ function registerOpenEditorAPICommands(): void {
 			}
 
 			await accessor.get(ICommandService).executeCommand(API_OPEN_EDITOR_COMMAND_ID, resourceArg, normalizedColumnAndOptions, label);
-			await timeout(0);
+			await timeout(50);
 		},
 		metadata: {
 			description: 'Opens the provided resource in the editor.',
@@ -501,10 +559,21 @@ function registerOpenEditorAPICommands(): void {
 				input = { resource: openResource, options, label };
 			}
 
-			const editorPane = await editorService.openEditor(input, columnToEditorGroup(editorGroupsService, configurationService, column));
+			const needsNewGroup = typeof column === 'number' && column >= 0 && !editorGroupsService.getGroups(GroupsOrder.GRID_APPEARANCE)[column];
+			const editorChange = waitForNextEditorChange(editorService);
+			const groupAdd = needsNewGroup ? waitForNextGroupAdd(editorGroupsService) : undefined;
+			const targetGroup = columnToEditorGroup(editorGroupsService, configurationService, column);
+			const editorPane = await editorService.openEditor(input, targetGroup);
+			const editorGroup = (editorPane as IEditorPane | undefined)?.group
+				?? (typeof column === 'number' ? editorGroupsService.getGroups(GroupsOrder.GRID_APPEARANCE)[column] : undefined);
+			await editorChange;
+			if (groupAdd) {
+				await groupAdd;
+			}
 			if (untitledTextEditorService.isUntitledWithAssociatedResource(resource)) {
 				await waitForDirtyEditorInput(editorPane);
 			}
+			await waitForEditorGroupInput(editorGroup, editorPane);
 			if (matchesScheme(resource, Schemas.vscodeNotebookCell)) {
 				await timeout(100);
 			}

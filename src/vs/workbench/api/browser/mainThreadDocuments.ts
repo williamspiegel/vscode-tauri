@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { toErrorMessage } from '../../../base/common/errorMessage.js';
+import { timeout } from '../../../base/common/async.js';
 import { IReference, dispose, Disposable } from '../../../base/common/lifecycle.js';
 import { Schemas } from '../../../base/common/network.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
@@ -124,6 +125,8 @@ class ModelTracker extends Disposable {
 }
 
 export class MainThreadDocuments extends Disposable implements MainThreadDocumentsShape {
+	private static readonly _modelTrackerSettleAttempts = 100;
+	private static readonly _modelReferenceRetryAttempts = 100;
 
 	private _onIsCaughtUpWithContentChanges = this._store.add(new Emitter<URI>());
 	readonly onIsCaughtUpWithContentChanges = this._onIsCaughtUpWithContentChanges.event;
@@ -263,11 +266,23 @@ export class MainThreadDocuments extends Disposable implements MainThreadDocumen
 			throw new ErrorNoTelemetry(`cannot open ${canonicalUri.toString()}`);
 		} else if (!extUri.isEqual(documentUri, canonicalUri)) {
 			throw new ErrorNoTelemetry(`cannot open ${canonicalUri.toString()}. Detail: Actual document opened as ${documentUri.toString()}`);
-		} else if (!this._modelTrackers.has(canonicalUri)) {
+		} else if (!(await this._waitForModelTracker(canonicalUri))) {
 			throw new ErrorNoTelemetry(`cannot open ${canonicalUri.toString()}. Detail: Files above 50MB cannot be synchronized with extensions.`);
 		} else {
 			return canonicalUri;
 		}
+	}
+
+	private async _waitForModelTracker(resource: URI): Promise<boolean> {
+		for (let attempt = 0; attempt < MainThreadDocuments._modelTrackerSettleAttempts; attempt++) {
+			if (this._modelTrackers.has(resource)) {
+				return true;
+			}
+
+			await timeout(10);
+		}
+
+		return false;
 	}
 
 	$tryCreateDocument(options?: { language?: string; content?: string; encoding?: string }): Promise<URI> {
@@ -283,7 +298,31 @@ export class MainThreadDocuments extends Disposable implements MainThreadDocumen
 			await model.setEncoding(options.encoding, EncodingMode.Decode);
 		}
 
-		const ref = await this._textModelResolverService.createModelReference(uri);
+		let ref: Awaited<ReturnType<ITextModelService['createModelReference']>> | undefined;
+		for (let attempt = 0; attempt < MainThreadDocuments._modelReferenceRetryAttempts; attempt++) {
+			try {
+				ref = await this._textModelResolverService.createModelReference(uri);
+				break;
+			} catch (error) {
+				const shouldRetry = uri.scheme === Schemas.file && await this._fileService.exists(uri) && attempt + 1 < MainThreadDocuments._modelReferenceRetryAttempts;
+				if (!shouldRetry) {
+					throw error;
+				}
+
+				await this._textFileService.files.resolve(uri, {
+					reason: TextFileResolveReason.REFERENCE,
+					reload: { async: false }
+				});
+				await timeout(10);
+			}
+		}
+
+		if (!ref) {
+			throw new ErrorNoTelemetry(`expected URI ${uri.toString()} to resolve to a text model`);
+		}
+		if (!this._modelTrackers.has(ref.object.textEditorModel.uri)) {
+			this.handleModelAdded(ref.object.textEditorModel);
+		}
 		this._modelReferenceCollection.add(uri, ref, ref.object.textEditorModel.getValueLength());
 		return ref.object.textEditorModel.uri;
 	}
@@ -310,6 +349,9 @@ export class MainThreadDocuments extends Disposable implements MainThreadDocumen
 		}
 		const resource = model.resource;
 		const ref = await this._textModelResolverService.createModelReference(resource);
+		if (!this._modelTrackers.has(resource)) {
+			this.handleModelAdded(ref.object.textEditorModel);
+		}
 		if (!this._modelTrackers.has(resource)) {
 			ref.dispose();
 			throw new Error(`expected URI ${resource.toString()} to have come to LIFE`);

@@ -695,7 +695,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		if (delta.value.addedEditors) {
 			for (const editorModelData of delta.value.addedEditors) {
 				if (this._editors.has(editorModelData.id)) {
-					return;
+					continue;
 				}
 
 				const revivedUri = URI.revive(editorModelData.documentUri);
@@ -739,6 +739,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			this._onDidChangeVisibleNotebookEditors.fire(this.visibleNotebookEditors);
 		}
 
+		let inferredActiveEditor = false;
 		if (delta.value.newActiveEditor === null) {
 			// clear active notebook as current active editor is non-notebook editor
 			this._activeNotebookEditor = undefined;
@@ -748,8 +749,26 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 				console.error(`FAILED to find active notebook editor ${delta.value.newActiveEditor}`);
 			}
 			this._activeNotebookEditor = this._editors.get(delta.value.newActiveEditor);
+		} else if (!this._activeNotebookEditor) {
+			const addedEditors = delta.value.addedEditors ?? [];
+			if (addedEditors.length === 1) {
+				const inferredEditor = this._editors.get(addedEditors[0].id);
+				if (inferredEditor) {
+					this._activeNotebookEditor = inferredEditor;
+					inferredActiveEditor = true;
+				}
+			} else if (addedEditors.length > 0 && this._visibleNotebookEditors.length === 1) {
+				this._activeNotebookEditor = this._visibleNotebookEditors[0];
+				inferredActiveEditor = true;
+			} else if (delta.value.visibleEditors?.length === 1) {
+				const inferredEditor = this._editors.get(delta.value.visibleEditors[0]);
+				if (inferredEditor) {
+					this._activeNotebookEditor = inferredEditor;
+					inferredActiveEditor = true;
+				}
+			}
 		}
-		if (delta.value.newActiveEditor !== undefined) {
+		if (delta.value.newActiveEditor !== undefined || inferredActiveEditor) {
 			this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor?.apiEditor);
 		}
 	}

@@ -17,6 +17,7 @@ set VSCODEAPITESTDIR=%TEMP%\vscode-api-tests-%RANDOM%-%TIME:~6,2%
 set VSCODECONFEDITDIR=%TEMP%\vscode-confedit-%RANDOM%-%TIME:~6,2%
 set VSCODEMARKDOWNDIR=%TEMP%\vscode-markdown-%RANDOM%-%TIME:~6,2%
 set VSCODEIPYNBDIR=%TEMP%\vscode-ipynb-%RANDOM%-%TIME:~6,2%
+set VSCODEGITDIR=%TEMP%\vscode-git-%RANDOM%-%TIME:~6,2%
 set VSCODECRASHDIR=%CD%\.build\crashes
 set VSCODELOGSDIR=%CD%\.build\logs\integration-tests
 if "%INTEGRATION_TEST_ELECTRON_PATH%"=="" set INTEGRATION_TEST_ELECTRON_PATH=.\scripts\code-tauri.bat
@@ -29,6 +30,7 @@ mkdir "%VSCODELOGSDIR%" >nul 2>nul
 mkdir "%VSCODEAPITESTDIR%" >nul 2>nul
 mkdir "%VSCODEMARKDOWNDIR%" >nul 2>nul
 mkdir "%VSCODEIPYNBDIR%" >nul 2>nul
+mkdir "%VSCODEGITDIR%" >nul 2>nul
 xcopy /E /I /Q /Y "%CD%\extensions\vscode-api-tests\testWorkspace" "%API_TEST_WORKSPACE_FOLDER%" >nul
 copy /Y "%CD%\extensions\vscode-api-tests\testworkspace.code-workspace" "%API_TEST_WORKSPACE_FILE%" >nul
 xcopy /E /I /Q /Y "%CD%\extensions\markdown-language-features\test-workspace" "%VSCODEMARKDOWNDIR%" >nul
@@ -71,7 +73,7 @@ if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 
 echo.
 echo ### Built-in extension integration suites for Tauri
-echo SKIP typescript/emmet/git: TODO https://github.com/microsoft/vscode/issues/244146
+echo SKIP typescript/emmet: TODO https://github.com/microsoft/vscode/issues/244146
 
 if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 	echo.
@@ -107,6 +109,22 @@ if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 
 if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
 	echo.
+	echo ### Git tests
+	call .\node_modules\.bin\tsc.cmd -p "%CD%\extensions\git\tsconfig.json"
+	if !errorlevel! neq 0 exit /b !errorlevel!
+
+	call "%INTEGRATION_TEST_ELECTRON_PATH%" "%VSCODEGITDIR%" --extensionDevelopmentPath=%CD%\extensions\git --extensionTestsPath=%CD%\extensions\git\out\test %API_TESTS_EXTRA_ARGS% %*
+	if !errorlevel! neq 0 exit /b !errorlevel!
+
+	if not "%INTEGRATION_TEST_APP_NAME%"=="" (
+		killall "%INTEGRATION_TEST_APP_NAME%" >nul 2>nul
+	)
+) else (
+	echo SKIP git: TODO https://github.com/microsoft/vscode/issues/244146 ^(set VSCODE_TAURI_RUN_API_INTEGRATION=1 to execute^)
+)
+
+if "%VSCODE_TAURI_RUN_API_INTEGRATION%"=="1" (
+	echo.
 	echo ### Configuration editing tests
 	call .\node_modules\.bin\tsc.cmd -p "%CD%\extensions\configuration-editing\tsconfig.json"
 	if !errorlevel! neq 0 exit /b !errorlevel!
@@ -127,3 +145,4 @@ rmdir /s /q %VSCODEAPITESTDIR% >nul 2>nul
 rmdir /s /q %VSCODECONFEDITDIR% >nul 2>nul
 rmdir /s /q %VSCODEMARKDOWNDIR% >nul 2>nul
 rmdir /s /q %VSCODEIPYNBDIR% >nul 2>nul
+rmdir /s /q %VSCODEGITDIR% >nul 2>nul
