@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ok } from '../../../base/common/assert.js';
+import { timeout } from '../../../base/common/async.js';
 import { ReadonlyError, illegalArgument } from '../../../base/common/errors.js';
 import { IdGenerator } from '../../../base/common/idGenerator.js';
 import { TextEditorCursorStyle } from '../../../editor/common/config/editorOptions.js';
@@ -35,6 +36,9 @@ export class TextEditorDecorationType {
 	}
 
 }
+
+const _snippetSettleAttempts = 200;
+const _snippetSettleDelay = 10;
 
 export interface ITextEditOperation {
 	range: vscode.Range;
@@ -527,7 +531,19 @@ export class ExtHostTextEditor {
 				if (options.keepWhitespace === undefined) {
 					options.keepWhitespace = false;
 				}
-				return _proxy.$tryInsertSnippet(id, document.value.version, snippet.value, ranges, options);
+				const initialVersion = document.value.version;
+				return _proxy.$tryInsertSnippet(id, initialVersion, snippet.value, ranges, options).then(async inserted => {
+					if (!inserted) {
+						return false;
+					}
+					for (let attempt = 0; attempt < _snippetSettleAttempts; attempt++) {
+						if (document.value.version > initialVersion) {
+							return true;
+						}
+						await timeout(_snippetSettleDelay);
+					}
+					return document.value.version > initialVersion;
+				});
 			},
 			setDecorations(decorationType: vscode.TextEditorDecorationType, ranges: Range[] | vscode.DecorationOptions[]): void {
 				const willBeEmpty = (ranges.length === 0);

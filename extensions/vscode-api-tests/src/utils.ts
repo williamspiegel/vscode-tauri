@@ -47,8 +47,14 @@ export function pathEquals(path1: string, path2: string): boolean {
 }
 
 const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
+const revertAndCloseAllEditorsCommand = '_workbench.revertAndCloseAllEditors';
 
 export async function closeAllEditors(): Promise<void> {
+	if (isTauriIntegration) {
+		await vscode.commands.executeCommand('_workbench.revertAllDirty');
+		await vscode.commands.executeCommand(revertAndCloseAllEditorsCommand);
+	}
+
 	await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 
 	if (!isTauriIntegration) {
@@ -56,11 +62,27 @@ export async function closeAllEditors(): Promise<void> {
 	}
 
 	await poll(
-		() => {
+		async () => {
 			const openTabs = vscode.window.tabGroups.all.reduce((count, group) => count + group.tabs.length, 0);
 			const activeNotebookEditor = vscode.window.activeNotebookEditor;
 			if (openTabs === 0 && !activeNotebookEditor) {
-				return Promise.resolve(true);
+				return true;
+			}
+
+			if (openTabs > 0 || activeNotebookEditor) {
+				await vscode.commands.executeCommand('_workbench.revertAllDirty');
+				await vscode.commands.executeCommand(revertAndCloseAllEditorsCommand);
+				await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+				await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+				await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				const visibleTabs = vscode.window.tabGroups.all.flatMap(group => group.tabs);
+				if (visibleTabs.length > 0) {
+					await vscode.window.tabGroups.close(visibleTabs, false);
+				}
+				const visibleGroups = vscode.window.tabGroups.all.filter(group => group.tabs.length > 0);
+				if (visibleGroups.length > 0) {
+					await vscode.window.tabGroups.close(visibleGroups, false);
+				}
 			}
 
 			const activeTextEditor = vscode.window.activeTextEditor;

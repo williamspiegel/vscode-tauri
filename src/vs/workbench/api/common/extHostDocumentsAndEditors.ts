@@ -181,8 +181,8 @@ export class ExtHostDocumentsAndEditors implements ExtHostDocumentsAndEditorsSha
 		return this._editors.get(id);
 	}
 
-	adoptActiveEditor(id: string): void {
-		if (!this._editors.has(id) || this._activeEditorId === id) {
+	adoptActiveEditor(id: string, force = false): void {
+		if (!this._editors.has(id) || (!force && this._activeEditorId === id)) {
 			return;
 		}
 

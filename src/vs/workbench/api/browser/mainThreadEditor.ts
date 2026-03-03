@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { timeout } from '../../../base/common/async.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { DisposableStore } from '../../../base/common/lifecycle.js';
 import { getCodeEditor, ICodeEditor } from '../../../editor/browser/editorBrowser.js';
@@ -543,8 +544,26 @@ export class MainThreadTextEditor {
 
 		this._codeEditor.focus();
 
-		// make modifications as snippet edit
-		const edits: ISnippetEdit[] = ranges.map(range => ({ range: Range.lift(range), template }));
+		// When the ext host hasn't observed the initial selection yet, it can send an
+		// empty range list for "insert at current cursor". Fall back to the live editor
+		// selections instead of treating that as a successful no-op.
+		const model = this._codeEditor.getModel();
+		const initialVersionId = model.getVersionId();
+		const effectiveRanges = ranges.length > 0
+			? ranges.map(range => Range.lift(range))
+			: (this._codeEditor.getSelections() ?? []);
+		const edits: ISnippetEdit[] = effectiveRanges.map(range => ({ range, template }));
+		if (edits.length === 0) {
+			return false;
+		}
+		let resolveContentChange: (() => void) | undefined;
+		const contentChangePromise = new Promise<void>(resolve => {
+			resolveContentChange = resolve;
+		});
+		const contentChangeListener = model.onDidChangeContent(() => {
+			contentChangeListener.dispose();
+			resolveContentChange?.();
+		});
 		snippetController.apply(edits, {
 			overwriteBefore: 0, overwriteAfter: 0,
 			undoStopBefore: opts.undoStopBefore, undoStopAfter: opts.undoStopAfter,
@@ -552,6 +571,31 @@ export class MainThreadTextEditor {
 			clipboardText
 		});
 
-		return true;
+		if (this._codeEditor.hasModel() && this._codeEditor.getModel().getVersionId() === initialVersionId) {
+			await Promise.race([contentChangePromise, timeout(1500)]);
+		}
+		contentChangeListener.dispose();
+
+		if (this._codeEditor.hasModel() && this._codeEditor.getModel().getVersionId() === initialVersionId) {
+			const fallbackText = SnippetParser.asInsertText(template);
+			if (fallbackText.length > 0) {
+				if (opts.undoStopBefore) {
+					this._codeEditor.pushUndoStop();
+				}
+				this._codeEditor.executeEdits(
+					'MainThreadTextEditor#insertSnippetFallback',
+					effectiveRanges.map((range): ISingleEditOperation => ({
+						range,
+						text: fallbackText,
+						forceMoveMarkers: true
+					}))
+				);
+				if (opts.undoStopAfter) {
+					this._codeEditor.pushUndoStop();
+				}
+			}
+		}
+
+		return this._codeEditor.hasModel() && this._codeEditor.getModel().getVersionId() !== initialVersionId;
 	}
 }

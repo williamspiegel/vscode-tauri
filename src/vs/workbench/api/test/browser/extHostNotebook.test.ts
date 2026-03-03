@@ -478,6 +478,49 @@ suite('NotebookCell#Document', function () {
 		assert.strictEqual(count, 1);
 	});
 
+	test('infers the active split notebook editor from the active notebook-cell text editor view column', function () {
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
+		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
+
+		let count = 0;
+		disposables.add(extHostNotebooks.onDidChangeActiveNotebookEditor(() => count += 1));
+
+		extHostDocumentsAndEditors.$acceptDocumentsAndEditorsDelta({
+			addedEditors: [{
+				id: '_text_editor_99',
+				documentUri: notebook.apiNotebook.cellAt(0).document.uri,
+				options: {
+					tabSize: 4,
+					indentSize: 4,
+					originalIndentSize: 4,
+					insertSpaces: true,
+					cursorStyle: 1,
+					lineNumbers: 1
+				},
+				selections: [],
+				visibleRanges: [],
+				editorPosition: vscode.ViewColumn.Two
+			}],
+			newActiveEditor: '_text_editor_99'
+		});
+
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({
+			addedEditors: [{
+				documentUri: notebookUri,
+				id: '_notebook_editor_99',
+				selections: [{ start: 0, end: 1 }],
+				visibleRanges: [],
+				viewColumn: vscode.ViewColumn.Two,
+				viewType: 'test'
+			}],
+			visibleEditors: ['_notebook_editor_0', '_notebook_editor_99']
+		}));
+
+		assert.ok(extHostNotebooks.activeNotebookEditor);
+		assert.strictEqual(extHostNotebooks.getIdByEditor(extHostNotebooks.activeNotebookEditor!), '_notebook_editor_99');
+		assert.strictEqual(count, 1);
+	});
+
 	test('infers active notebook editor from an active text editor whose resource matches the notebook uri', function () {
 		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
 		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
@@ -520,6 +563,51 @@ suite('NotebookCell#Document', function () {
 		assert.ok(extHostNotebooks.activeNotebookEditor);
 		assert.strictEqual(extHostNotebooks.getIdByEditor(extHostNotebooks.activeNotebookEditor!), '_notebook_editor_0');
 		assert.strictEqual(count, 1);
+	});
+
+	test('falls back to the active text editor when notebook active-editor delta references an unknown id', function () {
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
+		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
+
+		extHostDocumentsAndEditors.$acceptDocumentsAndEditorsDelta({
+			addedEditors: [{
+				id: '_text_editor_unknown-active',
+				documentUri: notebook.apiNotebook.cellAt(0).document.uri,
+				options: {
+					tabSize: 4,
+					indentSize: 4,
+					originalIndentSize: 4,
+					insertSpaces: true,
+					cursorStyle: 1,
+					lineNumbers: 1
+				},
+				selections: [],
+				visibleRanges: [],
+				editorPosition: undefined
+			}],
+			newActiveEditor: '_text_editor_unknown-active'
+		});
+
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({
+			visibleEditors: ['_notebook_editor_0'],
+			newActiveEditor: '_notebook_editor_missing'
+		}));
+
+		assert.ok(extHostNotebooks.activeNotebookEditor);
+		assert.strictEqual(extHostNotebooks.getIdByEditor(extHostNotebooks.activeNotebookEditor!), '_notebook_editor_0');
+	});
+
+	test('falls back to the sole visible notebook editor when notebook active-editor delta references an unknown id', function () {
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({ newActiveEditor: null }));
+		assert.strictEqual(extHostNotebooks.activeNotebookEditor, undefined);
+
+		extHostNotebooks.$acceptDocumentAndEditorsDelta(new SerializableObjectWithBuffers({
+			visibleEditors: ['_notebook_editor_0'],
+			newActiveEditor: '_notebook_editor_missing'
+		}));
+
+		assert.ok(extHostNotebooks.activeNotebookEditor);
+		assert.strictEqual(extHostNotebooks.getIdByEditor(extHostNotebooks.activeNotebookEditor!), '_notebook_editor_0');
 	});
 
 	test('unset active notebook editor', function () {

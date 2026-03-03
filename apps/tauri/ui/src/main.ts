@@ -1237,10 +1237,11 @@ function installGlobalStartupErrorHandlers(): void {
 				);
 			}
 		}
-		const message =
-			detailParts.length > 0 ? detailParts.join("\n") : "Unknown window error";
-		setStatus(`Startup failed:\n${message}`, "error", true);
-		void reportStartupFailureToHost(message).finally(() =>
+		const [message = "Unknown window error", ...detailLines] = detailParts;
+		const detail = detailLines.length > 0 ? detailLines.join("\n") : undefined;
+		const statusDetail = detail ? `\n${detail}` : "";
+		setStatus(`Startup failed:\n${message}${statusDetail}`, "error", true);
+		void reportStartupFailureToHost(message, detail).finally(() =>
 			closeWindowAfterStartupFailure(),
 		);
 	});
@@ -1276,8 +1277,11 @@ function installGlobalStartupErrorHandlers(): void {
 				);
 			}
 		}
-		setStatus(`Startup failed:\n${message}`, "error", true);
-		void reportStartupFailureToHost(detailParts.join("\n")).finally(() =>
+		const [, ...detailLines] = detailParts;
+		const detail = detailLines.length > 0 ? detailLines.join("\n") : undefined;
+		const statusDetail = detail ? `\n${detail}` : "";
+		setStatus(`Startup failed:\n${message}${statusDetail}`, "error", true);
+		void reportStartupFailureToHost(message, detail).finally(() =>
 			closeWindowAfterStartupFailure(),
 		);
 	});
@@ -1419,7 +1423,10 @@ function installAutomationWindowHooks(
 	};
 }
 
-async function reportStartupFailureToHost(message: string): Promise<void> {
+async function reportStartupFailureToHost(
+	message: string,
+	detail?: string,
+): Promise<void> {
 	if (!startupHost) {
 		return;
 	}
@@ -1429,11 +1436,13 @@ async function reportStartupFailureToHost(message: string): Promise<void> {
 			level: "error",
 			source: "ui.startup",
 			message,
+			detail,
 		});
 	} catch (error) {
 		console.warn("[startup.log] failed to report startup failure to host", {
 			error,
 			message,
+			detail,
 		});
 	}
 }
@@ -1902,11 +1911,15 @@ main().catch((error) => {
 		error instanceof Error
 			? error.message || error.stack || String(error)
 			: String(error);
+	const detail =
+		error instanceof Error && error.stack && error.stack !== message
+			? error.stack
+			: undefined;
 	setStatus(`Startup failed:\n${message}`, "error", true);
 	console.error(error);
 	const shouldCloseWindow = shouldFailFastOnStartupFailure();
 	startupPhaseActive = false;
-	void reportStartupFailureToHost(message).finally(async () => {
+	void reportStartupFailureToHost(message, detail).finally(async () => {
 		if (!shouldCloseWindow || !startupHost) {
 			return;
 		}

@@ -12,7 +12,7 @@ import { NullLogService } from '../../../../platform/log/common/log.js';
 import { IResolvedTextEditorConfiguration, ITextEditorConfigurationUpdate, MainThreadTextEditorsShape } from '../../common/extHost.protocol.js';
 import { ExtHostDocumentData } from '../../common/extHostDocumentData.js';
 import { ExtHostTextEditor, ExtHostTextEditorOptions } from '../../common/extHostTextEditor.js';
-import { Range, TextEditorLineNumbersStyle } from '../../common/extHostTypes.js';
+import { Range, SnippetString, TextEditorLineNumbersStyle } from '../../common/extHostTypes.js';
 
 suite('ExtHostTextEditor', () => {
 
@@ -59,6 +59,41 @@ suite('ExtHostTextEditor', () => {
 
 		await editor.value.edit(edit => { edit.delete(new Range(0, 0, 1, 1)); });
 		assert.strictEqual(applyCount, 2);
+	});
+
+	test('insertSnippet waits for the document version to update', async function () {
+		const testDoc = new ExtHostDocumentData(undefined!, URI.file('/insert-snippet.txt'), [
+			''
+		], '\n', 1, 'text', false, 'utf8');
+		const editor = new ExtHostTextEditor('edt1',
+			new class extends mock<MainThreadTextEditorsShape>() {
+				override $tryInsertSnippet(): Promise<boolean> {
+					queueMicrotask(() => {
+						testDoc.onEvents({
+							changes: [{
+								range: {
+									startLineNumber: 1,
+									startColumn: 1,
+									endLineNumber: 1,
+									endColumn: 1
+								},
+								rangeLength: 0,
+								text: 'This is a placeholder snippet'
+							}],
+							eol: '\n',
+							versionId: 2
+						});
+						testDoc._acceptIsDirty(true);
+					});
+					return Promise.resolve(true);
+				}
+			}, new NullLogService(), new Lazy(() => testDoc.document), [], { cursorStyle: TextEditorCursorStyle.Line, insertSpaces: true, lineNumbers: 1, tabSize: 4, indentSize: 4, originalIndentSize: 'tabSize' }, [], 1);
+
+		const inserted = await editor.value.insertSnippet(new SnippetString('This is a placeholder snippet'));
+		assert.strictEqual(inserted, true);
+		assert.strictEqual(testDoc.document.version, 2);
+		assert.strictEqual(testDoc.document.getText(), 'This is a placeholder snippet');
+		assert.strictEqual(testDoc.document.isDirty, true);
 	});
 
 	ensureNoDisposablesAreLeakedInTestSuite();

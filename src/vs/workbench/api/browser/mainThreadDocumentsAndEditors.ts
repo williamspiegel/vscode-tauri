@@ -108,6 +108,12 @@ class DocumentAndEditorState {
 	}
 }
 
+let activeMainThreadEditorLocator: IMainThreadEditorLocator | undefined;
+
+export function getMainThreadEditorLocator(): IMainThreadEditorLocator | undefined {
+	return activeMainThreadEditorLocator;
+}
+
 const enum ActiveEditorOrder {
 	Editor, Panel
 }
@@ -119,6 +125,7 @@ class MainThreadDocumentAndEditorStateComputer {
 	private readonly _toDisposeOnGroupModelChange = new DisposableMap<number>();
 	private _currentState?: DocumentAndEditorState;
 	private _activeEditorOrder: ActiveEditorOrder = ActiveEditorOrder.Editor;
+	private _activeEditorResyncHandle: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		private readonly _onDidChangeState: (delta: DocumentAndEditorStateDelta) => void,
@@ -151,6 +158,10 @@ class MainThreadDocumentAndEditorStateComputer {
 	}
 
 	dispose(): void {
+		if (this._activeEditorResyncHandle) {
+			clearTimeout(this._activeEditorResyncHandle);
+			this._activeEditorResyncHandle = undefined;
+		}
 		this._toDispose.dispose();
 		this._toDisposeOnEditorRemove.dispose();
 		this._toDisposeOnGroupModelChange.dispose();
@@ -228,9 +239,10 @@ class MainThreadDocumentAndEditorStateComputer {
 		}
 		const activeEditorPane = this._editorService.activeEditorPane;
 		const hasActiveEditorPaneInput = !!activeEditorPane?.input && activeEditorPane.group.count > 0 && activeEditorPane.group.contains(activeEditorPane.input);
+		const hasWorkbenchActiveEditor = !!this._editorService.activeEditor;
 		const activeCodeEditor = getCodeEditor(this._editorService.activeTextEditorControl);
 		if (activeCodeEditor && !visiblePaneCodeEditors.has(activeCodeEditor)) {
-			const shouldTrackActiveCodeEditor = hasActiveEditorPaneInput || activeCodeEditor.hasTextFocus() || activeCodeEditor.hasWidgetFocus();
+			const shouldTrackActiveCodeEditor = hasActiveEditorPaneInput || hasWorkbenchActiveEditor || activeCodeEditor.hasTextFocus() || activeCodeEditor.hasWidgetFocus();
 			if (shouldTrackActiveCodeEditor) {
 				visiblePaneCodeEditors.add(activeCodeEditor);
 				if (!candidateEditors.includes(activeCodeEditor)) {
@@ -315,6 +327,21 @@ class MainThreadDocumentAndEditorStateComputer {
 			this._currentState = newState;
 			this._onDidChangeState(delta);
 		}
+
+		if (hasWorkbenchActiveEditor && activeCodeEditor?.hasModel() && ![...editors.values()].some(snapshot => snapshot.editor === activeCodeEditor)) {
+			this._scheduleActiveEditorResync();
+		}
+	}
+
+	private _scheduleActiveEditorResync(): void {
+		if (this._activeEditorResyncHandle) {
+			return;
+		}
+
+		this._activeEditorResyncHandle = setTimeout(() => {
+			this._activeEditorResyncHandle = undefined;
+			this._updateState();
+		}, 0);
 	}
 
 	private _getActiveEditorFromPanel(): IEditor | undefined {
@@ -370,6 +397,7 @@ export class MainThreadDocumentsAndEditors implements IMainThreadEditorLocator {
 		@IQuickDiffModelService quickDiffModelService: IQuickDiffModelService,
 		@INotebookService notebookService: INotebookService
 	) {
+		activeMainThreadEditorLocator = this;
 		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostDocumentsAndEditors);
 
 		this._mainThreadDocuments = this._toDispose.add(new MainThreadDocuments(extHostContext, this._modelService, this._textFileService, fileService, textModelResolverService, environmentService, uriIdentityService, workingCopyFileService, pathService));
@@ -383,6 +411,9 @@ export class MainThreadDocumentsAndEditors implements IMainThreadEditorLocator {
 	}
 
 	dispose(): void {
+		if (activeMainThreadEditorLocator === this) {
+			activeMainThreadEditorLocator = undefined;
+		}
 		this._toDispose.dispose();
 	}
 
@@ -566,7 +597,11 @@ export class MainThreadDocumentsAndEditors implements IMainThreadEditorLocator {
 		if (needsDocumentSync) {
 			extHostDelta.addedDocuments = [this._toModelAddData(model)];
 		}
-		if (this._editorService.activeEditorPane && mainThreadEditor.matches(this._editorService.activeEditorPane)) {
+		const activeTextEditorControl = getCodeEditor(this._editorService.activeTextEditorControl);
+		if (
+			(this._editorService.activeEditorPane && mainThreadEditor.matches(this._editorService.activeEditorPane)) ||
+			activeTextEditorControl === codeEditor
+		) {
 			extHostDelta.newActiveEditor = id;
 		}
 

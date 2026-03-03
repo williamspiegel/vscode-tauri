@@ -93,8 +93,8 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		if (editor) {
 			if (!options.preserveFocus) {
 				const activeEditorReady = await this._waitForActiveEditor(document.uri);
-				if (!activeEditorReady) {
-					this._extHostDocumentsAndEditors.adoptActiveEditor(editor.id);
+				if (document.uri.scheme === Schemas.vscodeNotebookCell || !activeEditorReady) {
+					this._extHostDocumentsAndEditors.adoptActiveEditor(editor.id, document.uri.scheme === Schemas.vscodeNotebookCell);
 				}
 			}
 			if (document.uri.scheme === Schemas.vscodeNotebookCell) {
@@ -107,15 +107,16 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 			if (editorByResource) {
 				if (!options.preserveFocus) {
 					const activeEditorReady = await this._waitForActiveEditor(document.uri);
-					if (!activeEditorReady) {
-						this._extHostDocumentsAndEditors.adoptActiveEditor(editorByResource.id);
+					if (document.uri.scheme === Schemas.vscodeNotebookCell || !activeEditorReady) {
+						this._extHostDocumentsAndEditors.adoptActiveEditor(editorByResource.id, document.uri.scheme === Schemas.vscodeNotebookCell);
 					}
 				}
 				return editorByResource.value;
 			}
 
 			const activeEditor = this._extHostDocumentsAndEditors.activeEditor(true);
-			if (activeEditor && this._matchesRequestedResource(activeEditor.document.uri, document.uri)) {
+			const activeEditorResource = this._getEditorResource(activeEditor);
+			if (activeEditorResource && this._matchesRequestedResource(activeEditorResource, document.uri)) {
 				return activeEditor.value;
 			}
 		}
@@ -162,7 +163,8 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 	private async _waitForActiveEditor(resource: URI): Promise<boolean> {
 		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
 			const activeEditor = this._extHostDocumentsAndEditors.activeEditor(true);
-			if (activeEditor && this._matchesRequestedResource(activeEditor.document.uri, resource)) {
+			const activeEditorResource = this._getEditorResource(activeEditor);
+			if (activeEditorResource && this._matchesRequestedResource(activeEditorResource, resource)) {
 				return true;
 			}
 
@@ -175,7 +177,8 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 	private _getVisibleEditorIdsForResource(resource: URI): Set<string> {
 		const ids = new Set<string>();
 		for (const editor of this.getVisibleTextEditors(true)) {
-			if (editor.document && this._matchesRequestedResource(editor.document.uri, resource)) {
+			const editorResource = this._getEditorResource(editor);
+			if (editorResource && this._matchesRequestedResource(editorResource, resource)) {
 				ids.add(editor.id);
 			}
 		}
@@ -183,7 +186,10 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 	}
 
 	private _findNewVisibleEditorByResource(resource: URI, existingEditorIds: ReadonlySet<string>): ExtHostTextEditor | undefined {
-		const matches = this.getVisibleTextEditors(true).filter(candidate => candidate.document && this._matchesRequestedResource(candidate.document.uri, resource));
+		const matches = this.getVisibleTextEditors(true).filter(candidate => {
+			const candidateResource = this._getEditorResource(candidate);
+			return !!candidateResource && this._matchesRequestedResource(candidateResource, resource);
+		});
 		if (matches.length === 0) {
 			return undefined;
 		}
@@ -198,6 +204,18 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 
 		return undefined;
+	}
+
+	private _getEditorResource(editor: ExtHostTextEditor | undefined): URI | undefined {
+		if (!editor) {
+			return undefined;
+		}
+
+		try {
+			return editor.value.document.uri;
+		} catch {
+			return undefined;
+		}
 	}
 
 	private _matchesRequestedResource(candidate: URI, requested: URI): boolean {

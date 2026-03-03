@@ -182,8 +182,15 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 	}
 
 	private _syncActiveNotebookEditorFromActiveTextEditor(activeTextEditor: vscode.TextEditor | undefined): void {
-		const activeTextEditorUri = activeTextEditor?.document.uri;
+		const activeTextEditorUri = activeTextEditor?.document?.uri;
 		if (!activeTextEditorUri) {
+			if (this._visibleNotebookEditors.length === 1) {
+				const [soleVisibleEditor] = this._visibleNotebookEditors;
+				if (soleVisibleEditor && this._activeNotebookEditor?.id !== soleVisibleEditor.id) {
+					this._activeNotebookEditor = soleVisibleEditor;
+					this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor.apiEditor);
+				}
+			}
 			return;
 		}
 
@@ -198,14 +205,100 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			return;
 		}
 
-		const inferredActiveNotebookEditor = this._visibleNotebookEditors.find(editor => isEqual(editor.notebookData.uri, notebookUri))
-			?? [...this._editors.values()].find(editor => isEqual(editor.notebookData.uri, notebookUri));
+		const inferredActiveNotebookEditor = this._findMatchingNotebookEditor(notebookUri, activeTextEditor.viewColumn);
+		if (!inferredActiveNotebookEditor) {
+			void this._waitAndSyncActiveNotebookEditor(notebookUri, activeTextEditor.viewColumn);
+			return;
+		}
+
 		if (!inferredActiveNotebookEditor || this._activeNotebookEditor?.id === inferredActiveNotebookEditor.id) {
 			return;
 		}
 
 		this._activeNotebookEditor = inferredActiveNotebookEditor;
 		this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor.apiEditor);
+	}
+
+	private _findMatchingNotebookEditor(notebookUri: URI, preferredViewColumn: vscode.ViewColumn | undefined): ExtHostNotebookEditor | undefined {
+		const visibleMatches = this._visibleNotebookEditors.filter(editor => isEqual(editor.notebookData.uri, notebookUri));
+		if (preferredViewColumn !== undefined) {
+			const visibleMatchByColumn = visibleMatches.find(editor => editor.apiEditor.viewColumn === preferredViewColumn);
+			if (visibleMatchByColumn) {
+				return visibleMatchByColumn;
+			}
+
+			for (const editor of this._editors.values()) {
+				if (isEqual(editor.notebookData.uri, notebookUri) && editor.apiEditor.viewColumn === preferredViewColumn) {
+					return editor;
+				}
+			}
+		}
+
+		if (visibleMatches.length > 0) {
+			return visibleMatches[0];
+		}
+
+		for (const editor of this._editors.values()) {
+			if (isEqual(editor.notebookData.uri, notebookUri)) {
+				return editor;
+			}
+		}
+
+		return undefined;
+	}
+
+	private async _waitAndSyncActiveNotebookEditor(notebookUri: URI, preferredViewColumn: vscode.ViewColumn | undefined): Promise<void> {
+		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
+			const activeTextEditor = this._textDocumentsAndEditors.activeEditor();
+			const activeTextEditorUri = activeTextEditor?.document?.uri;
+			const activeNotebookUri = activeTextEditorUri?.scheme === Schemas.vscodeNotebookCell
+				? parseNotebookCellUri(activeTextEditorUri)?.notebook
+				: activeTextEditorUri && this._documents.has(activeTextEditorUri)
+					? activeTextEditorUri
+					: undefined;
+
+			if (!activeNotebookUri || !isEqual(activeNotebookUri, notebookUri)) {
+				return;
+			}
+
+			const inferredActiveNotebookEditor = this._findMatchingNotebookEditor(notebookUri, activeTextEditor?.viewColumn ?? preferredViewColumn);
+			if (inferredActiveNotebookEditor) {
+				if (this._activeNotebookEditor?.id !== inferredActiveNotebookEditor.id) {
+					this._activeNotebookEditor = inferredActiveNotebookEditor;
+					this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor.apiEditor);
+				}
+				return;
+			}
+
+			await timeout(50);
+		}
+	}
+
+	private _inferActiveNotebookEditorFromDelta(delta: INotebookDocumentsAndEditorsDelta['value']): ExtHostNotebookEditor | undefined {
+		const addedEditors = delta.addedEditors ?? [];
+		if (addedEditors.length === 1) {
+			const inferredEditor = this._editors.get(addedEditors[0].id);
+			if (inferredEditor) {
+				return inferredEditor;
+			}
+		}
+
+		if (addedEditors.length > 0 && this._visibleNotebookEditors.length === 1) {
+			return this._visibleNotebookEditors[0];
+		}
+
+		if (delta.visibleEditors?.length === 1) {
+			const inferredEditor = this._editors.get(delta.visibleEditors[0]);
+			if (inferredEditor) {
+				return inferredEditor;
+			}
+		}
+
+		if (this._visibleNotebookEditors.length === 1) {
+			return this._visibleNotebookEditors[0];
+		}
+
+		return undefined;
 	}
 
 	registerNotebookCellStatusBarItemProvider(extension: IExtensionDescription, notebookType: string, provider: vscode.NotebookCellStatusBarItemProvider) {
@@ -247,6 +340,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 	}
 
 	async showNotebookDocument(notebook: vscode.NotebookDocument, options?: vscode.NotebookDocumentShowOptions): Promise<vscode.NotebookEditor> {
+		const existingMatchingEditorIds = this._getVisibleEditorIdsForResource(notebook.uri);
 		let resolvedOptions: INotebookDocumentShowOptions;
 		if (typeof options === 'object') {
 			resolvedOptions = {
@@ -269,12 +363,15 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 
 		const viewType = !!options?.asRepl ? 'repl' : notebook.notebookType;
 		const editorId = await this._notebookEditorsProxy.$tryShowNotebookDocument(notebook.uri, viewType, resolvedOptions);
-		const editor = editorId ? await this._waitForEditor(editorId) : undefined;
+		const editor = editorId ? await this._waitForEditor(editorId, notebook.uri, existingMatchingEditorIds) : undefined;
 
 		if (editor) {
 			if (!resolvedOptions.preserveFocus) {
+				const editorResource = this._editors.get(editorId)?.notebookData.uri ?? editor.notebook?.uri;
 				await this._waitForActiveEditor(editorId, editor);
-				await this._waitForNotebookTextEditor(editor.notebook.uri);
+				if (editorResource) {
+					await this._waitForNotebookTextEditor(editorResource);
+				}
 			}
 			return editor;
 		}
@@ -286,14 +383,47 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		}
 	}
 
-	private async _waitForEditor(editorId: string): Promise<vscode.NotebookEditor | undefined> {
+	private async _waitForEditor(editorId: string, resource: URI, existingEditorIds: ReadonlySet<string>): Promise<vscode.NotebookEditor | undefined> {
 		for (let attempt = 0; attempt < ExtHostNotebookController._editorSettleAttempts; attempt++) {
 			const editor = this._editors.get(editorId)?.apiEditor;
 			if (editor) {
 				return editor;
 			}
 
+			const editorByResource = this._findNewVisibleEditorByResource(resource, existingEditorIds);
+			if (editorByResource) {
+				return editorByResource.apiEditor;
+			}
+
 			await timeout(50);
+		}
+
+		return undefined;
+	}
+
+	private _getVisibleEditorIdsForResource(resource: URI): Set<string> {
+		const ids = new Set<string>();
+		for (const editor of this._visibleNotebookEditors) {
+			if (isEqual(editor.notebookData.uri, resource)) {
+				ids.add(editor.id);
+			}
+		}
+		return ids;
+	}
+
+	private _findNewVisibleEditorByResource(resource: URI, existingEditorIds: ReadonlySet<string>): ExtHostNotebookEditor | undefined {
+		const matches = this._visibleNotebookEditors.filter(editor => isEqual(editor.notebookData.uri, resource));
+		if (matches.length === 0) {
+			return undefined;
+		}
+
+		const newMatch = matches.find(editor => !existingEditorIds.has(editor.id));
+		if (newMatch) {
+			return newMatch;
+		}
+
+		if (existingEditorIds.size === 0 && matches.length === 1) {
+			return matches[0];
 		}
 
 		return undefined;
@@ -315,11 +445,11 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 
 	private async _waitForNotebookTextEditor(resource: URI): Promise<void> {
 		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
-			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebook.uri, resource)) {
+			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebookData.uri, resource)) {
 				return;
 			}
 
-			const activeTextEditorUri = this._textDocumentsAndEditors.activeEditor()?.document.uri;
+			const activeTextEditorUri = this._textDocumentsAndEditors.activeEditor()?.document?.uri;
 			if (activeTextEditorUri) {
 				if (isEqual(activeTextEditorUri, resource)) {
 					return;
@@ -810,25 +940,18 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			const activeEditor = this._editors.get(delta.value.newActiveEditor);
 			if (!activeEditor) {
 				console.error(`FAILED to find active notebook editor ${delta.value.newActiveEditor}`);
+				this._activeNotebookEditor = this._inferActiveNotebookEditorFromDelta(delta.value);
+			} else {
+				this._activeNotebookEditor = activeEditor;
 			}
-			this._activeNotebookEditor = this._editors.get(delta.value.newActiveEditor);
 		} else if (!this._activeNotebookEditor) {
-			const addedEditors = delta.value.addedEditors ?? [];
-			if (addedEditors.length === 1) {
-				const inferredEditor = this._editors.get(addedEditors[0].id);
-				if (inferredEditor) {
-					this._activeNotebookEditor = inferredEditor;
-				}
-			} else if (addedEditors.length > 0 && this._visibleNotebookEditors.length === 1) {
-				this._activeNotebookEditor = this._visibleNotebookEditors[0];
-			} else if (delta.value.visibleEditors?.length === 1) {
-				const inferredEditor = this._editors.get(delta.value.visibleEditors[0]);
-				if (inferredEditor) {
-					this._activeNotebookEditor = inferredEditor;
-				}
-			}
+			this._activeNotebookEditor = this._inferActiveNotebookEditorFromDelta(delta.value);
 		}
-		if (delta.value.newActiveEditor === undefined) {
+		if (
+			delta.value.newActiveEditor === undefined ||
+			delta.value.newActiveEditor === null ||
+			(delta.value.newActiveEditor !== undefined && !this._activeNotebookEditor)
+		) {
 			this._syncActiveNotebookEditorFromActiveTextEditor(this._textDocumentsAndEditors.activeEditor());
 		}
 		if (delta.value.newActiveEditor !== undefined || this._activeNotebookEditor?.id !== previousActiveNotebookEditorId) {

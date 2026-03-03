@@ -318,6 +318,39 @@ suite('MainThreadDocumentsAndEditors', () => {
 		model.dispose();
 	});
 
+	test('ensureTextEditorForCodeEditor marks nested active text editor controls as active', () => {
+		const model = createTextModel('test');
+		const editor = createTestCodeEditor(model, {
+			hasTextFocus: false,
+			serviceCollection: new ServiceCollection(
+				[ICodeEditorService, codeEditorService]
+			)
+		});
+		const nestedPane = {
+			input: {},
+			group: { count: 1, contains: () => true },
+			getControl: () => ({})
+		} as unknown as IEditorPane;
+		workbenchEditorService.activeEditor = nestedPane.input as never;
+		workbenchEditorService.activeEditorPane = nestedPane;
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.visibleEditorPanes = [nestedPane];
+
+		const instance = disposables.add(createMainThreadDocumentsAndEditors());
+
+		deltas.length = 0;
+		const id = instance.ensureTextEditorForCodeEditor(editor as unknown as ICodeEditor);
+
+		assert.ok(typeof id === 'string');
+		assert.strictEqual(deltas.length, 1);
+		const [delta] = deltas;
+		assert.strictEqual(delta.addedEditors?.length, 1);
+		assert.strictEqual(delta.newActiveEditor, id);
+
+		editor.dispose();
+		model.dispose();
+	});
+
 	test('ignores stale editor panes whose group no longer reports the input as active', () => {
 		const model = modelService.createModel('test', null);
 		const editor = myCreateTestCodeEditor(model);
@@ -335,6 +368,30 @@ suite('MainThreadDocumentsAndEditors', () => {
 		assert.strictEqual(delta.addedDocuments?.length, 1);
 		assert.strictEqual(delta.addedEditors, undefined);
 		assert.strictEqual(delta.newActiveEditor, undefined);
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('tracks active text editor controls when a workbench active editor exists but pane membership lags', () => {
+		const model = modelService.createModel('test', null);
+		const editor = myCreateTestCodeEditor(model);
+		const pendingInput = {};
+		const laggingPane = { input: pendingInput, group: { count: 0, contains: () => false }, getControl: () => editor } as unknown as IEditorPane;
+		workbenchEditorService.activeEditor = pendingInput as never;
+		workbenchEditorService.activeEditorPane = laggingPane;
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.visibleEditorPanes = [];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 2);
+		const [first, second] = deltas;
+		assert.strictEqual(first.addedDocuments?.length, 1);
+		assert.strictEqual(second.addedEditors?.length, 1);
+		assert.strictEqual(second.addedEditors?.[0].documentUri?.toString(), model.uri.toString());
+		assert.ok(typeof second.newActiveEditor === 'string');
 
 		editor.dispose();
 		model.dispose();

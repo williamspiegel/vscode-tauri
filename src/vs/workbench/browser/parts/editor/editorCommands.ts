@@ -142,6 +142,7 @@ export const NAVIGATE_MODAL_EDITOR_NEXT_COMMAND_ID = 'workbench.action.navigateM
 export const API_OPEN_EDITOR_COMMAND_ID = '_workbench.open';
 export const API_OPEN_DIFF_EDITOR_COMMAND_ID = '_workbench.diff';
 export const API_OPEN_WITH_EDITOR_COMMAND_ID = '_workbench.openWith';
+const REVERT_AND_CLOSE_ALL_EDITORS_COMMAND_ID = '_workbench.revertAndCloseAllEditors';
 
 export const EDITOR_CORE_NAVIGATION_COMMANDS = [
 	SPLIT_EDITOR,
@@ -446,6 +447,24 @@ function registerEditorGroupsLayoutCommands(): void {
 			returns: 'An editor layout object, in the same format as vscode.setEditorLayout'
 		}
 	});
+
+	CommandsRegistry.registerCommand(REVERT_AND_CLOSE_ALL_EDITORS_COMMAND_ID, async (accessor: ServicesAccessor) => {
+		const editorGroupsService = accessor.get(IEditorGroupsService);
+		const editorService = accessor.get(IEditorService);
+		for (const group of editorGroupsService.groups) {
+			for (const editor of [...group.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE)]) {
+				try {
+					await editorService.revert({ editor, groupId: group.id });
+				} catch {
+					await editorService.revert({ editor, groupId: group.id }, { soft: true });
+				}
+
+				await group.closeEditor(editor);
+			}
+		}
+
+		return editorGroupsService.groups.every(group => group.count === 0);
+	});
 }
 
 function registerOpenEditorAPICommands(): void {
@@ -654,10 +673,34 @@ function registerOpenEditorAPICommands(): void {
 					const activeCodeEditorModel = getCodeEditor(editorService.activeTextEditorControl)?.getModel()?.uri.toString();
 					throw new Error(`Failed to open associated untitled editor. expected=${expectedOpenResource.toString()} pane=${editorPaneResource ?? 'undefined'} activePane=${activePaneResource ?? 'undefined'} activeCodeEditor=${activeCodeEditorModel ?? 'undefined'} dirty=${isDirty} active=${isActive}`);
 				}
+
+				// Force a concrete editor-focus transition after the untitled model
+				// swap so the ext-host document/editor mirror observes the new model.
+				const activeCodeEditor = getCodeEditor(editorService.activeTextEditorControl);
+				if (activeCodeEditor) {
+					activeCodeEditor.focus();
+				}
+				await timeout(50);
 			}
 			await waitForEditorGroupInput(editorGroup, editorPane);
 			if (matchesScheme(resource, Schemas.vscodeNotebookCell)) {
 				await waitForActiveNotebookEditor(editorService, notebookResource);
+
+				// In Tauri the notebook cell code editor can become active before the
+				// text-editor mirror publishes an id to the ext host. Force materialization
+				// here so vscode.open(cellUri) does not resolve with activeNotebookEditor
+				// still unset on the extension-host side.
+				const activeCodeEditor = getCodeEditor(editorService.activeTextEditorControl);
+				const activeModel = activeCodeEditor?.getModel();
+				if (activeCodeEditor && activeModel && isITextModel(activeModel)) {
+					const activeNotebook = parseNotebookCellUri(activeModel.uri)?.notebook;
+					if (
+						isEqual(activeModel.uri, resource) ||
+						(activeNotebook && isEqual(activeNotebook, notebookResource))
+					) {
+						activeCodeEditor.focus();
+					}
+				}
 			}
 			await timeout(typeof column === 'number' || matchesScheme(resource, Schemas.vscodeNotebookCell) ? 100 : 0);
 		}
