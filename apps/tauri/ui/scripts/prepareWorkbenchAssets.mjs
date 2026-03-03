@@ -35,6 +35,18 @@ function stripSourceMappingUrlDirectives(contents) {
     .concat('\n');
 }
 
+function rewriteCssImportsInJavaScript(contents) {
+  return contents.replace(
+    /(^|\n)([ \t]*)import\s*(["'])([^"']+\.css)\3;[ \t]*/g,
+    (_match, prefix, indent, quote, specifier) =>
+      `${prefix}${indent}globalThis._VSCODE_CSS_LOAD?.(new URL(${quote}${specifier}${quote}, import.meta.url).href);\n`
+  );
+}
+
+function sanitizeJavaScriptAsset(contents) {
+  return rewriteCssImportsInJavaScript(stripSourceMappingUrlDirectives(contents));
+}
+
 async function copyMinAsset(sourceFile, targetFile) {
   const extension = path.extname(sourceFile).toLowerCase();
   if (extension !== '.js' && extension !== '.css') {
@@ -43,7 +55,10 @@ async function copyMinAsset(sourceFile, targetFile) {
   }
 
   const raw = await fs.readFile(sourceFile, 'utf8');
-  const sanitized = stripSourceMappingUrlDirectives(raw);
+  const sanitized =
+    extension === '.js'
+      ? sanitizeJavaScriptAsset(raw)
+      : stripSourceMappingUrlDirectives(raw);
   await fs.writeFile(targetFile, sanitized, 'utf8');
 }
 
@@ -83,6 +98,27 @@ async function assertDir(dirPath, label) {
   }
 }
 
+async function rewriteCopiedJavaScriptAssets(currentDir) {
+  const entries = await fs.readdir(currentDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      await rewriteCopiedJavaScriptAssets(entryPath);
+      continue;
+    }
+
+    if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.js') {
+      continue;
+    }
+
+    const raw = await fs.readFile(entryPath, 'utf8');
+    const rewritten = rewriteCssImportsInJavaScript(raw);
+    if (rewritten !== raw) {
+      await fs.writeFile(entryPath, rewritten, 'utf8');
+    }
+  }
+}
+
 await assertDir(distRoot, 'UI dist directory');
 await assertDir(sourceVsRoot, 'VS Code out/vs directory');
 await assertFile(requiredWorkbenchBootstrap, 'Workbench bootstrap module');
@@ -94,6 +130,7 @@ await fs.cp(sourceVsRoot, targetVsRoot, {
   dereference: true,
   filter: source => !source.endsWith('.map')
 });
+await rewriteCopiedJavaScriptAssets(targetVsRoot);
 
 try {
   await assertDir(sourceMinRoot, 'VS Code out-vscode-min/vs directory');

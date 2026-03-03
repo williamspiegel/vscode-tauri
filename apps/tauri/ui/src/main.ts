@@ -1208,6 +1208,35 @@ function installGlobalStartupErrorHandlers(): void {
 				`at ${event.filename || "<unknown>"}:${event.lineno || 0}:${event.colno || 0}`,
 			);
 		}
+		const eventTarget = event.target;
+		if (eventTarget instanceof HTMLScriptElement) {
+			detailParts.push(
+				`script=${eventTarget.src || eventTarget.getAttribute("src") || "<inline>"}`,
+			);
+		} else if (eventTarget instanceof HTMLLinkElement) {
+			detailParts.push(
+				`link=${eventTarget.href || eventTarget.getAttribute("href") || "<unknown>"}`,
+			);
+		}
+		const includesMimeFailure = detailParts.some((detail) =>
+			detail.includes("valid JavaScript MIME type"),
+		);
+		if (includesMimeFailure) {
+			const recentResources = performance
+				.getEntriesByType("resource")
+				.filter(
+					(entry): entry is PerformanceResourceTiming =>
+						entry instanceof PerformanceResourceTiming,
+				)
+				.sort((left, right) => right.startTime - left.startTime)
+				.slice(0, 5)
+				.map((entry) => entry.name);
+			if (recentResources.length > 0) {
+				detailParts.push(
+					`recentResources=${recentResources.join(" | ")}`,
+				);
+			}
+		}
 		const message =
 			detailParts.length > 0 ? detailParts.join("\n") : "Unknown window error";
 		setStatus(`Startup failed:\n${message}`, "error", true);
@@ -1230,8 +1259,25 @@ function installGlobalStartupErrorHandlers(): void {
 			reason instanceof Error
 				? (reason.stack ?? reason.message)
 				: String(reason ?? "Unknown rejection");
+		const detailParts = [message];
+		if (message.includes("valid JavaScript MIME type")) {
+			const recentResources = performance
+				.getEntriesByType("resource")
+				.filter(
+					(entry): entry is PerformanceResourceTiming =>
+						entry instanceof PerformanceResourceTiming,
+				)
+				.sort((left, right) => right.startTime - left.startTime)
+				.slice(0, 5)
+				.map((entry) => entry.name);
+			if (recentResources.length > 0) {
+				detailParts.push(
+					`recentResources=${recentResources.join(" | ")}`,
+				);
+			}
+		}
 		setStatus(`Startup failed:\n${message}`, "error", true);
-		void reportStartupFailureToHost(message).finally(() =>
+		void reportStartupFailureToHost(detailParts.join("\n")).finally(() =>
 			closeWindowAfterStartupFailure(),
 		);
 	});
@@ -1418,6 +1464,16 @@ async function closeWindowAfterStartupFailure(): Promise<void> {
 		!startupHost
 	) {
 		return;
+	}
+
+	try {
+		await startupHost.invokeMethod("host.automationExit", {
+			code: 1,
+			logs: [],
+		});
+		return;
+	} catch (error) {
+		console.warn("[startup.exit] failed to exit automated window", error);
 	}
 
 	try {
@@ -1856,9 +1912,7 @@ main().catch((error) => {
 		}
 
 		try {
-			await startupHost.invokeMethod("window.close", {
-				target: "main",
-			});
+			await closeWindowAfterStartupFailure();
 		} catch (closeError) {
 			console.warn("[startup.close] failed to close main window", closeError);
 		}
