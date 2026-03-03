@@ -10,6 +10,7 @@ import { asPromise, disposeAll, poll } from '../utils';
 import { Kernel, saveAllFilesAndCloseAll } from './notebook.api.test';
 
 export type INativeInteractiveWindow = { notebookUri: vscode.Uri; inputUri: vscode.Uri; notebookEditor: vscode.NotebookEditor };
+const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
 
 async function createInteractiveWindow(kernel: Kernel) {
 	const { notebookEditor, inputUri } = (await vscode.commands.executeCommand(
@@ -40,13 +41,32 @@ async function addCellAndRun(code: string, notebook: vscode.NotebookDocument) {
 	const initialCellCount = notebook.cellCount;
 	const cell = await addCell(code, notebook);
 
-	const event = asPromise(vscode.workspace.onDidChangeNotebookDocument);
-	await vscode.commands.executeCommand('notebook.cell.execute', { start: initialCellCount, end: initialCellCount + 1 }, notebook.uri);
-	try {
-		await event;
-	} catch (e) {
-		const result = notebook.cellAt(notebook.cellCount - 1);
-		assert.fail(`Notebook change event was not triggered after executing newly added cell. Initial Cell count: ${initialCellCount}. Current cell count: ${notebook.cellCount}. execution summary: ${JSON.stringify(result.executionSummary)}`);
+	if (isTauriIntegration) {
+		const executePromise = vscode.commands.executeCommand('notebook.cell.execute', { start: initialCellCount, end: initialCellCount + 1 }, notebook.uri);
+		await Promise.race([executePromise, new Promise(resolve => setTimeout(resolve, 1000))]);
+		await poll(
+			() => {
+				const result = notebook.cellAt(notebook.cellCount - 1);
+				if (result.outputs.length > 0) {
+					return Promise.resolve(true);
+				}
+
+				throw new Error(`Executed cell has no output yet. Initial Cell count: ${initialCellCount}. Current cell count: ${notebook.cellCount}. execution summary: ${JSON.stringify(result.executionSummary)}`);
+			},
+			value => value === true,
+			'Interactive window cell execution should produce output in Tauri integration',
+			200,
+			50
+		);
+	} else {
+		const event = asPromise(vscode.workspace.onDidChangeNotebookDocument);
+		await vscode.commands.executeCommand('notebook.cell.execute', { start: initialCellCount, end: initialCellCount + 1 }, notebook.uri);
+		try {
+			await event;
+		} catch {
+			const result = notebook.cellAt(notebook.cellCount - 1);
+			assert.fail(`Notebook change event was not triggered after executing newly added cell. Initial Cell count: ${initialCellCount}. Current cell count: ${notebook.cellCount}. execution summary: ${JSON.stringify(result.executionSummary)}`);
+		}
 	}
 	assert.strictEqual(cell.outputs.length, 1, `Executed cell has no output. Initial Cell count: ${initialCellCount}. Current cell count: ${notebook.cellCount}. execution summary: ${JSON.stringify(cell.executionSummary)}`);
 	return cell;

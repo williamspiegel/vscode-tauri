@@ -36,6 +36,9 @@ import { IQuickDiffModelService } from '../../contrib/scm/browser/quickDiffModel
 import { getNotebookEditorFromEditorPane } from '../../contrib/notebook/browser/notebookBrowser.js';
 import { INotebookService } from '../../contrib/notebook/common/notebookService.js';
 import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
+import { CommandsRegistry } from '../../../platform/commands/common/commands.js';
+
+const ENSURE_ACTIVE_TEXT_EDITOR_MIRROR_COMMAND_ID = '_workbench.ensureActiveTextEditorMirror';
 class TextEditorSnapshot {
 
 	readonly id: string;
@@ -113,6 +116,20 @@ let activeMainThreadEditorLocator: IMainThreadEditorLocator | undefined;
 export function getMainThreadEditorLocator(): IMainThreadEditorLocator | undefined {
 	return activeMainThreadEditorLocator;
 }
+
+CommandsRegistry.registerCommand(ENSURE_ACTIVE_TEXT_EDITOR_MIRROR_COMMAND_ID, accessor => {
+	const locator = activeMainThreadEditorLocator;
+	if (!locator) {
+		return undefined;
+	}
+
+	const activeCodeEditor = getCodeEditor(accessor.get(IEditorService).activeTextEditorControl);
+	if (!activeCodeEditor) {
+		return undefined;
+	}
+
+	return locator.ensureTextEditorForCodeEditor(activeCodeEditor);
+});
 
 const enum ActiveEditorOrder {
 	Editor, Panel
@@ -197,6 +214,18 @@ class MainThreadDocumentAndEditorStateComputer {
 		}
 	}
 
+	private _ensureEditorTracked(editor: ICodeEditor): void {
+		if (this._toDisposeOnEditorRemove.has(editor.getId())) {
+			return;
+		}
+
+		this._toDisposeOnEditorRemove.set(editor.getId(), combinedDisposable(
+			editor.onDidChangeModel(() => this._updateState()),
+			editor.onDidFocusEditorText(() => this._updateState()),
+			editor.onDidFocusEditorWidget(() => this._updateState(editor))
+		));
+	}
+
 	private _updateStateOnModelAdd(model: ITextModel): void {
 		if (!shouldSynchronizeModel(model)) {
 			// ignore
@@ -249,6 +278,9 @@ class MainThreadDocumentAndEditorStateComputer {
 					candidateEditors.push(activeCodeEditor);
 				}
 			}
+		}
+		for (const editor of candidateEditors) {
+			this._ensureEditorTracked(editor);
 		}
 
 		// editor: only take those that have a not too large model

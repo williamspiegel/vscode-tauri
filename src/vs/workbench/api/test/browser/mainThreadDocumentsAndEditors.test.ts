@@ -501,6 +501,40 @@ suite('MainThreadDocumentsAndEditors', () => {
 		model.dispose();
 	});
 
+	test('tracks model changes for visible pane editors outside the code editor service registry', () => {
+		const model = modelService.createModel('farboo', null);
+		const untitledModel = createTextModel('untitled');
+		const editor = myCreateTestCodeEditor(model);
+		codeEditorService.removeCodeEditor(editor);
+
+		const visiblePane = {
+			input: {},
+			group: { count: 1, contains: () => true },
+			getControl: () => editor
+		} as unknown as IEditorPane;
+
+		workbenchEditorService.activeEditor = visiblePane.input as never;
+		workbenchEditorService.activeEditorPane = visiblePane;
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.visibleEditorPanes = [visiblePane];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+		deltas.length = 0;
+
+		editor.setModel(untitledModel);
+
+		assert.ok(deltas.length >= 1);
+		const last = deltas[deltas.length - 1];
+		assert.strictEqual(last.addedDocuments?.[0].uri?.toString(), untitledModel.uri.toString());
+		assert.strictEqual(last.addedEditors?.[0].documentUri?.toString(), untitledModel.uri.toString());
+		assert.ok(typeof last.newActiveEditor === 'string');
+
+		editor.dispose();
+		model.dispose();
+		untitledModel.dispose();
+	});
+
 	test('editor with dispos-ed/-ing model', () => {
 		const model = modelService.createModel('farboo', null);
 		const editor = myCreateTestCodeEditor(model);

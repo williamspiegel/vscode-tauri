@@ -461,6 +461,10 @@ function registerEditorGroupsLayoutCommands(): void {
 
 				await group.closeEditor(editor);
 			}
+
+			if (group.count > 0) {
+				await group.closeAllEditors({ excludeConfirming: true });
+			}
 		}
 
 		return editorGroupsService.groups.every(group => group.count === 0);
@@ -606,6 +610,7 @@ function registerOpenEditorAPICommands(): void {
 	});
 
 	CommandsRegistry.registerCommand(API_OPEN_EDITOR_COMMAND_ID, async function (accessor: ServicesAccessor, resourceArg: UriComponents | string, columnAndOptions?: [EditorGroupColumn?, ITextEditorOptions?], label?: string, context?: IOpenEvent<unknown>) {
+		const commandService = accessor.get(ICommandService);
 		const editorService = accessor.get(IEditorService);
 		const editorGroupsService = accessor.get(IEditorGroupsService);
 		const openerService = accessor.get(IOpenerService);
@@ -680,6 +685,7 @@ function registerOpenEditorAPICommands(): void {
 				if (activeCodeEditor) {
 					activeCodeEditor.focus();
 				}
+				await commandService.executeCommand('_workbench.ensureActiveTextEditorMirror');
 				await timeout(50);
 			}
 			await waitForEditorGroupInput(editorGroup, editorPane);
