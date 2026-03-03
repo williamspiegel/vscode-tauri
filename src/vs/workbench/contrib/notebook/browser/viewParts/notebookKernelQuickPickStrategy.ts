@@ -813,6 +813,12 @@ export class KernelPickerMRUStrategy extends KernelPickerStrategyBase {
 			return alreadySelected.selected;
 		}
 
+		const selectedOrSuggested = notebookKernelService.getSelectedOrSuggestedKernel(notebook);
+		if (selectedOrSuggested) {
+			notebookKernelHistoryService.addMostRecentKernel(selectedOrSuggested);
+			return selectedOrSuggested;
+		}
+
 		await commandService.executeCommand(SELECT_KERNEL_ID);
 		const { selected } = notebookKernelHistoryService.getKernels(notebook);
 		return selected;

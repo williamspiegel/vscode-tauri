@@ -68,6 +68,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 	showTextDocument(document: vscode.TextDocument, options: { column: vscode.ViewColumn; preserveFocus: boolean; pinned: boolean }): Promise<vscode.TextEditor>;
 	showTextDocument(document: vscode.TextDocument, columnOrOptions: vscode.ViewColumn | vscode.TextDocumentShowOptions | undefined, preserveFocus?: boolean): Promise<vscode.TextEditor>;
 	async showTextDocument(document: vscode.TextDocument, columnOrOptions: vscode.ViewColumn | vscode.TextDocumentShowOptions | undefined, preserveFocus?: boolean): Promise<vscode.TextEditor> {
+		const existingEditorIds = this._getVisibleEditorIdsForResource(document.uri);
 		let options: ITextDocumentShowOptions;
 		if (typeof columnOrOptions === 'number') {
 			options = {
@@ -88,16 +89,28 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 
 		const editorId = await this._proxy.$tryShowTextDocument(document.uri, options);
-		const editor = editorId && await this._waitForEditor(editorId, document.uri);
+		const editor = editorId && await this._waitForEditor(editorId, document.uri, existingEditorIds);
 		if (editor) {
+			if (!options.preserveFocus) {
+				const activeEditorReady = await this._waitForActiveEditor(document.uri);
+				if (!activeEditorReady) {
+					this._extHostDocumentsAndEditors.adoptActiveEditor(editor.id);
+				}
+			}
 			if (document.uri.scheme === Schemas.vscodeNotebookCell) {
 				await timeout(100);
 			}
 			return editor.value;
 		}
-		if (!editorId && document.uri.scheme === Schemas.vscodeNotebookCell) {
-			const editorByResource = await this._waitForEditorByResource(document.uri);
+		if (!editorId) {
+			const editorByResource = await this._waitForEditorByResource(document.uri, existingEditorIds);
 			if (editorByResource) {
+				if (!options.preserveFocus) {
+					const activeEditorReady = await this._waitForActiveEditor(document.uri);
+					if (!activeEditorReady) {
+						this._extHostDocumentsAndEditors.adoptActiveEditor(editorByResource.id);
+					}
+				}
 				return editorByResource.value;
 			}
 
@@ -115,14 +128,14 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		}
 	}
 
-	private async _waitForEditor(editorId: string, resource: URI): Promise<ExtHostTextEditor | undefined> {
+	private async _waitForEditor(editorId: string, resource: URI, existingEditorIds: ReadonlySet<string>): Promise<ExtHostTextEditor | undefined> {
 		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
 			const editor = this._extHostDocumentsAndEditors.getEditor(editorId);
 			if (editor) {
 				return editor;
 			}
 
-			const editorByResource = this.getVisibleTextEditors(true).find(candidate => this._matchesRequestedResource(candidate.document.uri, resource));
+			const editorByResource = this._findNewVisibleEditorByResource(resource, existingEditorIds);
 			if (editorByResource) {
 				return editorByResource;
 			}
@@ -133,14 +146,55 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		return undefined;
 	}
 
-	private async _waitForEditorByResource(resource: URI): Promise<ExtHostTextEditor | undefined> {
+	private async _waitForEditorByResource(resource: URI, existingEditorIds: ReadonlySet<string>): Promise<ExtHostTextEditor | undefined> {
 		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
-			const editorByResource = this.getVisibleTextEditors(true).find(candidate => this._matchesRequestedResource(candidate.document.uri, resource));
+			const editorByResource = this._findNewVisibleEditorByResource(resource, existingEditorIds);
 			if (editorByResource) {
 				return editorByResource;
 			}
 
 			await timeout(50);
+		}
+
+		return undefined;
+	}
+
+	private async _waitForActiveEditor(resource: URI): Promise<boolean> {
+		for (let attempt = 0; attempt < ExtHostEditors._editorSettleAttempts; attempt++) {
+			const activeEditor = this._extHostDocumentsAndEditors.activeEditor(true);
+			if (activeEditor && this._matchesRequestedResource(activeEditor.document.uri, resource)) {
+				return true;
+			}
+
+			await timeout(50);
+		}
+
+		return false;
+	}
+
+	private _getVisibleEditorIdsForResource(resource: URI): Set<string> {
+		const ids = new Set<string>();
+		for (const editor of this.getVisibleTextEditors(true)) {
+			if (editor.document && this._matchesRequestedResource(editor.document.uri, resource)) {
+				ids.add(editor.id);
+			}
+		}
+		return ids;
+	}
+
+	private _findNewVisibleEditorByResource(resource: URI, existingEditorIds: ReadonlySet<string>): ExtHostTextEditor | undefined {
+		const matches = this.getVisibleTextEditors(true).filter(candidate => candidate.document && this._matchesRequestedResource(candidate.document.uri, resource));
+		if (matches.length === 0) {
+			return undefined;
+		}
+
+		const newMatch = matches.find(candidate => !existingEditorIds.has(candidate.id));
+		if (newMatch) {
+			return newMatch;
+		}
+
+		if (existingEditorIds.size === 0 && matches.length === 1) {
+			return matches[0];
 		}
 
 		return undefined;

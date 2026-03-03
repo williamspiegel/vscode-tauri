@@ -19,7 +19,7 @@ import { IStartExtensionTerminalRequest, ITerminalProcessExtHostProxy, ITerminal
 import { IRemoteAgentService } from '../../services/remote/common/remoteAgentService.js';
 import { OperatingSystem, OS } from '../../../base/common/platform.js';
 import { TerminalEditorLocationOptions } from 'vscode';
-import { Promises } from '../../../base/common/async.js';
+import { Promises, timeout } from '../../../base/common/async.js';
 import { ISerializableEnvironmentDescriptionMap, ISerializableEnvironmentVariableCollection } from '../../../platform/terminal/common/environmentVariable.js';
 import { ITerminalLinkProviderService } from '../../contrib/terminalContrib/links/browser/links.js';
 import { ITerminalQuickFixService, ITerminalQuickFix, TerminalQuickFixType } from '../../contrib/terminalContrib/quickFix/browser/quickFix.js';
@@ -145,7 +145,20 @@ export class MainThreadTerminalService extends Disposable implements MainThreadT
 
 	private async _getTerminalInstance(id: ExtHostTerminalIdentifier): Promise<ITerminalInstance | undefined> {
 		if (typeof id === 'string') {
-			return this._extHostTerminals.get(id);
+			const pendingTerminal = this._extHostTerminals.get(id);
+			if (pendingTerminal) {
+				return pendingTerminal;
+			}
+
+			for (let attempt = 0; attempt < 20; attempt++) {
+				await timeout(25);
+				const delayedTerminal = this._extHostTerminals.get(id);
+				if (delayedTerminal) {
+					return delayedTerminal;
+				}
+			}
+
+			return undefined;
 		}
 		return this._terminalService.getInstanceFromId(id);
 	}

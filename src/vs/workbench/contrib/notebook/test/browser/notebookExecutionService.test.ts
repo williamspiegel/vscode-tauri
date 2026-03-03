@@ -141,6 +141,22 @@ suite('NotebookExecutionService', () => {
 			});
 	});
 
+	test('cell is runnable when a single matching kernel is available but not yet selected', async () => {
+		await withTestNotebook(
+			[],
+			async (viewModel, textModel) => {
+				const kernel = new TestNotebookKernel({ languages: ['javascript'] });
+				disposables.add(kernelService.registerKernel(kernel));
+				const executionService = disposables.add(instantiationService.createInstance(NotebookExecutionService));
+				const executeSpy = sinon.spy();
+				kernel.executeNotebookCellsRequest = executeSpy;
+
+				const cell = disposables.add(insertCellAtIndex(viewModel, 0, 'var c = 3', 'javascript', CellKind.Code, {}, [], true, true));
+				await executionService.executeNotebookCells(viewModel.notebookDocument, [cell.model], contextKeyService);
+				assert.strictEqual(executeSpy.calledOnce, true);
+			});
+	});
+
 	test('Completes unconfirmed executions', async function () {
 
 		return withTestNotebook([], async (viewModel, textModel) => {

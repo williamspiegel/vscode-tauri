@@ -67,6 +67,7 @@ export class MainThreadEditorTabs implements MainThreadEditorTabsShape {
 				this._createTabsModel();
 			}
 		}));
+		this._dispoables.add(editorService.onDidVisibleEditorsChange(() => this._createTabsModel()));
 
 		this._dispoables.add(this._multiDiffEditorInputListeners);
 

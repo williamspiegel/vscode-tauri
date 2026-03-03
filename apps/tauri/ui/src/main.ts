@@ -104,10 +104,21 @@ function describeWorkbenchDomState(): string {
 		`readyState=${document.readyState}`,
 		`bodyChildren=${bodyChildren}`,
 		`hasWorkbench=${isWorkbenchRendered()}`,
+		`bootstrapStage=${JSON.stringify(getWorkbenchBootstrapStage())}`,
 		`splashVisible=${splashVisible}`,
 		`startupFailureVisible=${startupFailureVisible}`,
 		`status=${JSON.stringify(statusPreview)}`,
 	].join(" ");
+}
+
+function getWorkbenchBootstrapStage(): string | undefined {
+	const stage = (
+		window as Window & {
+			__VSCODE_TAURI_WORKBENCH_STAGE__?: unknown;
+		}
+	).__VSCODE_TAURI_WORKBENCH_STAGE__;
+
+	return typeof stage === "string" && stage.length > 0 ? stage : undefined;
 }
 
 function waitForWorkbenchRender(timeoutMs = 15000): Promise<boolean> {

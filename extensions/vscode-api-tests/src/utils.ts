@@ -46,8 +46,37 @@ export function pathEquals(path1: string, path2: string): boolean {
 	return path1 === path2;
 }
 
-export function closeAllEditors(): Thenable<any> {
-	return vscode.commands.executeCommand('workbench.action.closeAllEditors');
+const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
+
+export async function closeAllEditors(): Promise<void> {
+	await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+
+	if (!isTauriIntegration) {
+		return;
+	}
+
+	await poll(
+		() => {
+			const openTabs = vscode.window.tabGroups.all.reduce((count, group) => count + group.tabs.length, 0);
+			const activeNotebookEditor = vscode.window.activeNotebookEditor;
+			if (openTabs === 0 && !activeNotebookEditor) {
+				return Promise.resolve(true);
+			}
+
+			const activeTextEditor = vscode.window.activeTextEditor;
+
+			throw new Error(
+				[
+					`tabGroups=${vscode.window.tabGroups.all.length}`,
+					`openTabs=${openTabs}`,
+					`activeTextEditor=${activeTextEditor?.document.uri.toString() ?? 'undefined'}`,
+					`activeNotebookEditor=${activeNotebookEditor?.notebook.uri.toString() ?? 'undefined'}`,
+				].join(' '),
+			);
+		},
+		value => value === true,
+		'closeAllEditors should clear all editor state in Tauri integration'
+	);
 }
 
 export function saveAllEditors(): Thenable<any> {

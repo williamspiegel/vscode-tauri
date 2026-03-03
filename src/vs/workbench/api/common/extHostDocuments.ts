@@ -5,6 +5,7 @@
 
 import { Emitter, Event } from '../../../base/common/event.js';
 import { DisposableStore } from '../../../base/common/lifecycle.js';
+import { isEqual } from '../../../base/common/resources.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { ExtHostDocumentsShape, IMainContext, MainContext, MainThreadDocumentsShape } from './extHost.protocol.js';
 import { ExtHostDocumentData, setWordDefinitionFor } from './extHostDocumentData.js';
@@ -81,7 +82,7 @@ export class ExtHostDocuments implements ExtHostDocumentsShape {
 
 	public ensureDocumentData(uri: URI, options?: { encoding?: string }): Promise<ExtHostDocumentData> {
 
-		const cached = this._documentsAndEditors.getDocument(uri);
+		const cached = this._getDocumentData(uri);
 		if (cached && (!options?.encoding || cached.document.encoding === options.encoding)) {
 			return Promise.resolve(cached);
 		}
@@ -91,7 +92,7 @@ export class ExtHostDocuments implements ExtHostDocumentsShape {
 			promise = this._proxy.$tryOpenDocument(uri, options).then(uriData => {
 				this._documentLoader.delete(uri.toString());
 				const canonicalUri = URI.revive(uriData);
-				const document = this._documentsAndEditors.getDocument(canonicalUri);
+				const document = this._getDocumentData(canonicalUri);
 				if (document) {
 					return document;
 				}
@@ -116,38 +117,104 @@ export class ExtHostDocuments implements ExtHostDocumentsShape {
 	}
 
 	private _waitForDocumentAdd(uri: URI): Promise<ExtHostDocumentData> {
-		const cached = this._documentsAndEditors.getDocument(uri);
+		const cached = this._getDocumentData(uri);
 		if (cached) {
 			return Promise.resolve(cached);
 		}
 
 		return new Promise<ExtHostDocumentData>((resolve, reject) => {
 			let settled = false;
-			const listener = this.onDidAddDocument(document => {
-				if (settled || document.uri.toString() !== uri.toString()) {
-					return;
+			let pollHandle: ReturnType<typeof disposableTimeout> | undefined;
+			const settleWithDocument = () => {
+				if (settled) {
+					return false;
 				}
 
-				const data = this._documentsAndEditors.getDocument(uri);
+				const data = this._getDocumentData(uri);
 				if (!data) {
-					return;
+					return false;
 				}
 
 				settled = true;
+				pollHandle?.dispose();
 				timeout.dispose();
 				listener.dispose();
 				resolve(data);
+				return true;
+			};
+			const listener = this.onDidAddDocument(document => {
+				if (settled || !isEqual(document.uri, uri)) {
+					return;
+				}
+
+				settleWithDocument();
 			});
+			const schedulePoll = () => {
+				pollHandle = disposableTimeout(() => {
+					if (!settleWithDocument()) {
+						schedulePoll();
+					}
+				}, 50);
+			};
+			schedulePoll();
 			const timeout = disposableTimeout(() => {
 				if (settled) {
 					return;
 				}
 
-				settled = true;
-				listener.dispose();
-				reject(new Error(`Unable to retrieve document from URI '${uri}' after open`));
-			}, 1000);
+				this._forceDocumentSync(uri).then(document => {
+					if (settled) {
+						return;
+					}
+					if (document) {
+						settled = true;
+						pollHandle?.dispose();
+						listener.dispose();
+						resolve(document);
+						return;
+					}
+
+					settled = true;
+					pollHandle?.dispose();
+					listener.dispose();
+					reject(new Error(`Unable to retrieve document from URI '${uri}' after open`));
+				}, err => {
+					if (settled) {
+						return;
+					}
+
+					settled = true;
+					pollHandle?.dispose();
+					listener.dispose();
+					reject(err);
+				});
+			}, 3000);
 		});
+	}
+
+	private _getDocumentData(uri: URI): ExtHostDocumentData | undefined {
+		return this._documentsAndEditors.getDocument(uri)
+			?? this._documentsAndEditors.allDocuments().find(document => isEqual(document.uri, uri));
+	}
+
+	private async _forceDocumentSync(uri: URI): Promise<ExtHostDocumentData | undefined> {
+		const existing = this._getDocumentData(uri);
+		if (existing) {
+			return existing;
+		}
+
+		const modelData = await this._proxy.$tryGetDocumentData(uri);
+		if (!modelData) {
+			return undefined;
+		}
+
+		const current = this._getDocumentData(uri);
+		if (current) {
+			return current;
+		}
+
+		this._documentsAndEditors.$acceptDocumentsAndEditorsDelta({ addedDocuments: [modelData] });
+		return this._getDocumentData(URI.revive(modelData.uri));
 	}
 
 	public createDocumentData(options?: { language?: string; content?: string; encoding?: string }): Promise<URI> {

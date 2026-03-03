@@ -159,12 +159,25 @@ suite('vscode API - commands', () => {
 
 	test('api-command: vscode.open with untitled supports associated resource (#138925)', async function () {
 		const uri = Uri.parse(workspace.workspaceFolders![0].uri.toString() + '/untitled-file.txt').with({ scheme: 'untitled' });
-		await commands.executeCommand('vscode.open', uri).then(() => assert.ok(true), () => assert.ok(false));
+		await commands.executeCommand('vscode.open', uri).then(() => assert.ok(true), error => assert.fail(error));
 
 		// untitled with associated resource are dirty from the beginning
 		if (isTauriIntegration) {
 			await poll(
-				() => Promise.resolve(window.activeTextEditor?.document.isDirty),
+				() => {
+					const activeTextEditor = window.activeTextEditor;
+					if (activeTextEditor?.document.isDirty) {
+						return Promise.resolve(true);
+					}
+
+					throw new Error(
+						[
+							`activeTextEditor=${activeTextEditor?.document.uri.toString() ?? 'undefined'}`,
+							`isDirty=${activeTextEditor?.document.isDirty ?? 'undefined'}`,
+							`visibleTextEditors=${window.visibleTextEditors.map(editor => editor.document.uri.toString()).join(',')}`,
+						].join(' '),
+					);
+				},
 				value => value === true,
 				'untitled associated resource should become dirty in Tauri integration'
 			);

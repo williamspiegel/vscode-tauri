@@ -574,6 +574,7 @@ enum NotebookCellExecutionTaskState {
 
 class NotebookCellExecutionTask extends Disposable {
 	private static HANDLE = 0;
+	private static readonly OUTPUT_SYNC_ATTEMPTS = 200;
 	private _handle = NotebookCellExecutionTask.HANDLE++;
 
 	private _onDidChangeState = this._register(new Emitter<void>());
@@ -651,24 +652,79 @@ class NotebookCellExecutionTask extends Disposable {
 
 	private async updateOutputs(outputs: vscode.NotebookCellOutput | vscode.NotebookCellOutput[], cell: vscode.NotebookCell | undefined, append: boolean): Promise<void> {
 		const handle = this.cellIndexToHandle(cell);
+		const existingOutputCount = this._cell.notebook.getCell(handle)?.apiCell.outputs.length ?? 0;
 		const outputDtos = this.validateAndConvertOutputs(asArray(outputs));
-		return this.updateSoon(
+		await this.updateSoon(
 			{
 				editType: CellExecutionUpdateType.Output,
 				cellHandle: handle,
 				append,
 				outputs: outputDtos
 			});
+		await this._waitForOutputSync(handle, outputDtos, append, existingOutputCount);
 	}
 
 	private async updateOutputItems(items: vscode.NotebookCellOutputItem | vscode.NotebookCellOutputItem[], output: vscode.NotebookCellOutput, append: boolean): Promise<void> {
 		items = NotebookCellOutput.ensureUniqueMimeTypes(asArray(items), true);
-		return this.updateSoon({
+		const existingItemCount = this._cell.apiCell.outputs.find(candidate => candidate.id === output.id)?.items.length ?? 0;
+		await this.updateSoon({
 			editType: CellExecutionUpdateType.OutputItems,
 			items: items.map(extHostTypeConverters.NotebookCellOutputItem.from),
 			outputId: output.id,
 			append
 		});
+		await this._waitForOutputItemsSync(output.id, items.length, append, existingItemCount);
+	}
+
+	private async _waitForOutputSync(handle: number, expectedOutputs: NotebookOutputDto[], append: boolean, existingOutputCount: number): Promise<void> {
+		const targetOutputCount = append ? existingOutputCount + expectedOutputs.length : expectedOutputs.length;
+
+		for (let attempt = 0; attempt < NotebookCellExecutionTask.OUTPUT_SYNC_ATTEMPTS; attempt++) {
+			const cell = this._cell.notebook.getCell(handle);
+			const actualOutputs = cell?.apiCell.outputs ?? [];
+			if (actualOutputs.length === targetOutputCount) {
+				if (append || this._matchesExpectedOutputs(actualOutputs, expectedOutputs)) {
+					return;
+				}
+			}
+
+			await timeout(10);
+		}
+	}
+
+	private async _waitForOutputItemsSync(outputId: string, expectedItemsLength: number, append: boolean, existingItemCount: number): Promise<void> {
+		const targetItemCount = append ? existingItemCount + expectedItemsLength : expectedItemsLength;
+
+		for (let attempt = 0; attempt < NotebookCellExecutionTask.OUTPUT_SYNC_ATTEMPTS; attempt++) {
+			const output = this._cell.apiCell.outputs.find(candidate => candidate.id === outputId);
+			if (output && output.items.length === targetItemCount) {
+				return;
+			}
+
+			await timeout(10);
+		}
+	}
+
+	private _matchesExpectedOutputs(actualOutputs: readonly vscode.NotebookCellOutput[], expectedOutputs: readonly NotebookOutputDto[]): boolean {
+		if (actualOutputs.length !== expectedOutputs.length) {
+			return false;
+		}
+
+		for (let index = 0; index < actualOutputs.length; index++) {
+			const actualOutput = actualOutputs[index];
+			const expectedOutput = expectedOutputs[index];
+			if (actualOutput.items.length !== expectedOutput.items.length) {
+				return false;
+			}
+
+			for (let itemIndex = 0; itemIndex < actualOutput.items.length; itemIndex++) {
+				if (actualOutput.items[itemIndex].mime !== expectedOutput.items[itemIndex].mime) {
+					return false;
+				}
+			}
+		}
+
+		return true;
 	}
 
 	asApiObject(): vscode.NotebookCellExecution {

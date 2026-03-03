@@ -7,6 +7,7 @@ import { Iterable } from '../../../../../base/common/iterator.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { isEqual } from '../../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
+import { hasKey } from '../../../../../base/common/types.js';
 import { URI, UriComponents } from '../../../../../base/common/uri.js';
 import { ICodeEditor } from '../../../../../editor/browser/editorBrowser.js';
 import { ILanguageService } from '../../../../../editor/common/languages/language.js';
@@ -14,6 +15,7 @@ import { localize, localize2 } from '../../../../../nls.js';
 import { MenuId, MenuRegistry, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
+import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.service.js';
 import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IDebugService } from '../../../debug/common/debug.js';
 import { CTX_INLINE_CHAT_FOCUSED } from '../../../inlineChat/common/inlineChat.js';
@@ -21,9 +23,10 @@ import { insertCell } from './cellOperations.js';
 import { CELL_TITLE_CELL_GROUP_ID, CellToolbarOrder, INotebookActionContext, INotebookCellActionContext, INotebookCellToolbarActionContext, INotebookCommandContext, NOTEBOOK_EDITOR_WIDGET_ACTION_WEIGHT, NotebookAction, NotebookCellAction, NotebookMultiCellAction, cellExecutionArgs, getContextFromActiveEditor, getContextFromUri, parseMultiCellExecutionArgs } from './coreActions.js';
 import { CellEditState, CellFocusMode, EXECUTE_CELL_COMMAND_ID, IActiveNotebookEditor, ICellViewModel, IFocusNotebookCellOptions, ScrollToRevealBehavior } from '../notebookBrowser.js';
 import * as icons from '../notebookIcons.js';
-import { CellKind, CellUri, NotebookSetting } from '../../common/notebookCommon.js';
+import { CellKind, CellUri, INotebookTextModel, NotebookSetting } from '../../common/notebookCommon.js';
 import { NOTEBOOK_CELL_EXECUTING, NOTEBOOK_CELL_EXECUTION_STATE, NOTEBOOK_CELL_LIST_FOCUSED, NOTEBOOK_CELL_TYPE, NOTEBOOK_HAS_RUNNING_CELL, NOTEBOOK_HAS_SOMETHING_RUNNING, NOTEBOOK_INTERRUPTIBLE_KERNEL, NOTEBOOK_IS_ACTIVE_EDITOR, NOTEBOOK_KERNEL_COUNT, NOTEBOOK_KERNEL_SOURCE_COUNT, NOTEBOOK_LAST_CELL_FAILED, NOTEBOOK_MISSING_KERNEL_EXTENSION } from '../../common/notebookContextKeys.js';
 import { NotebookEditorInput } from '../../common/notebookEditorInput.js';
+import { INotebookExecutionService } from '../../common/notebookExecutionService.js';
 import { INotebookExecutionStateService } from '../../common/notebookExecutionStateService.js';
 import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
@@ -109,6 +112,69 @@ async function runCell(editorGroupsService: IEditorGroupsService, context: INote
 	if (!foundEditor) {
 		return;
 	}
+}
+
+type DetachedNotebookExecutionContext = INotebookCommandContext & {
+	readonly detachedNotebookModel: INotebookTextModel;
+	readonly detachedNotebookCells: INotebookTextModel['cells'];
+};
+
+function isDetachedNotebookExecutionContext(context: INotebookCommandContext | INotebookCellToolbarActionContext): context is DetachedNotebookExecutionContext {
+	return 'detachedNotebookModel' in context;
+}
+
+function getDetachedNotebookModel(accessor: ServicesAccessor, context: UriComponents | URI | undefined): INotebookTextModel | undefined {
+	const uri = URI.revive(context);
+	if (!uri) {
+		return undefined;
+	}
+
+	return accessor.get(INotebookEditorService).listNotebookEditors()
+		.find(editor => editor.hasModel() && isEqual(editor.textModel.uri, uri))?.textModel
+		?? accessor.get(INotebookService).listNotebookDocuments().find(document => isEqual(document.uri, uri));
+}
+
+function getDetachedExecutionContext(accessor: ServicesAccessor, ...args: unknown[]): DetachedNotebookExecutionContext | undefined {
+	const firstArg = args[0];
+
+	if (firstArg && typeof firstArg === 'object' && hasKey(firstArg, { ranges: true })) {
+		const ranges = (firstArg as { ranges?: ICellRange[] }).ranges;
+		const document = (firstArg as { document?: UriComponents | URI }).document;
+		if (!Array.isArray(ranges) || !document) {
+			return undefined;
+		}
+
+		const notebookModel = getDetachedNotebookModel(accessor, document);
+		if (!notebookModel) {
+			return undefined;
+		}
+
+		const detachedNotebookCells = ranges.flatMap(range => notebookModel.cells.slice(range.start, range.end));
+		return {
+			ui: false,
+			notebookEditor: undefined as unknown as INotebookCommandContext['notebookEditor'],
+			selectedCells: [] as INotebookCommandContext['selectedCells'],
+			detachedNotebookModel: notebookModel,
+			detachedNotebookCells
+		};
+	}
+
+	if (firstArg && typeof firstArg === 'object' && typeof (firstArg as ICellRange).start === 'number' && typeof (firstArg as ICellRange).end === 'number') {
+		const notebookModel = getDetachedNotebookModel(accessor, args[1] as UriComponents | URI | undefined);
+		if (!notebookModel) {
+			return undefined;
+		}
+
+		return {
+			ui: false,
+			notebookEditor: undefined as unknown as INotebookCommandContext['notebookEditor'],
+			selectedCells: [] as INotebookCommandContext['selectedCells'],
+			detachedNotebookModel: notebookModel,
+			detachedNotebookCells: notebookModel.cells.slice((firstArg as ICellRange).start, (firstArg as ICellRange).end)
+		};
+	}
+
+	return undefined;
 }
 
 const SMART_VIEWPORT_TOP_REVEAL_PADDING = 20; // enough to not cut off top of cell toolbar
@@ -285,10 +351,16 @@ registerAction2(class ExecuteCell extends NotebookMultiCellAction {
 	}
 
 	override parseArgs(accessor: ServicesAccessor, ...args: unknown[]): INotebookCommandContext | undefined {
-		return parseMultiCellExecutionArgs(accessor, ...args);
+		return parseMultiCellExecutionArgs(accessor, ...args) ?? getDetachedExecutionContext(accessor, ...args);
 	}
 
 	async runWithContext(accessor: ServicesAccessor, context: INotebookCommandContext | INotebookCellToolbarActionContext): Promise<void> {
+		if (isDetachedNotebookExecutionContext(context)) {
+			const executionService = accessor.get(INotebookExecutionService);
+			const contextKeyService = accessor.get(IContextKeyService);
+			return executionService.executeNotebookCells(context.detachedNotebookModel, context.detachedNotebookCells, contextKeyService);
+		}
+
 		const editorGroupsService = accessor.get(IEditorGroupsService);
 		const editorService = accessor.get(IEditorService);
 

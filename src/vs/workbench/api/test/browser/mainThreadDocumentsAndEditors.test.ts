@@ -18,6 +18,7 @@ import { Event } from '../../../../base/common/event.js';
 import { ITextModel } from '../../../../editor/common/model.js';
 import { ServiceCollection } from '../../../../platform/instantiation/common/serviceCollection.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
+import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { TestThemeService } from '../../../../platform/theme/test/common/testThemeService.js';
 import { UndoRedoService } from '../../../../platform/undoRedo/common/undoRedoService.js';
@@ -37,9 +38,11 @@ import { ILanguageConfigurationService } from '../../../../editor/common/languag
 import { TestLanguageConfigurationService } from '../../../../editor/test/common/modes/testLanguageConfigurationService.js';
 import { IUndoRedoService } from '../../../../platform/undoRedo/common/undoRedo.js';
 import { IQuickDiffModelService } from '../../../contrib/scm/browser/quickDiffModel.js';
+import { IEditorPane } from '../../../common/editor.js';
 import { ITextEditorDiffInformation } from '../../../../platform/editor/common/editor.js';
 import { ITreeSitterLibraryService } from '../../../../editor/common/services/treeSitter/treeSitterLibraryService.js';
 import { TestTreeSitterLibraryService } from '../../../../editor/test/common/services/testTreeSitterLibraryService.js';
+import { createTextModel } from '../../../../editor/test/common/testTextModel.js';
 
 suite('MainThreadDocumentsAndEditors', () => {
 
@@ -48,6 +51,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 	let modelService: ModelService;
 	let codeEditorService: TestCodeEditorService;
 	let textFileService: ITextFileService;
+	let workbenchEditorService: TestEditorService;
 	const deltas: IDocumentsAndEditorsDelta[] = [];
 
 	function myCreateTestCodeEditor(model: ITextModel | undefined): ITestCodeEditor {
@@ -57,6 +61,52 @@ suite('MainThreadDocumentsAndEditors', () => {
 				[ICodeEditorService, codeEditorService]
 			)
 		});
+	}
+
+	function createMainThreadDocumentsAndEditors(): MainThreadDocumentsAndEditors {
+		const editorGroupService = new TestEditorGroupsService();
+
+		const fileService = new class extends mock<IFileService>() {
+			override onDidRunOperation = Event.None;
+			override onDidChangeFileSystemProviderCapabilities = Event.None;
+			override onDidChangeFileSystemProviderRegistrations = Event.None;
+		};
+
+		return new MainThreadDocumentsAndEditors(
+			SingleProxyRPCProtocol({
+				$acceptDocumentsAndEditorsDelta: (delta: IDocumentsAndEditorsDelta) => { deltas.push(delta); },
+				$acceptEditorDiffInformation: (_id: string, _diffInformation: ITextEditorDiffInformation | undefined) => { }
+			}),
+			modelService,
+			textFileService,
+			workbenchEditorService,
+			codeEditorService,
+			fileService,
+			null!,
+			editorGroupService,
+			new class extends mock<IPaneCompositePartService>() implements IPaneCompositePartService {
+				override onDidPaneCompositeOpen = Event.None;
+				override onDidPaneCompositeClose = Event.None;
+				override getActivePaneComposite() {
+					return undefined;
+				}
+			},
+			TestEnvironmentService,
+			new TestWorkingCopyFileService(),
+			new UriIdentityService(fileService),
+			new class extends mock<IClipboardService>() {
+				override readText() {
+					return Promise.resolve('clipboard_contents');
+				}
+			},
+			new TestPathService(),
+			new TestConfigurationService(),
+			new class extends mock<IQuickDiffModelService>() {
+				override createQuickDiffModelReference() {
+					return undefined;
+				}
+			}
+		);
 	}
 
 	setup(() => {
@@ -96,50 +146,8 @@ suite('MainThreadDocumentsAndEditors', () => {
 			};
 			override getEncoding() { return 'utf8'; }
 		};
-		const workbenchEditorService = disposables.add(new TestEditorService());
-		const editorGroupService = new TestEditorGroupsService();
-
-		const fileService = new class extends mock<IFileService>() {
-			override onDidRunOperation = Event.None;
-			override onDidChangeFileSystemProviderCapabilities = Event.None;
-			override onDidChangeFileSystemProviderRegistrations = Event.None;
-		};
-
-		new MainThreadDocumentsAndEditors(
-			SingleProxyRPCProtocol({
-				$acceptDocumentsAndEditorsDelta: (delta: IDocumentsAndEditorsDelta) => { deltas.push(delta); },
-				$acceptEditorDiffInformation: (id: string, diffInformation: ITextEditorDiffInformation | undefined) => { }
-			}),
-			modelService,
-			textFileService,
-			workbenchEditorService,
-			codeEditorService,
-			fileService,
-			null!,
-			editorGroupService,
-			new class extends mock<IPaneCompositePartService>() implements IPaneCompositePartService {
-				override onDidPaneCompositeOpen = Event.None;
-				override onDidPaneCompositeClose = Event.None;
-				override getActivePaneComposite() {
-					return undefined;
-				}
-			},
-			TestEnvironmentService,
-			new TestWorkingCopyFileService(),
-			new UriIdentityService(fileService),
-			new class extends mock<IClipboardService>() {
-				override readText() {
-					return Promise.resolve('clipboard_contents');
-				}
-			},
-			new TestPathService(),
-			new TestConfigurationService(),
-			new class extends mock<IQuickDiffModelService>() {
-				override createQuickDiffModelReference() {
-					return undefined;
-				}
-			}
-		);
+		workbenchEditorService = disposables.add(new TestEditorService());
+		disposables.add(createMainThreadDocumentsAndEditors());
 	});
 
 	teardown(() => {
@@ -208,6 +216,130 @@ suite('MainThreadDocumentsAndEditors', () => {
 		}
 	});
 
+	test('ignores stale active text editor controls without an active workbench editor', () => {
+		const model = modelService.createModel('test', null);
+		const editor = myCreateTestCodeEditor(model);
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.activeEditor = undefined;
+		workbenchEditorService.activeEditorPane = undefined;
+		workbenchEditorService.visibleEditorPanes = [];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 1);
+		const [delta] = deltas;
+		assert.strictEqual(delta.addedDocuments?.length, 1);
+		assert.strictEqual(delta.addedEditors, undefined);
+		assert.strictEqual(delta.newActiveEditor, undefined);
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('tracks focused active text editor controls without an active workbench editor', () => {
+		const model = modelService.createModel('test', null);
+		const editor = createTestCodeEditor(model, {
+			hasTextFocus: true,
+			serviceCollection: new ServiceCollection(
+				[ICodeEditorService, codeEditorService]
+			)
+		});
+
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.activeEditor = undefined;
+		workbenchEditorService.activeEditorPane = undefined;
+		workbenchEditorService.visibleEditorPanes = [];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 2);
+		const [first, second] = deltas;
+		assert.strictEqual(first.addedDocuments?.length, 1);
+		assert.strictEqual(second.addedEditors?.length, 1);
+		assert.ok(typeof second.newActiveEditor === 'string');
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('tracks focused active text editor controls whose model is not yet in the shared model service', () => {
+		const model = createTextModel('test');
+		const editor = createTestCodeEditor(model, {
+			hasTextFocus: true,
+			serviceCollection: new ServiceCollection(
+				[ICodeEditorService, codeEditorService]
+			)
+		});
+
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.activeEditor = undefined;
+		workbenchEditorService.activeEditorPane = undefined;
+		workbenchEditorService.visibleEditorPanes = [];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 2);
+		const [first, second] = deltas;
+		assert.strictEqual(first.addedDocuments?.length, 1);
+		assert.strictEqual(first.addedDocuments?.[0].uri?.toString(), model.uri.toString());
+		assert.strictEqual(second.addedEditors?.length, 1);
+		assert.strictEqual(second.addedEditors?.[0].documentUri?.toString(), model.uri.toString());
+		assert.ok(typeof second.newActiveEditor === 'string');
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('ensureTextEditorForCodeEditor syncs the document before the editor when the model is untracked', () => {
+		const model = createTextModel('test');
+		const editor = createTestCodeEditor(model, {
+			hasTextFocus: false,
+			serviceCollection: new ServiceCollection(
+				[ICodeEditorService, codeEditorService]
+			)
+		});
+		const instance = disposables.add(createMainThreadDocumentsAndEditors());
+
+		deltas.length = 0;
+		const id = instance.ensureTextEditorForCodeEditor(editor as unknown as ICodeEditor);
+
+		assert.ok(typeof id === 'string');
+		assert.strictEqual(deltas.length, 1);
+		const [delta] = deltas;
+		assert.strictEqual(delta.addedDocuments?.length, 1);
+		assert.strictEqual(delta.addedDocuments?.[0].uri?.toString(), model.uri.toString());
+		assert.strictEqual(delta.addedEditors?.length, 1);
+		assert.strictEqual(delta.addedEditors?.[0].documentUri?.toString(), model.uri.toString());
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('ignores stale editor panes whose group no longer reports the input as active', () => {
+		const model = modelService.createModel('test', null);
+		const editor = myCreateTestCodeEditor(model);
+		const stalePane = { input: {}, group: { activeEditor: undefined, contains: () => false }, getControl: () => editor } as unknown as IEditorPane;
+		workbenchEditorService.visibleEditorPanes = [stalePane];
+		workbenchEditorService.activeEditor = undefined;
+		workbenchEditorService.activeEditorPane = stalePane;
+		workbenchEditorService.activeTextEditorControl = editor;
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 1);
+		const [delta] = deltas;
+		assert.strictEqual(delta.addedDocuments?.length, 1);
+		assert.strictEqual(delta.addedEditors, undefined);
+		assert.strictEqual(delta.newActiveEditor, undefined);
+
+		editor.dispose();
+		model.dispose();
+	});
+
 	test('ignore simple widget model', function () {
 		this.timeout(1000 * 60); // increase timeout for this one test
 
@@ -256,6 +388,57 @@ suite('MainThreadDocumentsAndEditors', () => {
 		assert.strictEqual(second.removedDocuments, undefined);
 		assert.strictEqual(second.removedEditors, undefined);
 		assert.strictEqual(second.newActiveEditor, undefined);
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('tracks visible simple widget editors', () => {
+		deltas.length = 0;
+
+		const model = modelService.createModel('farboo', null);
+		const editor = {
+			getId: () => 'visibleSimpleWidget',
+			getModel: () => model,
+			hasModel: () => true,
+			hasTextFocus: () => false,
+			hasWidgetFocus: () => false,
+			isSimpleWidget: true,
+			onDidChangeModel: Event.None,
+			onDidFocusEditorText: Event.None,
+			onDidFocusEditorWidget: Event.None
+		} as unknown as ICodeEditor;
+
+		const visiblePane = {
+			getControl: () => editor
+		} as unknown as IEditorPane;
+		workbenchEditorService.visibleEditorPanes = [visiblePane];
+		codeEditorService.addCodeEditor(editor);
+
+		assert.strictEqual(deltas.length, 2);
+		const [first, second] = deltas;
+		assert.strictEqual(first.addedDocuments!.length, 1);
+		assert.strictEqual(second.addedEditors!.length, 1);
+		assert.strictEqual(second.addedEditors![0].documentUri?.scheme, model.uri.scheme);
+
+		codeEditorService.removeCodeEditor(editor);
+		model.dispose();
+	});
+
+	test('tracks active text editor controls even before pane controls resolve', () => {
+		deltas.length = 0;
+
+		const model = modelService.createModel('farboo', null);
+		const editor = myCreateTestCodeEditor(model);
+		codeEditorService.removeCodeEditor(editor);
+
+		workbenchEditorService.activeTextEditorControl = editor;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 2);
+		const [, second] = deltas;
+		assert.strictEqual(second.addedEditors!.length, 1);
+		assert.strictEqual(second.addedEditors![0].documentUri?.toString(), model.uri.toString());
 
 		editor.dispose();
 		model.dispose();

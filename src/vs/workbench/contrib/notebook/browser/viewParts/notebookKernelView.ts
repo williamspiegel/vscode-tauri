@@ -34,6 +34,14 @@ function getEditorFromContext(editorService: IEditorService, context?: KernelQui
 		editor = context?.notebookEditor;
 	} else {
 		editor = getNotebookEditorFromEditorPane(editorService.activeEditorPane);
+		if (!editor) {
+			const visibleNotebookEditors = editorService.visibleEditorPanes
+				.map(editorPane => getNotebookEditorFromEditorPane(editorPane))
+				.filter((candidate): candidate is INotebookEditor => !!candidate);
+			if (visibleNotebookEditors.length === 1) {
+				editor = visibleNotebookEditors[0];
+			}
+		}
 	}
 
 	return editor;

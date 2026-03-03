@@ -11,14 +11,16 @@ import { extname, isEqual } from '../../../../base/common/resources.js';
 import { isNumber, isObject, isString, isUndefined } from '../../../../base/common/types.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
 import { Codicon } from '../../../../base/common/codicons.js';
+import { getCodeEditor } from '../../../../editor/browser/editorBrowser.js';
 import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
+import { isITextModel } from '../../../../editor/common/model.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry, ICommandHandler, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { EditorResolution, IEditorOptions, IResourceEditorInput, ITextEditorOptions } from '../../../../platform/editor/common/editor.js';
+import { EditorActivation, EditorResolution, IEditorOptions, IResourceEditorInput, ITextEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight, KeybindingsRegistry } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { IListService, IOpenEvent } from '../../../../platform/list/browser/listService.js';
@@ -39,6 +41,7 @@ import { IEditorResolverService } from '../../../services/editor/common/editorRe
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { parse as parseNotebookCellUri } from '../../../services/notebook/common/notebookDocumentService.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
+import { ITextEditorService } from '../../../services/textfile/common/textEditorService.js';
 import { IUntitledTextEditorService } from '../../../services/untitled/common/untitledTextEditorService.js';
 import { DIFF_FOCUS_OTHER_SIDE, DIFF_FOCUS_PRIMARY_SIDE, DIFF_FOCUS_SECONDARY_SIDE, registerDiffEditorCommands } from './diffEditorCommands.js';
 import { IResolvedEditorCommandsContext, resolveCommandsContext } from './editorCommandsContext.js';
@@ -450,37 +453,60 @@ function registerOpenEditorAPICommands(): void {
 	const editorOpenSettleAttempts = 100;
 	const editorChangeSettleTimeout = 250;
 
-	async function waitForDirtyEditorInput(editorPane: IEditorPane | undefined): Promise<void> {
+	async function waitForDirtyEditorInput(editorPane: IEditorPane | undefined): Promise<boolean> {
 		for (let attempt = 0; attempt < dirtyEditorSettleAttempts; attempt++) {
 			if (editorPane?.input?.isDirty()) {
-				return;
+				return true;
 			}
 
 			await timeout(50);
 		}
+
+		return false;
 	}
 
-	async function waitForEditorGroupInput(editorGroup: IEditorGroup | undefined, editorPane: IEditorPane | undefined): Promise<void> {
+	async function waitForEditorGroupInput(editorGroup: IEditorGroup | undefined, editorPane: IEditorPane | undefined): Promise<boolean> {
 		const expectedInput = editorPane?.input;
 
 		for (let attempt = 0; attempt < editorOpenSettleAttempts; attempt++) {
 			if (editorGroup?.activeEditor && (!expectedInput || editorGroup.activeEditor === expectedInput)) {
-				return;
+				return true;
 			}
 
 			await timeout(50);
 		}
+
+		return false;
 	}
 
-	async function waitForActiveNotebookEditor(editorService: IEditorService, resource: URI): Promise<void> {
+	async function waitForActiveNotebookEditor(editorService: IEditorService, resource: URI): Promise<boolean> {
 		for (let attempt = 0; attempt < editorOpenSettleAttempts; attempt++) {
 			const activeNotebookEditor = getNotebookEditorFromPane(editorService.activeEditorPane);
 			if (activeNotebookEditor?.textModel && isEqual(activeNotebookEditor.textModel.uri, resource)) {
-				return;
+				return true;
 			}
 
 			await timeout(50);
 		}
+
+		return false;
+	}
+
+	async function waitForActiveTextEditor(editorService: IEditorService, resource: URI, requireDirty: boolean): Promise<boolean> {
+		for (let attempt = 0; attempt < editorOpenSettleAttempts; attempt++) {
+			const activeCodeEditor = getCodeEditor(editorService.activeTextEditorControl);
+			const activeModel = activeCodeEditor?.getModel();
+			const isDirty = typeof editorService.activeEditorPane?.input?.isDirty === 'function'
+				? editorService.activeEditorPane.input.isDirty()
+				: false;
+			if (activeModel && isITextModel(activeModel) && isEqual(activeModel.uri, resource) && (!requireDirty || isDirty)) {
+				return true;
+			}
+
+			await timeout(50);
+		}
+
+		return false;
 	}
 
 	async function waitForNextEditorChange(editorService: IEditorService): Promise<void> {
@@ -566,6 +592,7 @@ function registerOpenEditorAPICommands(): void {
 		const openerService = accessor.get(IOpenerService);
 		const pathService = accessor.get(IPathService);
 		const configurationService = accessor.get(IConfigurationService);
+		const textEditorService = accessor.get(ITextEditorService);
 		const untitledTextEditorService = accessor.get(IUntitledTextEditorService);
 
 		const resourceOrString = typeof resourceArg === 'string' ? resourceArg : URI.from(resourceArg, true);
@@ -574,11 +601,17 @@ function registerOpenEditorAPICommands(): void {
 		// use editor options or editor view column or resource scheme
 		// as a hint to use the editor service for opening directly
 		if (optionsArg || typeof columnArg === 'number' || matchesScheme(resourceOrString, Schemas.untitled) || matchesScheme(resourceOrString, Schemas.vscodeNotebookCell)) {
-			const [options, column] = mixinContext(context, optionsArg, columnArg);
+			const [mixedOptions, column] = mixinContext(context, optionsArg, columnArg);
+			const options: ITextEditorOptions = mixedOptions ? { ...mixedOptions } : Object.create(null);
+			if (!options.preserveFocus && typeof options.activation === 'undefined') {
+				options.activation = EditorActivation.ACTIVATE;
+			}
 			const resource = URI.isUri(resourceOrString) ? resourceOrString : URI.parse(resourceOrString);
-			const openResource = matchesScheme(resource, Schemas.vscodeNotebookCell) ? (parseNotebookCellUri(resource)?.notebook ?? resource) : resource;
+			const notebookResource = matchesScheme(resource, Schemas.vscodeNotebookCell) ? (parseNotebookCellUri(resource)?.notebook ?? resource) : resource;
 
 			let input: IResourceEditorInput | IUntitledTextResourceEditorInput;
+			let associatedUntitledInput: EditorInput | undefined;
+			let expectedOpenResource = resource;
 			if (untitledTextEditorService.isUntitledWithAssociatedResource(resource)) {
 				// special case for untitled: we are getting a resource with meaningful
 				// path from an extension to use for the untitled editor. as such, we
@@ -586,29 +619,45 @@ function registerOpenEditorAPICommands(): void {
 				// do so by setting the `forceUntitled: true` and changing the scheme
 				// to a file based one. the untitled editor service takes care to
 				// associate the path properly then.
-				input = { resource: resource.with({ scheme: pathService.defaultUriScheme }), forceUntitled: true, options, label };
+				const associatedResource = resource.with({ scheme: pathService.defaultUriScheme });
+				const untitledModel = await untitledTextEditorService.resolve({ associatedResource });
+				expectedOpenResource = untitledModel.resource;
+				associatedUntitledInput = textEditorService.createTextEditor({ resource: associatedResource, forceUntitled: true, label });
+				input = { resource: associatedResource, forceUntitled: true, options, label };
 			} else {
 				// use any other resource as is
-				input = { resource: openResource, options, label };
+				input = { resource, options, label };
 			}
 
 			const needsNewGroup = typeof column === 'number' && column >= 0 && !editorGroupsService.getGroups(GroupsOrder.GRID_APPEARANCE)[column];
 			const editorChange = waitForNextEditorChange(editorService);
 			const groupAdd = needsNewGroup ? waitForNextGroupAdd(editorGroupsService) : undefined;
 			const targetGroup = columnToEditorGroup(editorGroupsService, configurationService, column);
-			const editorPane = await editorService.openEditor(input, targetGroup);
+			const editorPane = associatedUntitledInput
+				? await editorService.openEditor(associatedUntitledInput, options, targetGroup)
+				: await editorService.openEditor(input, targetGroup);
 			const editorGroup = (editorPane as IEditorPane | undefined)?.group
 				?? (typeof column === 'number' ? editorGroupsService.getGroups(GroupsOrder.GRID_APPEARANCE)[column] : undefined);
+			if (!options?.preserveFocus) {
+				editorPane?.focus();
+			}
 			await editorChange;
 			if (groupAdd) {
 				await groupAdd;
 			}
 			if (untitledTextEditorService.isUntitledWithAssociatedResource(resource)) {
-				await waitForDirtyEditorInput(editorPane);
+				const isDirty = await waitForDirtyEditorInput(editorPane);
+				const isActive = await waitForActiveTextEditor(editorService, expectedOpenResource, true);
+				if (!isDirty || !isActive) {
+					const editorPaneResource = editorPane?.input ? EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })?.toString() : undefined;
+					const activePaneResource = editorService.activeEditorPane?.input ? EditorResourceAccessor.getCanonicalUri(editorService.activeEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })?.toString() : undefined;
+					const activeCodeEditorModel = getCodeEditor(editorService.activeTextEditorControl)?.getModel()?.uri.toString();
+					throw new Error(`Failed to open associated untitled editor. expected=${expectedOpenResource.toString()} pane=${editorPaneResource ?? 'undefined'} activePane=${activePaneResource ?? 'undefined'} activeCodeEditor=${activeCodeEditorModel ?? 'undefined'} dirty=${isDirty} active=${isActive}`);
+				}
 			}
 			await waitForEditorGroupInput(editorGroup, editorPane);
 			if (matchesScheme(resource, Schemas.vscodeNotebookCell)) {
-				await waitForActiveNotebookEditor(editorService, openResource);
+				await waitForActiveNotebookEditor(editorService, notebookResource);
 			}
 			await timeout(typeof column === 'number' || matchesScheme(resource, Schemas.vscodeNotebookCell) ? 100 : 0);
 		}

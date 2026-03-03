@@ -315,6 +315,10 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 
 	private async _waitForNotebookTextEditor(resource: URI): Promise<void> {
 		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
+			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebook.uri, resource)) {
+				return;
+			}
+
 			const activeTextEditorUri = this._textDocumentsAndEditors.activeEditor()?.document.uri;
 			if (activeTextEditorUri) {
 				if (isEqual(activeTextEditorUri, resource)) {

@@ -119,7 +119,7 @@ class CodeLensAdapter {
 	) { }
 
 	async provideCodeLenses(resource: URI, token: CancellationToken): Promise<extHostProtocol.ICodeLensListDto | undefined> {
-		const doc = this._documents.getDocument(resource);
+		const doc = (await this._documents.ensureDocumentData(resource)).document;
 
 		const lenses = await this._provider.provideCodeLenses(doc, token);
 		if (!lenses || token.isCancellationRequested) {
@@ -1748,7 +1748,7 @@ class LinkProviderAdapter {
 	) { }
 
 	async provideLinks(resource: URI, token: CancellationToken): Promise<extHostProtocol.ILinksListDto | undefined> {
-		const doc = this._documents.getDocument(resource);
+		const doc = (await this._documents.ensureDocumentData(resource)).document;
 
 		const links = await this._provider.provideDocumentLinks(doc, token);
 		if (!Array.isArray(links) || links.length === 0) {

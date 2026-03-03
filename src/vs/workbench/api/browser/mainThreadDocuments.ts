@@ -12,7 +12,7 @@ import { ITextModel, shouldSynchronizeModel } from '../../../editor/common/model
 import { IModelService } from '../../../editor/common/services/model.js';
 import { ITextModelService } from '../../../editor/common/services/resolverService.js';
 import { IFileService, FileOperation } from '../../../platform/files/common/files.js';
-import { ExtHostContext, ExtHostDocumentsShape, MainThreadDocumentsShape } from '../common/extHost.protocol.js';
+import { ExtHostContext, ExtHostDocumentsShape, IModelAddedData, MainThreadDocumentsShape } from '../common/extHost.protocol.js';
 import { EncodingMode, ITextFileEditorModel, ITextFileService, TextFileResolveReason } from '../../services/textfile/common/textfiles.js';
 import { IUntitledTextEditorModel } from '../../services/untitled/common/untitledTextEditorModel.js';
 import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
@@ -159,7 +159,7 @@ export class MainThreadDocuments extends Disposable implements MainThreadDocumen
 				this._proxy.$acceptModelSaved(e.model.resource);
 			}
 		}));
-		this._store.add(_textFileService.files.onDidChangeDirty(m => {
+		this._store.add(Event.any<ITextFileEditorModel | IUntitledTextEditorModel>(_textFileService.files.onDidChangeDirty, _textFileService.untitled.onDidChangeDirty)(m => {
 			if (this._shouldHandleFileEvent(m.resource)) {
 				this._proxy.$acceptDirtyStateChanged(m.resource, m.isDirty());
 			}
@@ -198,6 +198,10 @@ export class MainThreadDocuments extends Disposable implements MainThreadDocumen
 			return tracker.isCaughtUpWithContentChanges();
 		}
 		return true;
+	}
+
+	hasTrackedModel(resource: URI): boolean {
+		return this._modelTrackers.has(resource);
 	}
 
 	private _shouldHandleFileEvent(resource: URI): boolean {
@@ -271,6 +275,28 @@ export class MainThreadDocuments extends Disposable implements MainThreadDocumen
 		} else {
 			return canonicalUri;
 		}
+	}
+
+	async $tryGetDocumentData(uriData: UriComponents): Promise<IModelAddedData | undefined> {
+		const resource = this._uriIdentityService.asCanonicalUri(URI.revive(uriData));
+		const model = this._modelService.getModel(resource);
+		if (!model || !shouldSynchronizeModel(model)) {
+			return undefined;
+		}
+
+		return {
+			uri: model.uri,
+			versionId: model.getVersionId(),
+			lines: model.getLinesContent(),
+			EOL: model.getEOL(),
+			languageId: model.getLanguageId(),
+			isDirty: this._isDirty(model.uri),
+			encoding: this._textFileService.getEncoding(model.uri)
+		};
+	}
+
+	private _isDirty(resource: URI): boolean {
+		return this._textFileService.untitled.get(resource)?.isDirty() ?? this._textFileService.isDirty(resource);
 	}
 
 	private async _waitForModelTracker(resource: URI): Promise<boolean> {

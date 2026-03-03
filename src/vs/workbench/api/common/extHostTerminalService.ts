@@ -419,6 +419,7 @@ export abstract class BaseExtHostTerminalService extends Disposable implements I
 	protected _extensionTerminalAwaitingStart: { [id: number]: { initialDimensions: ITerminalDimensionsDto | undefined } | undefined } = {};
 	protected _getTerminalPromises: { [id: number]: Promise<ExtHostTerminal | undefined> } = {};
 	protected _environmentVariableCollections: Map<string, UnifiedEnvironmentVariableCollection> = new Map();
+	private readonly _environmentVariableCollectionSyncs = new Map<string, Promise<void>>();
 	private _defaultProfile: ITerminalProfile | undefined;
 	private _defaultAutomationProfile: ITerminalProfile | undefined;
 	private readonly _lastQuickFixCommands: MutableDisposable<IDisposable> = this._register(new MutableDisposable());
@@ -1016,7 +1017,30 @@ export abstract class BaseExtHostTerminalService extends Disposable implements I
 	private _syncEnvironmentVariableCollection(extensionIdentifier: string, collection: UnifiedEnvironmentVariableCollection): void {
 		const serialized = serializeEnvironmentVariableCollection(collection.map);
 		const serializedDescription = serializeEnvironmentDescriptionMap(collection.descriptionMap);
-		this._proxy.$setEnvironmentVariableCollection(extensionIdentifier, collection.persistent, serialized.length === 0 ? undefined : serialized, serializedDescription);
+		const sync = Promise.resolve(this._proxy.$setEnvironmentVariableCollection(
+			extensionIdentifier,
+			collection.persistent,
+			serialized.length === 0 ? undefined : serialized,
+			serializedDescription
+		));
+		const previous = this._environmentVariableCollectionSyncs.get(extensionIdentifier);
+		const next = (previous ?? Promise.resolve())
+			.catch(() => undefined)
+			.then(() => sync);
+		this._environmentVariableCollectionSyncs.set(extensionIdentifier, next);
+		void next.finally(() => {
+			if (this._environmentVariableCollectionSyncs.get(extensionIdentifier) === next) {
+				this._environmentVariableCollectionSyncs.delete(extensionIdentifier);
+			}
+		});
+	}
+
+	protected async _whenEnvironmentVariableCollectionsAreSynced(): Promise<void> {
+		if (this._environmentVariableCollectionSyncs.size === 0) {
+			return;
+		}
+
+		await Promise.allSettled(this._environmentVariableCollectionSyncs.values());
 	}
 
 	public $initEnvironmentVariableCollections(collections: [string, ISerializableEnvironmentVariableCollection][]): void {

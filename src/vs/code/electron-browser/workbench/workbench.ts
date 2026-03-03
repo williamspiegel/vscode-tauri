@@ -10,6 +10,16 @@
 	// Add a perf entry right from the top
 	performance.mark('code/didStartRenderer');
 
+	const markTauriWorkbenchStage = (stage: string) => {
+		try {
+			(window as typeof window & { __VSCODE_TAURI_WORKBENCH_STAGE__?: string }).__VSCODE_TAURI_WORKBENCH_STAGE__ = stage;
+		} catch {
+			// Ignore failures writing debug-only startup markers.
+		}
+	};
+
+	markTauriWorkbenchStage('renderer-start');
+
 	type ISandboxConfiguration = import('../../../base/parts/sandbox/common/sandboxTypes.js').ISandboxConfiguration;
 	type ILoadResult<M, T extends ISandboxConfiguration> = import('../../../platform/window/electron-browser/window.js').ILoadResult<M, T>;
 	type ILoadOptions<T extends ISandboxConfiguration> = import('../../../platform/window/electron-browser/window.js').ILoadOptions<T>;
@@ -504,6 +514,7 @@
 
 	//#endregion
 
+	markTauriWorkbenchStage('before-load');
 	const { result, configuration } = await load<IDesktopMain, INativeWindowConfiguration>(
 		{
 			configureDeveloperSettings: function (windowConfig) {
@@ -553,7 +564,10 @@
 
 	// Mark start of workbench
 	performance.mark('code/didLoadWorkbenchMain');
+	markTauriWorkbenchStage('after-load');
 
 	// Load workbench
+	markTauriWorkbenchStage('before-main');
 	result.main(configuration);
+	markTauriWorkbenchStage('after-main');
 }());

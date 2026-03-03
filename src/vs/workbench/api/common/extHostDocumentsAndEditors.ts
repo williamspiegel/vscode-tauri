@@ -64,6 +64,7 @@ export class ExtHostDocumentsAndEditors implements ExtHostDocumentsAndEditorsSha
 		const removedDocuments: ExtHostDocumentData[] = [];
 		const addedDocuments: ExtHostDocumentData[] = [];
 		const removedEditors: ExtHostTextEditor[] = [];
+		let activeEditorChanged = false;
 
 		if (delta.removedDocuments) {
 			for (const uriComponent of delta.removedDocuments) {
@@ -140,7 +141,13 @@ export class ExtHostDocumentsAndEditors implements ExtHostDocumentsAndEditorsSha
 
 		if (delta.newActiveEditor !== undefined) {
 			assert.ok(delta.newActiveEditor === null || this._editors.has(delta.newActiveEditor), `active editor '${delta.newActiveEditor}' does not exist`);
-			this._activeEditorId = delta.newActiveEditor;
+			if (this._activeEditorId !== delta.newActiveEditor) {
+				this._activeEditorId = delta.newActiveEditor;
+				activeEditorChanged = true;
+			}
+		} else if (this._activeEditorId && !this._editors.has(this._activeEditorId)) {
+			this._activeEditorId = null;
+			activeEditorChanged = true;
 		}
 
 		dispose(removedDocuments);
@@ -157,7 +164,7 @@ export class ExtHostDocumentsAndEditors implements ExtHostDocumentsAndEditorsSha
 		if (delta.removedEditors || delta.addedEditors) {
 			this._onDidChangeVisibleTextEditors.fire(this.allEditors().map(editor => editor.value));
 		}
-		if (delta.newActiveEditor !== undefined) {
+		if (activeEditorChanged) {
 			this._onDidChangeActiveTextEditor.fire(this.activeEditor());
 		}
 	}
@@ -172,6 +179,15 @@ export class ExtHostDocumentsAndEditors implements ExtHostDocumentsAndEditorsSha
 
 	getEditor(id: string): ExtHostTextEditor | undefined {
 		return this._editors.get(id);
+	}
+
+	adoptActiveEditor(id: string): void {
+		if (!this._editors.has(id) || this._activeEditorId === id) {
+			return;
+		}
+
+		this._activeEditorId = id;
+		this._onDidChangeActiveTextEditor.fire(this.activeEditor());
 	}
 
 	activeEditor(): vscode.TextEditor | undefined;

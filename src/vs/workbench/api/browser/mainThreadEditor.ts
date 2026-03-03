@@ -5,7 +5,7 @@
 
 import { Emitter, Event } from '../../../base/common/event.js';
 import { DisposableStore } from '../../../base/common/lifecycle.js';
-import { ICodeEditor } from '../../../editor/browser/editorBrowser.js';
+import { getCodeEditor, ICodeEditor } from '../../../editor/browser/editorBrowser.js';
 import { RenderLineNumbersType, TextEditorCursorStyle, cursorStyleToString, EditorOption } from '../../../editor/common/config/editorOptions.js';
 import { IRange, Range } from '../../../editor/common/core/range.js';
 import { ISelection, Selection } from '../../../editor/common/core/selection.js';
@@ -15,7 +15,7 @@ import { ISingleEditOperation } from '../../../editor/common/core/editOperation.
 import { IModelService } from '../../../editor/common/services/model.js';
 import { SnippetController2 } from '../../../editor/contrib/snippet/browser/snippetController2.js';
 import { IApplyEditsOptions, IEditorPropertiesChangeData, IResolvedTextEditorConfiguration, ISnippetOptions, ITextEditorConfigurationUpdate, TextEditorRevealType } from '../common/extHost.protocol.js';
-import { IEditorPane } from '../../common/editor.js';
+import { EditorResourceAccessor, IEditorPane, SideBySideEditor } from '../../common/editor.js';
 import { equals } from '../../../base/common/arrays.js';
 import { CodeEditorStateFlag, EditorState } from '../../../editor/contrib/editorState/browser/editorState.js';
 import { IClipboardService } from '../../../platform/clipboard/common/clipboardService.js';
@@ -473,7 +473,12 @@ export class MainThreadTextEditor {
 		if (!editor) {
 			return false;
 		}
-		return editor.getControl() === this._codeEditor;
+		if (getCodeEditor(editor.getControl()) === this._codeEditor) {
+			return true;
+		}
+
+		const resource = editor.input ? EditorResourceAccessor.getCanonicalUri(editor.input, { supportSideBySide: SideBySideEditor.PRIMARY }) : undefined;
+		return !!resource && resource.toString() === this._model.uri.toString();
 	}
 
 	public applyEdits(versionIdCheck: number, edits: ISingleEditOperation[], opts: IApplyEditsOptions): boolean {

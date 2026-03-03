@@ -93,4 +93,44 @@ suite('ExtHostDocumentsAndEditors', () => {
 		}
 	});
 
+	test('clears stale active editor when the active editor is removed without replacement', () => {
+		const resource = URI.parse('test:/file.txt');
+		const seen: (string | undefined)[] = [];
+		const listener = editors.onDidChangeActiveTextEditor(editor => seen.push(editor?.document.uri.toString()));
+
+		try {
+			editors.$acceptDocumentsAndEditorsDelta({
+				addedDocuments: [{
+					isDirty: false,
+					languageId: 'plaintext',
+					uri: resource,
+					versionId: 1,
+					lines: ['hello'],
+					EOL: '\n',
+					encoding: 'utf8'
+				}],
+				addedEditors: [{
+					id: 'editor-1',
+					documentUri: resource,
+					selections: [],
+					options: { tabSize: 4, indentSize: 4, insertSpaces: true, cursorStyle: 1, lineNumbers: 1 },
+					visibleRanges: [],
+					editorPosition: 1
+				}],
+				newActiveEditor: 'editor-1'
+			});
+
+			assert.strictEqual(editors.activeEditor()?.document.uri.toString(), resource.toString());
+
+			editors.$acceptDocumentsAndEditorsDelta({
+				removedEditors: ['editor-1']
+			});
+
+			assert.strictEqual(editors.activeEditor(), undefined);
+			assert.deepStrictEqual(seen, [resource.toString(), undefined]);
+		} finally {
+			listener.dispose();
+		}
+	});
+
 });

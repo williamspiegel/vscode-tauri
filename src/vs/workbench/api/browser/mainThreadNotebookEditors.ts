@@ -134,6 +134,9 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, resolvedTargetGroup, knownMatchingEditorIds);
 
 		if (notebookEditor) {
+			if (!options.preserveFocus) {
+				await this._waitForActiveNotebookEditor(notebookEditor.getId());
+			}
 			return notebookEditor.getId();
 		} else {
 			throw new Error(`Notebook Editor creation failure for document ${JSON.stringify(resource)}`);
@@ -151,6 +154,17 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 
 		return undefined;
+	}
+
+	private async _waitForActiveNotebookEditor(editorId: string): Promise<void> {
+		for (let attempt = 0; attempt < MainThreadNotebookEditors._editorSettleAttempts; attempt++) {
+			const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
+			if (activeNotebookEditor?.getId() === editorId) {
+				return;
+			}
+
+			await timeout(50);
+		}
 	}
 
 	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number, knownMatchingEditorIds: ReadonlySet<string>): INotebookEditor | undefined {
