@@ -10,8 +10,10 @@ import { isEqual } from '../../../base/common/resources.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { EditorActivation } from '../../../platform/editor/common/editor.js';
+import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { getNotebookEditorFromEditorPane, INotebookEditor, INotebookEditorOptions } from '../../contrib/notebook/browser/notebookBrowser.js';
 import { INotebookEditorService } from '../../contrib/notebook/browser/services/notebookEditorService.js';
+import { NotebookEditorInput } from '../../contrib/notebook/common/notebookEditorInput.js';
 import { ICellRange } from '../../contrib/notebook/common/notebookRange.js';
 import { EditorResourceAccessor, IEditorPane, SideBySideEditor } from '../../common/editor.js';
 import { columnToEditorGroup, editorGroupToColumn } from '../../services/editor/common/editorGroupColumn.js';
@@ -48,7 +50,8 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		@IEditorService private readonly _editorService: IEditorService,
 		@INotebookEditorService private readonly _notebookEditorService: INotebookEditorService,
 		@IEditorGroupsService private readonly _editorGroupService: IEditorGroupsService,
-		@IConfigurationService private readonly _configurationService: IConfigurationService
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService
 	) {
 		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebookEditors);
 
@@ -67,6 +70,12 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		for (const editor of editors) {
 
 			const editorDisposables = new DisposableStore();
+			const notifyEditorPropertiesChanged = () => {
+				this._proxy.$acceptEditorPropertiesChanged(editor.getId(), {
+					visibleRanges: { ranges: editor.visibleRanges },
+					selections: { selections: editor.getSelections() }
+				});
+			};
 			editorDisposables.add(editor.onDidChangeVisibleRanges(() => {
 				this._proxy.$acceptEditorPropertiesChanged(editor.getId(), { visibleRanges: { ranges: editor.visibleRanges } });
 			}));
@@ -77,6 +86,19 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 
 			const wrapper = new MainThreadNotebook(editor, editorDisposables);
 			this._mainThreadEditors.set(editor.getId(), wrapper);
+			notifyEditorPropertiesChanged();
+			void (async () => {
+				for (let attempt = 0; attempt < 40; attempt++) {
+					if (!this._mainThreadEditors.has(editor.getId())) {
+						return;
+					}
+					if (editor.visibleRanges.length > 0) {
+						notifyEditorPropertiesChanged();
+						return;
+					}
+					await timeout(50);
+				}
+			})();
 		}
 	}
 
@@ -124,7 +146,9 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		const needsNewGroup = typeof targetGroup === 'number'
 			&& (targetGroup < 0 || !this._editorGroupService.getGroups(GroupsOrder.GRID_APPEARANCE)[targetGroup]);
 		const groupAdd = needsNewGroup ? this._waitForNextGroupAdd() : undefined;
-		const editorPane = await this._editorService.openEditor({ resource: revivedResource, options: editorOptions }, targetGroup);
+		const editorInput = NotebookEditorInput.getOrCreate(this._instantiationService, revivedResource, undefined, viewType, {});
+		await editorInput.resolve();
+		const editorPane = await this._editorService.openEditor(editorInput, editorOptions, targetGroup);
 		if (groupAdd) {
 			await groupAdd;
 		}
@@ -140,8 +164,45 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			}
 			return notebookEditor.getId();
 		} else {
-			throw new Error(`Notebook Editor creation failure for document ${JSON.stringify(resource)}`);
+			throw new Error([
+				`Notebook Editor creation failure for document ${JSON.stringify(resource)}`,
+				this._describeNotebookOpenState(revivedResource, editorPane, resolvedTargetGroup)
+			].join('\n'));
 		}
+	}
+
+	private _describeNotebookOpenState(resource: URI, editorPane: unknown, targetGroup: IEditorGroup | number): string {
+		const candidateEditorPane = editorPane as IEditorPane | undefined;
+		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		const directPaneResource = candidateEditorPane?.input
+			? EditorResourceAccessor.getCanonicalUri(candidateEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })?.toString()
+			: undefined;
+		const serviceEditors = this._notebookEditorService.listNotebookEditors().map(editor => ({
+			id: editor.getId(),
+			hasModel: editor.hasModel(),
+			resource: editor.textModel?.uri.toString() ?? 'undefined'
+		}));
+		const visibleEditors = this._editorService.visibleEditorPanes.map(visibleEditorPane => {
+			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
+			return {
+				groupId: visibleEditorPane.group.id,
+				editorId: visibleNotebookEditor?.getId() ?? 'undefined',
+				hasModel: visibleNotebookEditor?.hasModel() ?? false,
+				resource: visibleNotebookEditor?.textModel?.uri.toString() ?? 'undefined',
+				input: visibleEditorPane.input
+					? EditorResourceAccessor.getCanonicalUri(visibleEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })?.toString() ?? 'undefined'
+					: 'undefined'
+			};
+		});
+
+		return [
+			`requested=${resource.toString()}`,
+			`targetGroup=${typeof targetGroup === 'number' ? targetGroup : targetGroup.id}`,
+			`directPaneInput=${directPaneResource ?? 'undefined'}`,
+			`directNotebookEditor=${directNotebookEditor ? JSON.stringify({ id: directNotebookEditor.getId(), hasModel: directNotebookEditor.hasModel(), resource: directNotebookEditor.textModel?.uri.toString() ?? 'undefined' }) : 'undefined'}`,
+			`serviceEditors=${JSON.stringify(serviceEditors)}`,
+			`visibleEditors=${JSON.stringify(visibleEditors)}`
+		].join(' ');
 	}
 
 	private async _waitForNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number, knownMatchingEditorIds: ReadonlySet<string>): Promise<INotebookEditor | undefined> {
@@ -165,6 +226,11 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 				return;
 			}
 
+			const visibleTargetNotebookEditors = this._getVisibleNotebookEditorsFor(resource, targetGroup);
+			if (visibleTargetNotebookEditors.some(visibleEditor => visibleEditor.getId() === editorId)) {
+				return;
+			}
+
 			if (activeEditorPane && this._isInTargetGroup(activeEditorPane, targetGroup)) {
 				const activeResource = activeNotebookEditor?.textModel?.uri
 					?? EditorResourceAccessor.getOriginalUri(activeEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
@@ -180,8 +246,10 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number, knownMatchingEditorIds: ReadonlySet<string>): INotebookEditor | undefined {
 		const candidateEditorPane = editorPane as IEditorPane | undefined;
 		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		const directNotebookResource = this._getNotebookResource(candidateEditorPane, directNotebookEditor);
 		if (directNotebookEditor
-			&& (!directNotebookEditor.textModel || isEqual(directNotebookEditor.textModel.uri, resource))
+			&& directNotebookResource
+			&& isEqual(directNotebookResource, resource)
 			&& (knownMatchingEditorIds.size === 0 || !knownMatchingEditorIds.has(directNotebookEditor.getId()))
 			&& (!candidateEditorPane || this._isInTargetGroup(candidateEditorPane, targetGroup))) {
 			return directNotebookEditor;
@@ -222,7 +290,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 				.filter(visibleEditorPane => visibleEditorPane.group !== candidateEditorPane.group)
 				.map(visibleEditorPane => getNotebookEditorFromEditorPane(visibleEditorPane))
 				.filter((visibleNotebookEditor): visibleNotebookEditor is INotebookEditor =>
-					!!visibleNotebookEditor && (!visibleNotebookEditor.textModel || isEqual(visibleNotebookEditor.textModel.uri, resource))
+					!!visibleNotebookEditor && visibleNotebookEditor.hasModel() && !!visibleNotebookEditor.textModel && isEqual(visibleNotebookEditor.textModel.uri, resource)
 				);
 
 			if (sideGroupNotebookEditors.length === 1) {
@@ -236,7 +304,8 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			}
 
 			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
-			if (visibleNotebookEditor && (!visibleNotebookEditor.textModel || isEqual(visibleNotebookEditor.textModel.uri, resource))) {
+			const visibleNotebookResource = this._getNotebookResource(visibleEditorPane, visibleNotebookEditor);
+			if (visibleNotebookEditor && visibleNotebookResource && isEqual(visibleNotebookResource, resource)) {
 				return visibleNotebookEditor;
 			}
 		}
@@ -260,12 +329,25 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			}
 
 			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
-			if (visibleNotebookEditor && (!visibleNotebookEditor.textModel || isEqual(visibleNotebookEditor.textModel.uri, resource))) {
+			const visibleNotebookResource = this._getNotebookResource(visibleEditorPane, visibleNotebookEditor);
+			if (visibleNotebookEditor && (!visibleNotebookResource || isEqual(visibleNotebookResource, resource))) {
 				result.push(visibleNotebookEditor);
 			}
 		}
 
 		return result;
+	}
+
+	private _getNotebookResource(editorPane: IEditorPane | undefined, notebookEditor: INotebookEditor | undefined): URI | undefined {
+		if (notebookEditor?.textModel) {
+			return notebookEditor.textModel.uri;
+		}
+
+		if (editorPane?.input) {
+			return EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
+		}
+
+		return undefined;
 	}
 
 	private _getVisibleNotebookEditorPane(notebookEditor: INotebookEditor): IEditorPane | undefined {

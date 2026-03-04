@@ -590,11 +590,25 @@ export class InteractiveEditor extends EditorPane implements IEditorPaneWithScro
 	}
 
 	private _scrollIfNecessary(cvm: ICellViewModel) {
-		const index = this._notebookWidget.value!.getCellIndex(cvm);
-		if (index === this._notebookWidget.value!.getLength() - 1) {
-			// If we're already at the bottom or auto scroll is enabled, scroll to the bottom
-			if (this._configurationService.getValue<boolean>(ReplEditorSettings.interactiveWindowAlwaysScrollOnNewCell) || this._cellAtBottom(cvm)) {
-				this._notebookWidget.value!.scrollToBottom();
+		const notebookWidget = this._notebookWidget.value;
+		if (!notebookWidget) {
+			return;
+		}
+
+		const latestCell = notebookWidget.getCellByHandle(cvm.handle) ?? cvm;
+		const index = notebookWidget.getCellIndex(latestCell);
+		if (index < 0) {
+			return;
+		}
+
+		const len = notebookWidget.getLength();
+		const isLastCell = index >= Math.max(0, len - 1);
+		const isNearLastCellInRepl = notebookWidget.isReplHistory && index >= Math.max(0, len - 2);
+		if (isLastCell || isNearLastCellInRepl) {
+			// If we're already at the bottom or auto scroll is enabled, scroll to the bottom.
+			if (this._configurationService.getValue<boolean>(ReplEditorSettings.interactiveWindowAlwaysScrollOnNewCell) || this._cellAtBottom(latestCell)) {
+				notebookWidget.scrollToBottom();
+				notebookWidget.setScrollTop(Number.MAX_SAFE_INTEGER);
 			}
 		}
 	}

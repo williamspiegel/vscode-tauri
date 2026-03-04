@@ -450,20 +450,61 @@ function registerEditorGroupsLayoutCommands(): void {
 
 	CommandsRegistry.registerCommand(REVERT_AND_CLOSE_ALL_EDITORS_COMMAND_ID, async (accessor: ServicesAccessor) => {
 		const editorGroupsService = accessor.get(IEditorGroupsService);
-		const editorService = accessor.get(IEditorService);
-		for (const group of editorGroupsService.groups) {
-			for (const editor of [...group.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE)]) {
-				try {
-					await editorService.revert({ editor, groupId: group.id });
-				} catch {
-					await editorService.revert({ editor, groupId: group.id }, { soft: true });
-				}
+		const textEditorService = accessor.get(ITextEditorService);
+		for (let pass = 0; pass < 6; pass++) {
+			const groups = [...editorGroupsService.getGroups(GroupsOrder.GRID_APPEARANCE)];
+			for (const group of groups) {
+				for (let attempt = 0; attempt < 4 && group.count > 0; attempt++) {
+					const remainingEditors = group.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
+					if (remainingEditors.length > 0) {
+						try {
+							await group.replaceEditors(remainingEditors.map((editor, index) => ({
+								editor,
+								replacement: textEditorService.createTextEditor({
+									resource: URI.from({ scheme: Schemas.untitled, path: `/tauri-force-close-${Date.now()}-${group.id}-${pass}-${attempt}-${index}` }),
+									forceUntitled: true
+								}),
+								forceReplaceDirty: true,
+								options: { preserveFocus: true, pinned: true }
+							})));
+						} catch {
+							// Continue into the close paths below.
+						}
+					}
 
-				await group.closeEditor(editor);
+					const editorsToClose = group.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
+					if (editorsToClose.length > 0) {
+						try {
+							await group.closeEditors(editorsToClose, { preserveFocus: true });
+						} catch {
+							// Continue into the stronger closeAll path below.
+						}
+					}
+
+					try {
+						await group.closeAllEditors({ excludeConfirming: true });
+					} catch {
+						// Fall through to the internal force-close path below.
+					}
+
+					if (group.count > 0) {
+						(group as unknown as { doCloseAllEditors(): void }).doCloseAllEditors();
+						await timeout(50);
+					}
+				}
 			}
 
-			if (group.count > 0) {
-				await group.closeAllEditors({ excludeConfirming: true });
+			for (const group of [...editorGroupsService.getGroups(GroupsOrder.MOST_RECENTLY_ACTIVE)]) {
+				if (editorGroupsService.count <= 1) {
+					break;
+				}
+				if (group.count === 0 && group !== editorGroupsService.activeGroup) {
+					editorGroupsService.removeGroup(group);
+				}
+			}
+
+			if (editorGroupsService.groups.every(group => group.count === 0)) {
+				break;
 			}
 		}
 
@@ -705,6 +746,7 @@ function registerOpenEditorAPICommands(): void {
 						(activeNotebook && isEqual(activeNotebook, notebookResource))
 					) {
 						activeCodeEditor.focus();
+						await commandService.executeCommand('_workbench.ensureActiveTextEditorMirror');
 					}
 				}
 			}

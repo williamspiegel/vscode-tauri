@@ -3,10 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { timeout } from '../../../base/common/async.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { ILogService } from '../../../platform/log/common/log.js';
 import { ExtHostInteractiveShape, IMainContext } from './extHost.protocol.js';
-import { ApiCommand, ApiCommandArgument, ApiCommandResult, ExtHostCommands } from './extHostCommands.js';
+import { ExtHostCommands } from './extHostCommands.js';
 import { ExtHostDocumentsAndEditors } from './extHostDocumentsAndEditors.js';
 import { ExtHostNotebookController } from './extHostNotebook.js';
 import { NotebookEditor } from 'vscode';
@@ -19,28 +20,91 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 		private _commands: ExtHostCommands,
 		_logService: ILogService
 	) {
-		const openApiCommand = new ApiCommand(
-			'interactive.open',
-			'_interactive.open',
-			'Open interactive window and return notebook editor and input URI',
-			[
-				new ApiCommandArgument('showOptions', 'Show Options', v => true, v => v),
-				new ApiCommandArgument('resource', 'Interactive resource Uri', v => true, v => v),
-				new ApiCommandArgument('controllerId', 'Notebook controller Id', v => true, v => v),
-				new ApiCommandArgument('title', 'Interactive editor title', v => true, v => v)
-			],
-			new ApiCommandResult<{ notebookUri: UriComponents; inputUri: UriComponents; notebookEditorId?: string }, { notebookUri: URI; inputUri: URI; notebookEditor?: NotebookEditor }>('Notebook and input URI', (v: { notebookUri: UriComponents; inputUri: UriComponents; notebookEditorId?: string }) => {
-				_logService.debug('[ExtHostInteractive] open iw with notebook editor id', v.notebookEditorId);
-				if (v.notebookEditorId !== undefined) {
-					const editor = this._extHostNotebooks.getEditorById(v.notebookEditorId);
-					_logService.debug('[ExtHostInteractive] notebook editor found', editor.id);
-					return { notebookUri: URI.revive(v.notebookUri), inputUri: URI.revive(v.inputUri), notebookEditor: editor.apiEditor };
+		this._commands.registerCommand(false, 'interactive.open', async (
+			showOptions?: number | { viewColumn?: number; preserveFocus?: boolean },
+			resource?: URI,
+			controllerId?: string,
+			title?: string
+		): Promise<{ notebookUri: URI; inputUri: URI; notebookEditor?: NotebookEditor }> => {
+			const result = await this._commands.executeCommand<{ notebookUri: UriComponents; inputUri: UriComponents; notebookEditorId?: string }>(
+				'_interactive.open',
+				showOptions,
+				resource,
+				controllerId,
+				title
+			);
+
+			_logService.debug('[ExtHostInteractive] open iw with notebook editor id', result.notebookEditorId);
+
+			const notebookUri = URI.revive(result.notebookUri);
+			const inputUri = URI.revive(result.inputUri);
+			const notebookEditor = await this._resolveNotebookEditor(result.notebookEditorId, notebookUri);
+			const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
+			const showNotebookOptions = typeof showOptions === 'number' ? { viewColumn: showOptions } : showOptions;
+
+			if (notebookEditor) {
+				_logService.debug('[ExtHostInteractive] notebook editor found', notebookEditor.id);
+				if (isTauriIntegration && notebookEditor.apiEditor.visibleRanges.length === 0) {
+					try {
+						const notebookDocument = await this._extHostNotebooks.openNotebookDocument(notebookUri);
+						const recoveredNotebookEditor = await this._extHostNotebooks.showNotebookDocument(notebookDocument, showNotebookOptions);
+						_logService.debug('[ExtHostInteractive] notebook editor had no visible ranges, recovered via showNotebookDocument', notebookUri.toString());
+						return { notebookUri, inputUri, notebookEditor: recoveredNotebookEditor };
+					} catch (error) {
+						_logService.debug('[ExtHostInteractive] failed to recover notebook editor with visible ranges', notebookUri.toString(), error);
+					}
 				}
-				_logService.debug('[ExtHostInteractive] notebook editor not found, uris for the interactive document', v.notebookUri, v.inputUri);
-				return { notebookUri: URI.revive(v.notebookUri), inputUri: URI.revive(v.inputUri) };
-			})
-		);
-		this._commands.registerApiCommand(openApiCommand);
+
+				return { notebookUri, inputUri, notebookEditor: notebookEditor.apiEditor };
+			}
+
+			try {
+				const notebookDocument = await this._extHostNotebooks.openNotebookDocument(notebookUri);
+				const notebookEditor = await this._extHostNotebooks.showNotebookDocument(
+					notebookDocument,
+					showNotebookOptions
+				);
+				_logService.debug('[ExtHostInteractive] notebook editor recovered via showNotebookDocument', notebookUri.toString());
+				return { notebookUri, inputUri, notebookEditor };
+			} catch (error) {
+				_logService.debug('[ExtHostInteractive] failed to recover notebook editor via showNotebookDocument', notebookUri.toString(), error);
+			}
+
+			_logService.debug('[ExtHostInteractive] notebook editor not found, uris for the interactive document', result.notebookUri, result.inputUri);
+			return { notebookUri, inputUri };
+		});
+	}
+
+	private async _resolveNotebookEditor(editorId: string | undefined, notebookUri: URI): Promise<ReturnType<ExtHostNotebookController['getEditorById']> | undefined> {
+		for (let attempt = 0; attempt < 200; attempt++) {
+			if (editorId) {
+				try {
+					return this._extHostNotebooks.getEditorById(editorId);
+				} catch {
+					// Wait for delayed notebook editor registration on the ext-host side.
+				}
+			}
+
+			const visibleNotebookEditor = this._extHostNotebooks.visibleNotebookEditors.find(editor => editor.notebook.uri.toString() === notebookUri.toString());
+			if (visibleNotebookEditor) {
+				const visibleEditorId = this._extHostNotebooks.getIdByEditor(visibleNotebookEditor);
+				if (visibleEditorId) {
+					return this._extHostNotebooks.getEditorById(visibleEditorId);
+				}
+			}
+
+			const activeNotebookEditor = this._extHostNotebooks.activeNotebookEditor;
+			if (activeNotebookEditor && activeNotebookEditor.notebook.uri.toString() === notebookUri.toString()) {
+				const activeEditorId = this._extHostNotebooks.getIdByEditor(activeNotebookEditor);
+				if (activeEditorId) {
+					return this._extHostNotebooks.getEditorById(activeEditorId);
+				}
+			}
+
+			await timeout(50);
+		}
+
+		return undefined;
 	}
 
 	$willAddInteractiveDocument(uri: UriComponents, eol: string, languageId: string, notebookUri: UriComponents) {

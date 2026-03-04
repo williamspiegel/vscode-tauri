@@ -287,9 +287,7 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 			}
 
 			await this._focusNotebookCellEditor(editor, uri);
-			await this._waitForNotebookCellOwner(notebookUri);
 			await this._focusNotebookCellOwner(notebookUri, uri);
-			await this._waitForActiveNotebookCellOwner(notebookUri);
 			return this._waitForNotebookCellCodeEditor(editor, uri);
 		}
 
@@ -783,6 +781,6 @@ CommandsRegistry.registerCommand('_workbench.revertAllDirty', async function (ac
 
 	const workingCopyService = accessor.get(IWorkingCopyService);
 	for (const workingCopy of workingCopyService.dirtyWorkingCopies) {
-		await workingCopy.revert({ soft: true });
+		await workingCopy.revert({ soft: workingCopy.resource.scheme !== Schemas.untitled });
 	}
 });

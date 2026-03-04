@@ -362,15 +362,28 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		}
 
 		const viewType = !!options?.asRepl ? 'repl' : notebook.notebookType;
-		const editorId = await this._notebookEditorsProxy.$tryShowNotebookDocument(notebook.uri, viewType, resolvedOptions);
-		const editor = editorId ? await this._waitForEditor(editorId, notebook.uri, existingMatchingEditorIds) : undefined;
+		const editorId = await this._withTauriNotebookShowTimeout(
+			`$tryShowNotebookDocument(${notebook.uri.toString()})`,
+			this._notebookEditorsProxy.$tryShowNotebookDocument(notebook.uri, viewType, resolvedOptions),
+			20000
+		);
+		const editor = editorId ? await this._withTauriNotebookShowTimeout(
+			`_waitForEditor(${notebook.uri.toString()})`,
+			this._waitForEditor(editorId, notebook.uri, existingMatchingEditorIds)
+		) : undefined;
 
 		if (editor) {
 			if (!resolvedOptions.preserveFocus) {
 				const editorResource = this._editors.get(editorId)?.notebookData.uri ?? editor.notebook?.uri;
-				await this._waitForActiveEditor(editorId, editor);
+				await this._withTauriNotebookShowTimeout(
+					`_waitForActiveEditor(${notebook.uri.toString()})`,
+					this._waitForActiveEditor(editorId, editor)
+				);
 				if (editorResource) {
-					await this._waitForNotebookTextEditor(editorResource);
+					await this._withTauriNotebookShowTimeout(
+						`_waitForNotebookTextEditor(${editorResource.toString()})`,
+						this._waitForNotebookTextEditor(editorResource)
+					);
 				}
 			}
 			return editor;
@@ -380,6 +393,26 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			throw new Error(`Could NOT open editor for "${notebook.uri.toString()}" because another editor opened in the meantime.`);
 		} else {
 			throw new Error(`Could NOT open editor for "${notebook.uri.toString()}".`);
+		}
+	}
+
+	private async _withTauriNotebookShowTimeout<T>(label: string, promise: PromiseLike<T>, timeoutMs = 5000): Promise<T> {
+		if (process.env.VSCODE_TAURI_INTEGRATION !== '1') {
+			return promise;
+		}
+
+		let handle: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				promise,
+				new Promise<T>((_, reject) => {
+					handle = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+				})
+			]);
+		} finally {
+			if (handle) {
+				clearTimeout(handle);
+			}
 		}
 	}
 
@@ -435,6 +468,18 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 				return;
 			}
 
+			const trackedEditor = this._editors.get(editorId);
+			if (trackedEditor?.apiEditor === editor) {
+				this._activeNotebookEditor = trackedEditor;
+				return;
+			}
+
+			const matchingVisibleEditor = this._visibleNotebookEditors.find(visibleEditor => visibleEditor.id === editorId);
+			if (matchingVisibleEditor?.apiEditor === editor) {
+				this._activeNotebookEditor = matchingVisibleEditor;
+				return;
+			}
+
 			await timeout(50);
 		}
 
@@ -446,6 +491,11 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 	private async _waitForNotebookTextEditor(resource: URI): Promise<void> {
 		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
 			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebookData.uri, resource)) {
+				return;
+			}
+
+			const visibleMatchingNotebookEditor = this._visibleNotebookEditors.find(editor => isEqual(editor.notebookData.uri, resource));
+			if (visibleMatchingNotebookEditor) {
 				return;
 			}
 

@@ -163,11 +163,17 @@ export class MainThreadNotebooksAndEditors {
 
 		for (const editorPane of this._editorService.visibleEditorPanes) {
 			const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
-			if (notebookEditor?.hasModel() && editors.has(notebookEditor.getId())) {
-				visibleEditorsMap.set(notebookEditor.getId(), notebookEditor);
-				if (!visibleEditorInActiveGroup && activeEditorPaneGroup && editorPane.group === activeEditorPaneGroup) {
-					visibleEditorInActiveGroup = notebookEditor;
-				}
+			if (!notebookEditor?.hasModel()) {
+				continue;
+			}
+
+			if (!editors.has(notebookEditor.getId())) {
+				editors.set(notebookEditor.getId(), notebookEditor);
+			}
+
+			visibleEditorsMap.set(notebookEditor.getId(), notebookEditor);
+			if (!visibleEditorInActiveGroup && activeEditorPaneGroup && editorPane.group === activeEditorPaneGroup) {
+				visibleEditorInActiveGroup = notebookEditor;
 			}
 		}
 

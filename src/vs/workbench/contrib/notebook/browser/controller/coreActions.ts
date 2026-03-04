@@ -359,6 +359,14 @@ export function parseMultiCellExecutionArgs(accessor: ServicesAccessor, ...args:
 
 		const ranges = firstArg.ranges;
 		const selectedCells = ranges.map(range => editor.getCellsInRange(range).slice(0)).flat();
+		// In some desktop paths (notably Tauri integration), the notebook model may have
+		// already accepted inserted cells while the widget view model is still settling.
+		// Returning an empty selection here turns execution into a silent no-op. Fall back
+		// to detached execution parsing in that case.
+		const modelCellsInRange = ranges.reduce((count, range) => count + editor.textModel.cells.slice(range.start, range.end).length, 0);
+		if (selectedCells.length === 0 && modelCellsInRange > 0) {
+			return undefined;
+		}
 		const autoReveal = firstArg.autoReveal;
 		return {
 			ui: false,
@@ -376,11 +384,16 @@ export function parseMultiCellExecutionArgs(accessor: ServicesAccessor, ...args:
 		if (!editor) {
 			return;
 		}
+		const selectedCells = editor.getCellsInRange(firstArg);
+		const modelCellsInRange = editor.textModel.cells.slice(firstArg.start, firstArg.end).length;
+		if (selectedCells.length === 0 && modelCellsInRange > 0) {
+			return undefined;
+		}
 
 		return {
 			ui: false,
 			notebookEditor: editor,
-			selectedCells: editor.getCellsInRange(firstArg)
+			selectedCells
 		};
 	}
 

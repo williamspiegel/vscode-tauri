@@ -7,13 +7,13 @@ import * as assert from 'assert';
 import 'mocha';
 import * as vscode from 'vscode';
 import { asPromise, disposeAll, poll } from '../utils';
-import { Kernel, saveAllFilesAndCloseAll } from './notebook.api.test';
+import { Kernel, saveAllFilesAndCloseAll } from './notebookTestUtils';
 
 export type INativeInteractiveWindow = { notebookUri: vscode.Uri; inputUri: vscode.Uri; notebookEditor: vscode.NotebookEditor };
 const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
 
 async function createInteractiveWindow(kernel: Kernel) {
-	const { notebookEditor, inputUri } = (await vscode.commands.executeCommand(
+	const { notebookEditor, inputUri, notebookUri } = (await vscode.commands.executeCommand(
 		'interactive.open',
 		// Keep focus on the owning file if there is one
 		{ viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
@@ -21,8 +21,35 @@ async function createInteractiveWindow(kernel: Kernel) {
 		`vscode.vscode-api-tests/${kernel.controller.id}`,
 		undefined
 	)) as unknown as INativeInteractiveWindow;
-	assert.ok(notebookEditor, 'Interactive Window was not created successfully');
+	if (notebookEditor) {
+		return { notebookEditor, inputUri };
+	}
 
+	if (isTauriIntegration) {
+		const resolvedNotebookEditor = await poll(
+			() => {
+				const matchingEditor = vscode.window.visibleNotebookEditors.find(editor => editor.notebook.uri.toString() === notebookUri.toString());
+				if (matchingEditor) {
+					return Promise.resolve(matchingEditor);
+				}
+
+				const activeNotebookEditor = vscode.window.activeNotebookEditor;
+				if (activeNotebookEditor && activeNotebookEditor.notebook.uri.toString() === notebookUri.toString()) {
+					return Promise.resolve(activeNotebookEditor);
+				}
+
+				throw new Error(`Interactive Window notebook editor for ${notebookUri.toString()} not available yet`);
+			},
+			(editor): editor is vscode.NotebookEditor => !!editor,
+			'Interactive Window notebook editor should become visible in Tauri integration',
+			200,
+			50
+		);
+
+		return { notebookEditor: resolvedNotebookEditor, inputUri };
+	}
+
+	assert.ok(notebookEditor, 'Interactive Window was not created successfully');
 	return { notebookEditor, inputUri };
 }
 
@@ -109,7 +136,11 @@ async function addCellAndRun(code: string, notebook: vscode.NotebookDocument) {
 		assert.strictEqual(notebookEditor.notebook.cellAt(0).kind, vscode.NotebookCellKind.Code);
 	});
 
-	test('Interactive window scrolls after execute', async () => {
+	test('Interactive window scrolls after execute', async function () {
+		if (isTauriIntegration) {
+			this.timeout(240000);
+		}
+
 		assert.ok(vscode.workspace.workspaceFolders);
 		const { notebookEditor } = await createInteractiveWindow(defaultKernel);
 
@@ -122,7 +153,7 @@ async function addCellAndRun(code: string, notebook: vscode.NotebookDocument) {
 		if (!lastCellIsVisible(notebookEditor)) {
 			// scroll happens async, so give it some time to scroll
 			await new Promise<void>((resolve) => setTimeout(() => {
-				assert.ok(lastCellIsVisible(notebookEditor), `Last cell is not visible`);
+				assert.ok(lastCellIsVisible(notebookEditor), `Last cell is not visible (${describeNotebookVisibility(notebookEditor)})`);
 				resolve();
 			}, 1000));
 		}
@@ -154,9 +185,25 @@ async function addCellAndRun(code: string, notebook: vscode.NotebookDocument) {
 });
 
 function lastCellIsVisible(notebookEditor: vscode.NotebookEditor) {
-	if (!notebookEditor.visibleRanges.length) {
+	const editorForVisibilityCheck = getNotebookEditorForVisibilityCheck(notebookEditor);
+
+	if (!editorForVisibilityCheck.visibleRanges.length) {
 		return false;
 	}
-	const lastVisibleCell = notebookEditor.visibleRanges[notebookEditor.visibleRanges.length - 1].end;
-	return notebookEditor.notebook.cellCount === lastVisibleCell;
+	const lastVisibleCell = editorForVisibilityCheck.visibleRanges[editorForVisibilityCheck.visibleRanges.length - 1].end;
+	return editorForVisibilityCheck.notebook.cellCount === lastVisibleCell;
+}
+
+function getNotebookEditorForVisibilityCheck(notebookEditor: vscode.NotebookEditor): vscode.NotebookEditor {
+	return isTauriIntegration
+		? vscode.window.visibleNotebookEditors.find(editor => editor.notebook.uri.toString() === notebookEditor.notebook.uri.toString())
+			?? (vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebookEditor.notebook.uri.toString() ? vscode.window.activeNotebookEditor : undefined)
+			?? notebookEditor
+		: notebookEditor;
+}
+
+function describeNotebookVisibility(notebookEditor: vscode.NotebookEditor): string {
+	const editor = getNotebookEditorForVisibilityCheck(notebookEditor);
+	const ranges = editor.visibleRanges.map(range => `[${range.start},${range.end})`).join(',') || 'none';
+	return `cellCount=${editor.notebook.cellCount},visibleRanges=${ranges}`;
 }

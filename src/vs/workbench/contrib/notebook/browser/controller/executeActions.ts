@@ -7,6 +7,7 @@ import { Iterable } from '../../../../../base/common/iterator.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { isEqual } from '../../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
+import { timeout } from '../../../../../base/common/async.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { URI, UriComponents } from '../../../../../base/common/uri.js';
 import { ICodeEditor } from '../../../../../editor/browser/editorBrowser.js';
@@ -27,8 +28,11 @@ import { NOTEBOOK_CELL_EXECUTING, NOTEBOOK_CELL_EXECUTION_STATE, NOTEBOOK_CELL_L
 import { NotebookEditorInput } from '../../common/notebookEditorInput.js';
 import { INotebookExecutionService } from '../../common/notebookExecutionService.js';
 import { INotebookExecutionStateService } from '../../common/notebookExecutionStateService.js';
+import { INotebookKernelService } from '../../common/notebookKernelService.js';
+import { INotebookService } from '../../common/notebookService.js';
 import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { INotebookEditorService } from '../services/notebookEditorService.js';
 import { CodeCellViewModel } from '../viewModel/codeCellViewModel.js';
 
 const EXECUTE_NOTEBOOK_COMMAND_ID = 'notebook.execute';
@@ -86,18 +90,17 @@ async function runCell(editorGroupsService: IEditorGroupsService, context: INote
 	}
 
 	if (context.ui && context.cell) {
-		if (context.autoReveal) {
-			handleAutoReveal(context.cell, context.notebookEditor);
-		}
 		await context.notebookEditor.executeNotebookCells(Iterable.single(context.cell));
+		if (context.autoReveal) {
+			await handleAutoRevealBestEffort(context.cell, context.notebookEditor);
+		}
 	} else if (context.selectedCells?.length || context.cell) {
 		const selectedCells = context.selectedCells?.length ? context.selectedCells : [context.cell!];
-		const firstCell = selectedCells[0];
-
-		if (firstCell && context.autoReveal) {
-			handleAutoReveal(firstCell, context.notebookEditor);
-		}
 		await context.notebookEditor.executeNotebookCells(selectedCells);
+		const lastCell = selectedCells[selectedCells.length - 1];
+		if (lastCell && context.autoReveal) {
+			await handleAutoRevealBestEffort(lastCell, context.notebookEditor);
+		}
 	}
 
 	let foundEditor: ICodeEditor | undefined = undefined;
@@ -110,6 +113,44 @@ async function runCell(editorGroupsService: IEditorGroupsService, context: INote
 
 	if (!foundEditor) {
 		return;
+	}
+}
+
+async function handleAutoRevealBestEffort(cell: ICellViewModel, notebookEditor: IActiveNotebookEditor): Promise<void> {
+	const cellHandle = cell.handle;
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const resolvedCell = notebookEditor.getCellByHandle(cellHandle) ?? cell;
+		const resolvedCellIndex = notebookEditor.getCellIndex(resolvedCell);
+		if (resolvedCellIndex >= 0) {
+			try {
+				notebookEditor.revealCellRangeInView({ start: resolvedCellIndex, end: resolvedCellIndex + 1 });
+				handleAutoReveal(resolvedCell, notebookEditor);
+				if (notebookEditor.isReplHistory) {
+					notebookEditor.setScrollTop(Number.MAX_SAFE_INTEGER);
+				}
+			} catch {
+				// Auto-reveal is best-effort and must not block cell execution.
+			}
+			return;
+		}
+		await timeout(25);
+	}
+}
+
+async function revealDetachedCellBestEffort(notebookEditorService: INotebookEditorService, notebookUri: URI, cellHandle: number): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const candidateEditors = notebookEditorService.listNotebookEditors().filter(editor =>
+			editor.hasModel() && isEqual(editor.textModel.uri, notebookUri)
+		);
+		const notebookEditor = candidateEditors.find(editor => editor.isVisible) ?? candidateEditors[0];
+		if (notebookEditor) {
+			const viewCell = notebookEditor.getCellByHandle(cellHandle);
+			if (viewCell) {
+				await handleAutoRevealBestEffort(viewCell, notebookEditor);
+				return;
+			}
+		}
+		await timeout(25);
 	}
 }
 
@@ -179,12 +220,16 @@ function getDetachedExecutionContext(accessor: ServicesAccessor, ...args: unknow
 const SMART_VIEWPORT_TOP_REVEAL_PADDING = 20; // enough to not cut off top of cell toolbar
 const SMART_VIEWPORT_BOTTOM_REVEAL_PADDING = 60; // enough to show full bottom of output element + tiny buffer below that vertical bar
 function handleAutoReveal(cell: ICellViewModel, notebookEditor: IActiveNotebookEditor): void {
+	const cellIndex = notebookEditor.getCellIndex(cell);
+	if (cellIndex < 0) {
+		return;
+	}
+
 	// always focus the container, blue bar is a good visual aid in tracking what's happening
 	notebookEditor.focusNotebookCell(cell, 'container', { skipReveal: true });
 
 	// Handle markup cells with simple reveal
 	if (cell.cellKind === CellKind.Markup) {
-		const cellIndex = notebookEditor.getCellIndex(cell);
 		notebookEditor.revealCellRangeInView({ start: cellIndex, end: cellIndex + 1 });
 		return;
 	}
@@ -356,8 +401,58 @@ registerAction2(class ExecuteCell extends NotebookMultiCellAction {
 	async runWithContext(accessor: ServicesAccessor, context: INotebookCommandContext | INotebookCellToolbarActionContext): Promise<void> {
 		if (isDetachedNotebookExecutionContext(context)) {
 			const executionService = accessor.get(INotebookExecutionService);
+			const notebookKernelService = accessor.get(INotebookKernelService);
+			const notebookEditorService = accessor.get(INotebookEditorService);
 			const contextKeyService = accessor.get(IContextKeyService);
-			return executionService.executeNotebookCells(context.detachedNotebookModel, context.detachedNotebookCells, contextKeyService);
+			const editorGroupsService = accessor.get(IEditorGroupsService);
+			const editorService = accessor.get(IEditorService);
+			const targetDetachedCellHandle = context.detachedNotebookCells[context.detachedNotebookCells.length - 1]?.handle;
+			const candidateEditors = notebookEditorService.listNotebookEditors().filter(editor =>
+				editor.hasModel() && isEqual(editor.textModel.uri, context.detachedNotebookModel.uri)
+			);
+			const notebookEditor = candidateEditors.find(editor => editor.isVisible) ?? candidateEditors[0];
+			if (notebookEditor) {
+				for (let attempt = 0; attempt < 40; attempt++) {
+					if (notebookEditor.activeKernel) {
+						break;
+					}
+					await timeout(50);
+				}
+
+				for (let attempt = 0; attempt < 40; attempt++) {
+					const viewCells = context.detachedNotebookCells
+						.map(cell => notebookEditor.getCellByHandle(cell.handle))
+						.filter((cell): cell is ICellViewModel => !!cell);
+					const hasTargetCell = typeof targetDetachedCellHandle === 'number'
+						? !!notebookEditor.getCellByHandle(targetDetachedCellHandle)
+						: viewCells.length > 0;
+					if (viewCells.length > 0 && hasTargetCell) {
+						await runCell(editorGroupsService, {
+							ui: false,
+							notebookEditor,
+							selectedCells: viewCells,
+							autoReveal: true
+						}, editorService);
+						if (typeof targetDetachedCellHandle === 'number') {
+							await revealDetachedCellBestEffort(notebookEditorService, context.detachedNotebookModel.uri, targetDetachedCellHandle);
+						}
+						return;
+					}
+					await timeout(25);
+				}
+			}
+
+			for (let attempt = 0; attempt < 40; attempt++) {
+				if (notebookKernelService.getSelectedOrSuggestedKernel(context.detachedNotebookModel)) {
+					break;
+				}
+				await timeout(50);
+			}
+			await executionService.executeNotebookCells(context.detachedNotebookModel, context.detachedNotebookCells, contextKeyService);
+			if (typeof targetDetachedCellHandle === 'number') {
+				await revealDetachedCellBestEffort(notebookEditorService, context.detachedNotebookModel.uri, targetDetachedCellHandle);
+			}
+			return;
 		}
 
 		const editorGroupsService = accessor.get(IEditorGroupsService);

@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { timeout } from '../../../../base/common/async.js';
 import { Iterable } from '../../../../base/common/iterator.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
@@ -386,10 +387,25 @@ registerAction2(class extends Action2 {
 		const kernelService = accessor.get(INotebookKernelService);
 		const logService = accessor.get(ILogService);
 		const configurationService = accessor.get(IConfigurationService);
+		const preserveFocus = typeof showOptions !== 'number' ? (showOptions?.preserveFocus ?? false) : false;
 		const group = columnToEditorGroup(editorGroupService, configurationService, typeof showOptions === 'number' ? showOptions : showOptions?.viewColumn);
 		const editorOptions = {
-			activation: EditorActivation.PRESERVE,
-			preserveFocus: typeof showOptions !== 'number' ? (showOptions?.preserveFocus ?? false) : false
+			activation: preserveFocus ? EditorActivation.PRESERVE : undefined,
+			preserveFocus
+		};
+		const waitForNotebookEditorReady = async (editorPane: ReturnType<IEditorService['openEditor']> extends Promise<infer T> ? T : never, controllerId: string | undefined): Promise<string | undefined> => {
+			for (let attempt = 0; attempt < 200; attempt++) {
+				const editorControl = editorPane?.getControl() as ReplEditorControl | undefined;
+				const notebookEditorId = editorControl?.notebookEditor?.getId();
+				const activeKernelId = editorControl?.notebookEditor?.activeKernel?.id;
+				if (notebookEditorId && (!controllerId || activeKernelId === controllerId)) {
+					return notebookEditorId;
+				}
+
+				await timeout(50);
+			}
+
+			return undefined;
 		};
 
 		if (resource && extname(resource) === '.interactive') {
@@ -401,12 +417,12 @@ registerAction2(class extends Action2 {
 				const editorInput = editors[0].editor as InteractiveEditorInput;
 				const currentGroup = editors[0].groupId;
 				const editor = await editorService.openEditor(editorInput, editorOptions, currentGroup);
-				const editorControl = editor?.getControl() as ReplEditorControl;
+				const notebookEditorId = await waitForNotebookEditorReady(editor, id);
 
 				return {
 					notebookUri: editorInput.resource,
 					inputUri: editorInput.inputResource,
-					notebookEditorId: editorControl?.notebookEditor?.getId()
+					notebookEditorId
 				};
 			}
 		}
@@ -440,12 +456,13 @@ registerAction2(class extends Action2 {
 		}
 
 		historyService.clearHistory(notebookUri);
-		const editorInput: IUntypedEditorInput = { resource: notebookUri, options: editorOptions };
-		const editorPane = await editorService.openEditor(editorInput, group);
-		const editorControl = editorPane?.getControl() as ReplEditorControl;
+		const editorInput = createEditor(notebookUri, accessor.get(IInstantiationService));
+		await editorInput.resolve();
+		const editorPane = await editorService.openEditor(editorInput, editorOptions, group);
+		const notebookEditorId = await waitForNotebookEditorReady(editorPane, id);
 		// Extensions must retain references to these URIs to manipulate the interactive editor
-		logService.debug('New interactive window opened. Notebook editor id', editorControl?.notebookEditor?.getId());
-		return { notebookUri, inputUri, notebookEditorId: editorControl?.notebookEditor?.getId() };
+		logService.debug('New interactive window opened. Notebook editor id', notebookEditorId);
+		return { notebookUri, inputUri, notebookEditorId };
 	}
 });
 

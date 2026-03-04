@@ -7,7 +7,8 @@ import * as assert from 'assert';
 import 'mocha';
 import { TextDecoder, TextEncoder } from 'util';
 import * as vscode from 'vscode';
-import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, disposeAll, revertAllDirty, saveAllEditors } from '../utils';
+import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, disposeAll, revertAllDirty } from '../utils';
+import { Kernel, saveAllFilesAndCloseAll } from './notebookTestUtils';
 
 async function createRandomNotebookFile() {
 	return createRandomFile('', undefined, '.vsctestnb');
@@ -22,60 +23,23 @@ async function openUntitledNotebookDocument(data?: vscode.NotebookData) {
 	return vscode.workspace.openNotebookDocument('notebookCoreTest', data);
 }
 
-export async function saveAllFilesAndCloseAll() {
-	await saveAllEditors();
-	await closeAllEditors();
-}
-
-
-function sleep(ms: number): Promise<void> {
-	return new Promise(resolve => {
-		setTimeout(resolve, ms);
-	});
+async function withStepTimeout<T>(label: string, promise: PromiseLike<T>, timeoutMs = 15000): Promise<T> {
+	let handle: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_, reject) => {
+				handle = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+			})
+		]);
+	} finally {
+		if (handle) {
+			clearTimeout(handle);
+		}
+	}
 }
 
 const notebookType = 'notebookCoreTest';
-
-export class Kernel {
-
-	readonly controller: vscode.NotebookController;
-
-	readonly associatedNotebooks = new Set<string>();
-
-	constructor(id: string, label: string, viewType: string = notebookType) {
-		this.controller = vscode.notebooks.createNotebookController(id, viewType, label);
-		this.controller.executeHandler = this._execute.bind(this);
-		this.controller.supportsExecutionOrder = true;
-		this.controller.supportedLanguages = ['typescript', 'javascript'];
-		this.controller.onDidChangeSelectedNotebooks(e => {
-			if (e.selected) {
-				this.associatedNotebooks.add(e.notebook.uri.toString());
-			} else {
-				this.associatedNotebooks.delete(e.notebook.uri.toString());
-			}
-		});
-	}
-
-	protected async _execute(cells: vscode.NotebookCell[]): Promise<void> {
-		for (const cell of cells) {
-			await this._runCell(cell);
-		}
-	}
-
-	protected async _runCell(cell: vscode.NotebookCell) {
-		// create a single output with exec order 1 and output is plain/text
-		// of either the cell itself or (iff empty) the cell's document's uri
-		const task = this.controller.createNotebookCellExecution(cell);
-		task.start(Date.now());
-		task.executionOrder = 1;
-		await sleep(10); // Force to be take some time
-		await task.replaceOutput([new vscode.NotebookCellOutput([
-			vscode.NotebookCellOutputItem.text(cell.document.getText() || cell.document.uri.toString(), 'text/plain')
-		])]);
-		task.end(true);
-	}
-}
-
 
 function getFocusedCell(editor?: vscode.NotebookEditor) {
 	return editor ? editor.notebook.cellAt(editor.selections[0].start) : undefined;
@@ -156,8 +120,8 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 	});
 
 	test('notebook open', async function () {
-		const notebook = await openRandomNotebookDocument();
-		const editor = await vscode.window.showNotebookDocument(notebook);
+		const notebook = await withStepTimeout('openRandomNotebookDocument()', openRandomNotebookDocument());
+		const editor = await withStepTimeout(`showNotebookDocument(${notebook.uri.toString()})`, vscode.window.showNotebookDocument(notebook));
 		assert.strictEqual(getFocusedCell(editor)?.document.getText(), 'test');
 		assert.strictEqual(getFocusedCell(editor)?.document.languageId, 'typescript');
 

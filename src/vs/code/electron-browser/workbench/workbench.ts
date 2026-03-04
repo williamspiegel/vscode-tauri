@@ -13,6 +13,7 @@
 	const markTauriWorkbenchStage = (stage: string) => {
 		try {
 			(window as typeof window & { __VSCODE_TAURI_WORKBENCH_STAGE__?: string }).__VSCODE_TAURI_WORKBENCH_STAGE__ = stage;
+			window.dispatchEvent(new CustomEvent('vscode-tauri-workbench-stage', { detail: stage }));
 		} catch {
 			// Ignore failures writing debug-only startup markers.
 		}

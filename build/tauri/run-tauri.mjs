@@ -122,7 +122,7 @@ function run(command, args, options = {}) {
 	});
 }
 
-await run('node', ['build/next/index.ts', 'transpile', '--exclude-tests']);
+await run('node', ['build/next/index.ts', 'transpile']);
 await run('node', ['build/tauri/contract-test.mjs']);
 await run('node', ['build/tauri/smoke.mjs']);
 await run('npm', ['--prefix', 'apps/tauri/ui', 'run', 'build']);
