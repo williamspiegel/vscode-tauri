@@ -12,6 +12,10 @@ const options: any = {
 	timeout: 60000
 };
 
+if (process.env.VSCODE_TAURI_TEST_GREP) {
+	options.grep = process.env.VSCODE_TAURI_TEST_GREP;
+}
+
 // These integration tests is being run in multiple environments (electron, web, remote)
 // so we need to set the suite name based on the environment as the suite name is used
 // for the test results file name

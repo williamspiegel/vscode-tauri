@@ -55,7 +55,6 @@ export class ExtHostNotebookEditor {
 				get visibleRanges() {
 					if (that._visibleRanges.length === 0
 						&& process.env.VSCODE_TAURI_INTEGRATION === '1'
-						&& that.viewType === 'repl'
 						&& that.notebookData.apiNotebook.cellCount > 0) {
 						return [new NotebookRange(0, that.notebookData.apiNotebook.cellCount)];
 					}

@@ -23,6 +23,9 @@ import { IEditorService } from '../../../../services/editor/common/editorService
 
 function getEditorFromContext(editorService: IEditorService, context?: KernelQuickPickContext): INotebookEditor | undefined {
 	let editor: INotebookEditor | undefined;
+	const getFallbackVisibleNotebookEditors = (): INotebookEditor[] => editorService.visibleEditorPanes
+		.map(editorPane => getNotebookEditorFromEditorPane(editorPane))
+		.filter((candidate): candidate is INotebookEditor => !!candidate);
 	if (context !== undefined && 'notebookEditorId' in context) {
 		const editorId = context.notebookEditorId;
 		const matchingEditor = editorService.visibleEditorPanes.find((editorPane) => {
@@ -30,14 +33,21 @@ function getEditorFromContext(editorService: IEditorService, context?: KernelQui
 			return notebookEditor?.getId() === editorId;
 		});
 		editor = getNotebookEditorFromEditorPane(matchingEditor);
+		if (!editor) {
+			editor = getNotebookEditorFromEditorPane(editorService.activeEditorPane);
+			if (!editor) {
+				const visibleNotebookEditors = getFallbackVisibleNotebookEditors();
+				if (visibleNotebookEditors.length === 1) {
+					editor = visibleNotebookEditors[0];
+				}
+			}
+		}
 	} else if (context !== undefined && 'notebookEditor' in context) {
 		editor = context?.notebookEditor;
 	} else {
 		editor = getNotebookEditorFromEditorPane(editorService.activeEditorPane);
 		if (!editor) {
-			const visibleNotebookEditors = editorService.visibleEditorPanes
-				.map(editorPane => getNotebookEditorFromEditorPane(editorPane))
-				.filter((candidate): candidate is INotebookEditor => !!candidate);
+			const visibleNotebookEditors = getFallbackVisibleNotebookEditors();
 			if (visibleNotebookEditors.length === 1) {
 				editor = visibleNotebookEditors[0];
 			}
@@ -120,7 +130,6 @@ registerAction2(class extends Action2 {
 		const editorService = accessor.get(IEditorService);
 
 		const editor = getEditorFromContext(editorService, context);
-
 		if (!editor || !editor.hasModel()) {
 			return false;
 		}

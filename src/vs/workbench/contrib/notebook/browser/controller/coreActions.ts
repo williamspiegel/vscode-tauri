@@ -77,7 +77,13 @@ export interface INotebookOutputActionContext extends INotebookCellActionContext
 }
 
 export function getContextFromActiveEditor(editorService: IEditorService): INotebookActionContext | undefined {
-	const editor = getNotebookEditorFromEditorPane(editorService.activeEditorPane);
+	let editor = getNotebookEditorFromEditorPane(editorService.activeEditorPane);
+	if (!editor || !editor.hasModel()) {
+		const visibleNotebookEditors = editorService.visibleEditorPanes
+			.map(editorPane => getNotebookEditorFromEditorPane(editorPane))
+			.filter((candidate): candidate is IActiveNotebookEditor => !!candidate && candidate.hasModel());
+		editor = visibleNotebookEditors[0];
+	}
 	if (!editor || !editor.hasModel()) {
 		return;
 	}

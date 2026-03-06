@@ -394,10 +394,14 @@ registerAction2(class extends Action2 {
 			preserveFocus
 		};
 		const waitForNotebookEditorReady = async (editorPane: ReturnType<IEditorService['openEditor']> extends Promise<infer T> ? T : never, controllerId: string | undefined): Promise<string | undefined> => {
+			let notebookEditorIdCandidate: string | undefined;
 			for (let attempt = 0; attempt < 200; attempt++) {
 				const editorControl = editorPane?.getControl() as ReplEditorControl | undefined;
 				const notebookEditorId = editorControl?.notebookEditor?.getId();
 				const activeKernelId = editorControl?.notebookEditor?.activeKernel?.id;
+				if (notebookEditorId) {
+					notebookEditorIdCandidate ??= notebookEditorId;
+				}
 				if (notebookEditorId && (!controllerId || activeKernelId === controllerId)) {
 					return notebookEditorId;
 				}
@@ -405,7 +409,7 @@ registerAction2(class extends Action2 {
 				await timeout(50);
 			}
 
-			return undefined;
+			return notebookEditorIdCandidate;
 		};
 
 		if (resource && extname(resource) === '.interactive') {

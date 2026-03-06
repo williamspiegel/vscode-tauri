@@ -30,6 +30,7 @@ import { INotebookExecutionService } from '../../common/notebookExecutionService
 import { INotebookExecutionStateService } from '../../common/notebookExecutionStateService.js';
 import { INotebookKernelService } from '../../common/notebookKernelService.js';
 import { INotebookService } from '../../common/notebookService.js';
+import { ICellRange } from '../../common/notebookRange.js';
 import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { INotebookEditorService } from '../services/notebookEditorService.js';
@@ -159,7 +160,15 @@ type DetachedNotebookExecutionContext = INotebookCommandContext & {
 	readonly detachedNotebookCells: INotebookTextModel['cells'];
 };
 
+type DetachedNotebookActionContext = {
+	readonly detachedNotebookModel: INotebookTextModel;
+};
+
 function isDetachedNotebookExecutionContext(context: INotebookCommandContext | INotebookCellToolbarActionContext): context is DetachedNotebookExecutionContext {
+	return 'detachedNotebookModel' in context;
+}
+
+function isDetachedNotebookActionContext(context: INotebookActionContext | DetachedNotebookActionContext): context is DetachedNotebookActionContext {
 	return 'detachedNotebookModel' in context;
 }
 
@@ -215,6 +224,15 @@ function getDetachedExecutionContext(accessor: ServicesAccessor, ...args: unknow
 	}
 
 	return undefined;
+}
+
+function getDetachedNotebookActionContext(accessor: ServicesAccessor, context: UriComponents | URI | undefined): DetachedNotebookActionContext | undefined {
+	const notebookModel = getDetachedNotebookModel(accessor, context);
+	if (!notebookModel) {
+		return undefined;
+	}
+
+	return { detachedNotebookModel: notebookModel };
 }
 
 const SMART_VIEWPORT_TOP_REVEAL_PADDING = 20; // enough to not cut off top of cell toolbar
@@ -343,11 +361,34 @@ registerAction2(class ExecuteNotebookAction extends NotebookAction {
 		});
 	}
 
+	override async run(accessor: ServicesAccessor, context?: INotebookActionContext | UriComponents): Promise<void> {
+		const detachedContext = this.isNotebookActionContext(context)
+			? undefined
+			: getDetachedNotebookActionContext(accessor, context);
+		if (detachedContext) {
+			return this.runWithContext(accessor, detachedContext);
+		}
+
+		return super.run(accessor, context);
+	}
+
 	override getEditorContextFromArgsOrActive(accessor: ServicesAccessor, context?: UriComponents): INotebookActionContext | undefined {
 		return getContextFromUri(accessor, context) ?? getContextFromActiveEditor(accessor.get(IEditorService));
 	}
 
-	async runWithContext(accessor: ServicesAccessor, context: INotebookActionContext): Promise<void> {
+	async runWithContext(accessor: ServicesAccessor, context: INotebookActionContext | DetachedNotebookActionContext): Promise<void> {
+		if (isDetachedNotebookActionContext(context)) {
+			const executionService = accessor.get(INotebookExecutionService);
+			const contextKeyService = accessor.get(IContextKeyService);
+			const notebookEditorService = accessor.get(INotebookEditorService);
+			const targetDetachedCellHandle = context.detachedNotebookModel.cells[context.detachedNotebookModel.cells.length - 1]?.handle;
+			await executionService.executeNotebookCells(context.detachedNotebookModel, context.detachedNotebookModel.cells, contextKeyService);
+			if (typeof targetDetachedCellHandle === 'number') {
+				await revealDetachedCellBestEffort(notebookEditorService, context.detachedNotebookModel.uri, targetDetachedCellHandle);
+			}
+			return;
+		}
+
 		renderAllMarkdownCells(context);
 
 		const editorService = accessor.get(IEditorService);
@@ -364,6 +405,10 @@ registerAction2(class ExecuteNotebookAction extends NotebookAction {
 		}
 
 		return context.notebookEditor.executeNotebookCells();
+	}
+
+	private isNotebookActionContext(context?: unknown): context is INotebookActionContext {
+		return !!context && !!(context as INotebookActionContext).notebookEditor;
 	}
 });
 
@@ -438,7 +483,7 @@ registerAction2(class ExecuteCell extends NotebookMultiCellAction {
 						}
 						return;
 					}
-					await timeout(25);
+					await timeout(50);
 				}
 			}
 

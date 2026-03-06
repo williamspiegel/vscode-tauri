@@ -22,6 +22,8 @@ import { IEditorService } from '../../services/editor/common/editorService.js';
 import { IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
 import { ExtHostContext, ExtHostNotebookEditorsShape, INotebookDocumentShowOptions, INotebookEditorViewColumnInfo, MainThreadNotebookEditorsShape, NotebookEditorRevealType } from '../common/extHost.protocol.js';
 
+const isTauriIntegration = typeof process !== 'undefined' && process.env?.VSCODE_TAURI_INTEGRATION === '1';
+
 class MainThreadNotebook {
 
 	constructor(
@@ -316,6 +318,9 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 		if (knownMatchingEditorIds.size === 0 && matchingNotebookEditors.length === 1) {
 			return matchingNotebookEditors[0];
+		}
+		if (isTauriIntegration && matchingNotebookEditors.length > 0) {
+			return matchingNotebookEditors.at(-1);
 		}
 
 		return undefined;

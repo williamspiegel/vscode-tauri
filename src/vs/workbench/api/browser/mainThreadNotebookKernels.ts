@@ -241,6 +241,11 @@ export class MainThreadNotebookKernels implements MainThreadNotebookKernelsShape
 		const that = this;
 		const kernel = new class extends MainThreadKernel {
 			async executeNotebookCellsRequest(uri: URI, handles: number[]): Promise<void> {
+				// Tauri integration can race notebook-kernel association propagation.
+				// Ensure the ext host sees the selected notebook before execution starts.
+				if (process.env.VSCODE_TAURI_INTEGRATION === '1') {
+					that._proxy.$acceptNotebookAssociation(handle, uri, true);
+				}
 				await that._proxy.$executeCells(handle, uri, handles);
 			}
 			async cancelNotebookCellExecution(uri: URI, handles: number[]): Promise<void> {

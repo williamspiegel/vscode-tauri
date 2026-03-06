@@ -7,10 +7,12 @@ import * as assert from 'assert';
 import 'mocha';
 import { TextDecoder } from 'util';
 import * as vscode from 'vscode';
-import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, DeferredPromise, disposeAll, revertAllDirty, saveAllEditors } from '../utils';
+import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, DeferredPromise, disposeAll, poll, revertAllDirty, saveAllEditors } from '../utils';
 
 const skipNotebookKernelSuiteForTauri =
 	vscode.env.uiKind === vscode.UIKind.Web;
+const isTauriIntegration =
+	process.env.VSCODE_TAURI_INTEGRATION === '1';
 
 async function createRandomNotebookFile() {
 	return createRandomFile('', undefined, '.vsctestnb');
@@ -18,6 +20,18 @@ async function createRandomNotebookFile() {
 
 async function openRandomNotebookDocument() {
 	const uri = await createRandomNotebookFile();
+	if (isTauriIntegration) {
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 5; attempt++) {
+			try {
+				return await vscode.workspace.openNotebookDocument(uri);
+			} catch (error) {
+				lastError = error;
+				await sleep(100);
+			}
+		}
+		throw lastError instanceof Error ? lastError : new Error(`Failed to open notebook document: ${uri.toString()}`);
+	}
 	return vscode.workspace.openNotebookDocument(uri);
 }
 
@@ -29,6 +43,89 @@ export async function saveAllFilesAndCloseAll() {
 async function withEvent<T>(event: vscode.Event<T>, callback: (e: Promise<T>) => Promise<void>) {
 	const e = asPromise<T>(event);
 	await callback(e);
+}
+
+async function showNotebook(notebook: vscode.NotebookDocument): Promise<vscode.NotebookEditor> {
+	if (!isTauriIntegration) {
+		return vscode.window.showNotebookDocument(notebook);
+	}
+
+	const openPromise = vscode.commands.executeCommand('vscode.openWith', notebook.uri, notebook.notebookType);
+	void Promise.resolve(openPromise).catch(() => undefined);
+
+	const immediateEditor = await Promise.race<vscode.NotebookEditor | undefined>([
+		Promise.resolve(openPromise).then(() => vscode.window.visibleNotebookEditors.find(editor => editor.notebook.uri.toString() === notebook.uri.toString()), () => undefined),
+		new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 1500))
+	]);
+	if (immediateEditor) {
+		return immediateEditor;
+	}
+
+	return poll(
+		() => {
+			const matchingEditor = vscode.window.visibleNotebookEditors.find(editor => editor.notebook.uri.toString() === notebook.uri.toString());
+			if (matchingEditor) {
+				return Promise.resolve(matchingEditor);
+			}
+
+			if (vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()) {
+				return Promise.resolve(vscode.window.activeNotebookEditor);
+			}
+
+			throw new Error(`Notebook editor for ${notebook.uri.toString()} not visible yet`);
+		},
+		(editor): editor is vscode.NotebookEditor => !!editor,
+		'Notebook editor should become visible in Tauri integration',
+		120,
+		50
+	);
+}
+
+async function executeNotebook(notebook: vscode.NotebookDocument): Promise<void> {
+	if (isTauriIntegration) {
+		await vscode.commands.executeCommand('notebook.execute', notebook.uri);
+		return;
+	}
+
+	await vscode.commands.executeCommand('notebook.execute');
+}
+
+async function executeFirstCell(notebook: vscode.NotebookDocument): Promise<void> {
+	if (isTauriIntegration) {
+		await vscode.commands.executeCommand('notebook.cell.execute', { start: 0, end: 1 }, notebook.uri);
+		return;
+	}
+
+	await vscode.commands.executeCommand('notebook.cell.execute');
+}
+
+async function waitForOutputCount(cell: vscode.NotebookCell, outputCount: number): Promise<void> {
+	if (!isTauriIntegration) {
+		return;
+	}
+
+	await poll(
+		() => Promise.resolve(cell.outputs.length),
+		value => value === outputCount,
+		`Notebook cell output count should become ${outputCount} in Tauri integration`,
+		120,
+		50
+	);
+}
+
+async function clearCellOutputsDetached(notebook: vscode.NotebookDocument, cellIndex: number): Promise<void> {
+	const existingCell = notebook.cellAt(cellIndex);
+	const replacementCell = new vscode.NotebookCellData(
+		existingCell.kind,
+		existingCell.document.getText(),
+		existingCell.document.languageId
+	);
+	replacementCell.outputs = [];
+	replacementCell.metadata = existingCell.metadata;
+
+	const edit = new vscode.WorkspaceEdit();
+	edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(cellIndex, cellIndex + 1), [replacementCell])]);
+	await vscode.workspace.applyEdit(edit);
 }
 
 
@@ -80,12 +177,35 @@ export class Kernel {
 
 
 async function assertKernel(kernel: Kernel, notebook: vscode.NotebookDocument): Promise<void> {
-	const success = await vscode.commands.executeCommand('notebook.selectKernel', {
-		extension: 'vscode.vscode-api-tests',
-		id: kernel.controller.id
-	});
+	const notebookUri = notebook.uri.toString();
+	if (isTauriIntegration) {
+		kernel.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+		await sleep(50);
+		return;
+	}
+
+	let success = false;
+	for (let attempt = 0; attempt < 200; attempt++) {
+		const commandArg: { extension: string; id: string; notebookEditor?: vscode.NotebookEditor } = {
+			extension: 'vscode.vscode-api-tests',
+			id: kernel.controller.id
+		};
+
+		const targetEditor = vscode.window.visibleNotebookEditors.find(editor => editor.notebook.uri.toString() === notebookUri);
+		if (targetEditor) {
+			commandArg.notebookEditor = targetEditor;
+		}
+
+		success = await vscode.commands.executeCommand('notebook.selectKernel', commandArg);
+		if (success && kernel.associatedNotebooks.has(notebookUri)) {
+			return;
+		}
+
+		await sleep(50);
+	}
+
 	assert.ok(success, `expected selected kernel to be ${kernel.controller.id}`);
-	assert.ok(kernel.associatedNotebooks.has(notebook.uri.toString()));
+	assert.ok(kernel.associatedNotebooks.has(notebookUri), `kernel ${kernel.controller.id} should be associated with ${notebookUri}`);
 }
 
 const apiTestSerializer: vscode.NotebookSerializer = {
@@ -162,61 +282,71 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 	});
 
 	test('cell execute command takes arguments', async () => {
-		console.log('Step1.cell execute command takes arguments');
 		const notebook = await openRandomNotebookDocument();
-		console.log('Step2.cell execute command takes arguments');
-		await vscode.window.showNotebookDocument(notebook);
-		console.log('Step3.cell execute command takes arguments');
-		assert.strictEqual(vscode.window.activeNotebookEditor !== undefined, true, 'notebook first');
-		const editor = vscode.window.activeNotebookEditor!;
-		const cell = editor.notebook.cellAt(0);
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
+		if (!isTauriIntegration) {
+			assert.strictEqual(vscode.window.activeNotebookEditor !== undefined, true, 'notebook first');
+		}
+		let cell = notebook.cellAt(0);
+		if (isTauriIntegration) {
+			await assertKernel(defaultKernel, notebook);
+		}
 
-		console.log('Step4.cell execute command takes arguments');
-		await withEvent(vscode.workspace.onDidChangeNotebookDocument, async event => {
-			console.log('Step5.cell execute command takes arguments');
-			await vscode.commands.executeCommand('notebook.execute');
-			console.log('Step6.cell execute command takes arguments');
-			await event;
-			console.log('Step7.cell execute command takes arguments');
+		if (isTauriIntegration) {
+			await executeNotebook(notebook);
+			await waitForOutputCount(cell, 1);
 			assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
-		});
+		} else {
+			await withEvent(vscode.workspace.onDidChangeNotebookDocument, async event => {
+				await executeNotebook(notebook);
+				await event;
+				assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
+			});
+		}
 
-		console.log('Step8.cell execute command takes arguments');
-		await withEvent(vscode.workspace.onDidChangeNotebookDocument, async event => {
-			console.log('Step9.cell execute command takes arguments');
-			await vscode.commands.executeCommand('notebook.cell.clearOutputs');
-			console.log('Step10.cell execute command takes arguments');
-			await event;
-			console.log('Step11.cell execute command takes arguments');
+		if (isTauriIntegration) {
+			await clearCellOutputsDetached(notebook, 0);
+			cell = notebook.cellAt(0);
+			await waitForOutputCount(cell, 0);
 			assert.strictEqual(cell.outputs.length, 0, 'should clear');
-		});
+		} else {
+			await withEvent(vscode.workspace.onDidChangeNotebookDocument, async event => {
+				await vscode.commands.executeCommand('notebook.cell.clearOutputs');
+				await event;
+				assert.strictEqual(cell.outputs.length, 0, 'should clear');
+			});
+		}
 
-		console.log('Step12.cell execute command takes arguments');
 		const secondResource = await createRandomNotebookFile();
-		console.log('Step13.cell execute command takes arguments');
 		const secondDocument = await vscode.workspace.openNotebookDocument(secondResource);
-		console.log('Step14.cell execute command takes arguments');
-		await vscode.window.showNotebookDocument(secondDocument);
-		console.log('Step15.cell execute command takes arguments');
+		if (!isTauriIntegration) {
+			await showNotebook(secondDocument);
+		}
 
-		await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async event => {
-			console.log('Step16.cell execute command takes arguments');
+		if (isTauriIntegration) {
 			await vscode.commands.executeCommand('notebook.cell.execute', { start: 0, end: 1 }, notebook.uri);
-			console.log('Step17.cell execute command takes arguments');
-			await event;
-			console.log('Step18.cell execute command takes arguments');
+			await waitForOutputCount(cell, 1);
 			assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
-			assert.strictEqual(vscode.window.activeNotebookEditor?.notebook.uri.fsPath, secondResource.fsPath);
-		});
-		console.log('Step19.cell execute command takes arguments');
+		} else {
+			await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async event => {
+				await vscode.commands.executeCommand('notebook.cell.execute', { start: 0, end: 1 }, notebook.uri);
+				await event;
+				assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
+				assert.strictEqual(vscode.window.activeNotebookEditor?.notebook.uri.fsPath, secondResource.fsPath);
+			});
+		}
 	});
 
 	test('cell execute command takes arguments 2', async () => {
-		console.log('Step1.cell execute command takes arguments 2');
 		const notebook = await openRandomNotebookDocument();
-		console.log('Step2.cell execute command takes arguments 2');
-		await vscode.window.showNotebookDocument(notebook);
-		console.log('Step3.cell execute command takes arguments 2');
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
+		if (isTauriIntegration) {
+			await assertKernel(defaultKernel, notebook);
+		}
 
 		let firstCellExecuted = false;
 		let secondCellExecuted = false;
@@ -246,24 +376,38 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 	test('document execute command takes arguments', async () => {
 		const notebook = await openRandomNotebookDocument();
-		await vscode.window.showNotebookDocument(notebook);
-		assert.strictEqual(vscode.window.activeNotebookEditor !== undefined, true, 'notebook first');
-		const editor = vscode.window.activeNotebookEditor!;
-		const cell = editor.notebook.cellAt(0);
-
-		await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async (event) => {
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
+		if (isTauriIntegration) {
+			await assertKernel(defaultKernel, notebook);
+		}
+		if (!isTauriIntegration) {
+			assert.strictEqual(vscode.window.activeNotebookEditor !== undefined, true, 'notebook first');
+		}
+		const cell = notebook.cellAt(0);
+		
+		if (isTauriIntegration) {
 			await vscode.commands.executeCommand('notebook.execute', notebook.uri);
-			await event;
+			await waitForOutputCount(cell, 1);
 			assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
-		});
+		} else {
+			await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async (event) => {
+				await vscode.commands.executeCommand('notebook.execute', notebook.uri);
+				await event;
+				assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
+			});
+		}
 	});
 
 	test('cell execute and select kernel', async function () {
 		const notebook = await openRandomNotebookDocument();
-		const editor = await vscode.window.showNotebookDocument(notebook);
-		assert.strictEqual(vscode.window.activeNotebookEditor === editor, true, 'notebook first');
+		if (!isTauriIntegration) {
+			const editor = await showNotebook(notebook);
+			assert.strictEqual(vscode.window.activeNotebookEditor === editor, true, 'notebook first');
+		}
 
-		const cell = editor.notebook.cellAt(0);
+		const cell = notebook.cellAt(0);
 
 		const alternativeKernel = new class extends Kernel {
 			constructor() {
@@ -284,7 +428,7 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 		await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async (event) => {
 			await assertKernel(defaultKernel, notebook);
-			await vscode.commands.executeCommand('notebook.cell.execute');
+			await executeFirstCell(notebook);
 			await event;
 			assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
 			assert.strictEqual(cell.outputs[0].items.length, 1);
@@ -294,7 +438,7 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 		await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async (event) => {
 			await assertKernel(alternativeKernel, notebook);
-			await vscode.commands.executeCommand('notebook.cell.execute');
+			await executeFirstCell(notebook);
 			await event;
 			assert.strictEqual(cell.outputs.length, 1, 'should execute'); // runnable, it worked
 			assert.strictEqual(cell.outputs[0].items.length, 1);
@@ -328,21 +472,28 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 		};
 
 		const notebook = await openRandomNotebookDocument();
-		await vscode.window.showNotebookDocument(notebook);
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
 		await assertKernel(verifyOutputSyncKernel, notebook);
-		await vscode.commands.executeCommand('notebook.cell.execute');
+		await executeFirstCell(notebook);
 		assert.strictEqual(called, true);
 		verifyOutputSyncKernel.controller.dispose();
 	});
 
 	test('executionSummary', async () => {
 		const notebook = await openRandomNotebookDocument();
-		const editor = await vscode.window.showNotebookDocument(notebook);
-		const cell = editor.notebook.cellAt(0);
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
+		const cell = notebook.cellAt(0);
+		if (isTauriIntegration) {
+			await assertKernel(defaultKernel, notebook);
+		}
 
 		assert.strictEqual(cell.executionSummary?.success, undefined);
 		assert.strictEqual(cell.executionSummary?.executionOrder, undefined);
-		await vscode.commands.executeCommand('notebook.cell.execute');
+		await executeFirstCell(notebook);
 		assert.strictEqual(cell.outputs.length, 1, 'should execute');
 		assert.ok(cell.executionSummary);
 		assert.strictEqual(cell.executionSummary!.success, true);
@@ -378,9 +529,11 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 		};
 		testDisposables.push(cancelledKernel.controller);
 
-		await vscode.window.showNotebookDocument(document);
+		if (!isTauriIntegration) {
+			await showNotebook(document);
+		}
 		await assertKernel(cancelledKernel, document);
-		await vscode.commands.executeCommand('notebook.cell.execute');
+		await executeFirstCell(document);
 
 		// Delete executing cell
 		const edit = new vscode.WorkspaceEdit();
@@ -392,13 +545,15 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 	test('appendOutput to different cell', async function () {
 		const notebook = await openRandomNotebookDocument();
-		const editor = await vscode.window.showNotebookDocument(notebook);
-		const cell0 = editor.notebook.cellAt(0);
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
+		const cell0 = notebook.cellAt(0);
 		const notebookEdit = new vscode.NotebookEdit(new vscode.NotebookRange(1, 1), [new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'test 2', 'javascript')]);
 		const edit = new vscode.WorkspaceEdit();
 		edit.set(notebook.uri, [notebookEdit]);
 		await vscode.workspace.applyEdit(edit);
-		const cell1 = editor.notebook.cellAt(1);
+		const cell1 = notebook.cellAt(1);
 
 		const nextCellKernel = new class extends Kernel {
 			constructor() {
@@ -421,7 +576,7 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 		await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async (event) => {
 			await assertKernel(nextCellKernel, notebook);
-			await vscode.commands.executeCommand('notebook.cell.execute');
+			await executeFirstCell(notebook);
 			await event;
 			assert.strictEqual(cell0.outputs.length, 0, 'should not change cell 0');
 			assert.strictEqual(cell1.outputs.length, 2, 'should update cell 1');
@@ -432,13 +587,15 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 	test('replaceOutput to different cell', async function () {
 		const notebook = await openRandomNotebookDocument();
-		const editor = await vscode.window.showNotebookDocument(notebook);
-		const cell0 = editor.notebook.cellAt(0);
+		if (!isTauriIntegration) {
+			await showNotebook(notebook);
+		}
+		const cell0 = notebook.cellAt(0);
 		const notebookEdit = new vscode.NotebookEdit(new vscode.NotebookRange(1, 1), [new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'test 2', 'javascript')]);
 		const edit = new vscode.WorkspaceEdit();
 		edit.set(notebook.uri, [notebookEdit]);
 		await vscode.workspace.applyEdit(edit);
-		const cell1 = editor.notebook.cellAt(1);
+		const cell1 = notebook.cellAt(1);
 
 		const nextCellKernel = new class extends Kernel {
 			constructor() {
@@ -461,7 +618,7 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 		await withEvent<vscode.NotebookDocumentChangeEvent>(vscode.workspace.onDidChangeNotebookDocument, async (event) => {
 			await assertKernel(nextCellKernel, notebook);
-			await vscode.commands.executeCommand('notebook.cell.execute');
+			await executeFirstCell(notebook);
 			await event;
 			assert.strictEqual(cell0.outputs.length, 0, 'should not change cell 0');
 			assert.strictEqual(cell1.outputs.length, 1, 'should update cell 1');

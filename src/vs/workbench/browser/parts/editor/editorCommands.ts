@@ -691,7 +691,8 @@ function registerOpenEditorAPICommands(): void {
 				input = { resource: associatedResource, forceUntitled: true, options, label };
 			} else {
 				// use any other resource as is
-				input = { resource, options, label };
+				const openResource = matchesScheme(resource, Schemas.vscodeNotebookCell) ? notebookResource : resource;
+				input = { resource: openResource, options, label };
 			}
 
 			const needsNewGroup = typeof column === 'number' && column >= 0 && !editorGroupsService.getGroups(GroupsOrder.GRID_APPEARANCE)[column];

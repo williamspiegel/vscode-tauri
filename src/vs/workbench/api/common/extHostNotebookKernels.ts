@@ -73,6 +73,9 @@ export class ExtHostNotebookKernels implements ExtHostNotebookKernelsShape {
 				new ApiCommandArgument<ExtHostSelectKernelArgs, SelectKernelReturnArgs>('options', 'Select kernel options', v => true, (v: ExtHostSelectKernelArgs) => {
 					if (v && 'notebookEditor' in v && 'id' in v) {
 						const notebookEditorId = this._extHostNotebook.getIdByEditor(v.notebookEditor);
+						if (notebookEditorId === undefined) {
+							throw new Error(`Cannot invoke 'notebook.selectKernel' for unrecognized notebook editor ${v.notebookEditor.notebook.uri.toString()}`);
+						}
 						return {
 							id: v.id, extension: v.extension, notebookEditorId
 						};

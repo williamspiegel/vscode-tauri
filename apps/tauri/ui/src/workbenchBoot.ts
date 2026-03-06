@@ -61,6 +61,17 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
   const windowConfig = await host.resolveWindowConfig();
   const workspaceProvider = createWorkspaceProvider(windowConfig);
   const developmentOptions = createDevelopmentOptions(windowConfig);
+  if (Array.isArray(windowConfig.extensionDevelopmentPath) || typeof windowConfig.extensionTestsPath === 'string') {
+    void host.invokeMethod('host.log', {
+      level: 'info',
+      source: 'ui.startup',
+      message: [
+        `workbenchBoot extensionDevelopmentPathCount=${Array.isArray(windowConfig.extensionDevelopmentPath) ? windowConfig.extensionDevelopmentPath.length : 0}`,
+        `extensionTestsPathPresent=${typeof windowConfig.extensionTestsPath === 'string'}`,
+        `developmentOptionsPresent=${developmentOptions ? 'true' : 'false'}`
+      ].join(' ')
+    }).catch(() => undefined);
+  }
   const enableWorkspaceTrust = windowConfig['disable-workspace-trust'] !== true;
   workbenchWindow._VSCODE_FILE_ROOT = fileRoot;
 

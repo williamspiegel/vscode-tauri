@@ -1812,6 +1812,18 @@ async function main(): Promise<void> {
 		host.resolveWindowConfig(),
 	);
 	startupWindowConfig = windowConfig;
+	await reportStartupProgressToHost(
+		[
+			`windowConfig extensionDevelopmentPathCount=${
+				Array.isArray(windowConfig.extensionDevelopmentPath)
+					? windowConfig.extensionDevelopmentPath.length
+					: 0
+			}`,
+			`extensionTestsPathPresent=${
+				typeof windowConfig.extensionTestsPath === "string"
+			}`,
+		].join(" "),
+	);
 	installAutomationWindowHooks(host, windowConfig);
 	const appRoot =
 		typeof windowConfig.appRoot === "string" ? windowConfig.appRoot : "";

@@ -58,16 +58,22 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 				return { notebookUri, inputUri, notebookEditor: notebookEditor.apiEditor };
 			}
 
-			try {
-				const notebookDocument = await this._extHostNotebooks.openNotebookDocument(notebookUri);
-				const notebookEditor = await this._extHostNotebooks.showNotebookDocument(
-					notebookDocument,
-					showNotebookOptions
-				);
-				_logService.debug('[ExtHostInteractive] notebook editor recovered via showNotebookDocument', notebookUri.toString());
-				return { notebookUri, inputUri, notebookEditor };
-			} catch (error) {
-				_logService.debug('[ExtHostInteractive] failed to recover notebook editor via showNotebookDocument', notebookUri.toString(), error);
+			for (let attempt = 0; attempt < 200; attempt++) {
+				try {
+					const notebookDocument = await this._extHostNotebooks.openNotebookDocument(notebookUri);
+					const notebookEditor = await this._extHostNotebooks.showNotebookDocument(
+						notebookDocument,
+						showNotebookOptions
+					);
+					_logService.debug('[ExtHostInteractive] notebook editor recovered via showNotebookDocument', notebookUri.toString());
+					return { notebookUri, inputUri, notebookEditor };
+				} catch (error) {
+					if (attempt === 199) {
+						_logService.debug('[ExtHostInteractive] failed to recover notebook editor via showNotebookDocument', notebookUri.toString(), error);
+						break;
+					}
+					await timeout(50);
+				}
 			}
 
 			_logService.debug('[ExtHostInteractive] notebook editor not found, uris for the interactive document', result.notebookUri, result.inputUri);

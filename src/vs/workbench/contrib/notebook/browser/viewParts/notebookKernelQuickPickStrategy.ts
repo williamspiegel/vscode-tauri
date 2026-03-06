@@ -5,7 +5,7 @@
 
 import { IAction } from '../../../../../base/common/actions.js';
 import { groupBy } from '../../../../../base/common/arrays.js';
-import { createCancelablePromise } from '../../../../../base/common/async.js';
+import { createCancelablePromise, timeout } from '../../../../../base/common/async.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { Event } from '../../../../../base/common/event.js';
@@ -113,17 +113,20 @@ abstract class KernelPickerStrategyBase implements IKernelPickerStrategy {
 	async showQuickPick(editor: IActiveNotebookEditor, wantedId?: string, skipAutoRun?: boolean): Promise<boolean> {
 		const notebook = editor.textModel;
 		const scopedContextKeyService = editor.scopedContextKeyService;
-		const matchResult = this._getMatchingResult(notebook);
-		const { selected, all } = matchResult;
+		let matchResult = this._getMatchingResult(notebook);
+		let { selected, all } = matchResult;
 
 		let newKernel: INotebookKernel | undefined;
 		if (wantedId) {
-			for (const candidate of all) {
-				if (candidate.id === wantedId) {
-					newKernel = candidate;
-					break;
-				}
+			newKernel = all.find(candidate => candidate.id === wantedId);
+			for (let attempt = 0; !newKernel && attempt < 100; attempt++) {
+				await timeout(50);
+				matchResult = this._getMatchingResult(notebook);
+				selected = matchResult.selected;
+				all = matchResult.all;
+				newKernel = all.find(candidate => candidate.id === wantedId);
 			}
+
 			if (!newKernel) {
 				this._logService.warn(`wanted kernel DOES NOT EXIST, wanted: ${wantedId}, all: ${all.map(k => k.id)}`);
 				return false;
@@ -808,18 +811,57 @@ export class KernelPickerMRUStrategy extends KernelPickerStrategyBase {
 
 	static async resolveKernel(notebook: INotebookTextModel, notebookKernelService: INotebookKernelService, notebookKernelHistoryService: INotebookKernelHistoryService, commandService: ICommandService): Promise<INotebookKernel | undefined> {
 		const alreadySelected = notebookKernelHistoryService.getKernels(notebook);
+		const isTauriIntegration = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.VSCODE_TAURI_INTEGRATION === '1';
+		const currentlySelectedOrSuggested = notebookKernelService.getSelectedOrSuggestedKernel(notebook);
+
+		if (isTauriIntegration && currentlySelectedOrSuggested && alreadySelected.selected?.id !== currentlySelectedOrSuggested.id) {
+			notebookKernelHistoryService.addMostRecentKernel(currentlySelectedOrSuggested);
+			return currentlySelectedOrSuggested;
+		}
 
 		if (alreadySelected.selected) {
 			return alreadySelected.selected;
 		}
 
-		const selectedOrSuggested = notebookKernelService.getSelectedOrSuggestedKernel(notebook);
+		const selectedOrSuggested = currentlySelectedOrSuggested;
 		if (selectedOrSuggested) {
 			notebookKernelHistoryService.addMostRecentKernel(selectedOrSuggested);
 			return selectedOrSuggested;
 		}
 
+		for (let attempt = 0; attempt < 100; attempt++) {
+			await timeout(50);
+			const delayedSelectedOrSuggested = notebookKernelService.getSelectedOrSuggestedKernel(notebook);
+			if (delayedSelectedOrSuggested) {
+				notebookKernelHistoryService.addMostRecentKernel(delayedSelectedOrSuggested);
+				return delayedSelectedOrSuggested;
+			}
+		}
+
+		if (isTauriIntegration) {
+			const match = notebookKernelService.getMatchingKernel(notebook);
+			const fallbackKernel = match.selected ?? match.suggestions[0] ?? match.all[0];
+			if (fallbackKernel) {
+				notebookKernelService.selectKernelForNotebook(fallbackKernel, notebook);
+				notebookKernelHistoryService.addMostRecentKernel(fallbackKernel);
+				return fallbackKernel;
+			}
+		}
+
 		await commandService.executeCommand(SELECT_KERNEL_ID);
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const { selected } = notebookKernelHistoryService.getKernels(notebook);
+			if (selected) {
+				return selected;
+			}
+			const selectedOrSuggestedAfterCommand = notebookKernelService.getSelectedOrSuggestedKernel(notebook);
+			if (selectedOrSuggestedAfterCommand) {
+				notebookKernelHistoryService.addMostRecentKernel(selectedOrSuggestedAfterCommand);
+				return selectedOrSuggestedAfterCommand;
+			}
+			await timeout(50);
+		}
+
 		const { selected } = notebookKernelHistoryService.getKernels(notebook);
 		return selected;
 	}

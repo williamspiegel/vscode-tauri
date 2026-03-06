@@ -136,6 +136,35 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 				return id;
 			}
 		}
+
+		const editorNotebookUri = editor.notebook?.uri;
+		if (editorNotebookUri) {
+			const editorViewColumn = editor.viewColumn;
+			const matchingEditors = [...this._editors.entries()].filter(([, candidate]) => isEqual(candidate.notebookData.uri, editorNotebookUri));
+			if (editorViewColumn !== undefined) {
+				const matchingEditorsByColumn = matchingEditors.filter(([, candidate]) => candidate.apiEditor.viewColumn === editorViewColumn);
+				if (matchingEditorsByColumn.length === 1) {
+					return matchingEditorsByColumn[0][0];
+				}
+			}
+
+			if (matchingEditors.length === 1) {
+				return matchingEditors[0][0];
+			}
+
+			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebookData.uri, editorNotebookUri)) {
+				return this._activeNotebookEditor.id;
+			}
+
+			const visibleMatches = this._visibleNotebookEditors.filter(candidate => isEqual(candidate.notebookData.uri, editorNotebookUri));
+			if (visibleMatches.length === 1) {
+				return visibleMatches[0].id;
+			}
+			if (process.env.VSCODE_TAURI_INTEGRATION === '1' && visibleMatches.length > 1) {
+				return visibleMatches.at(-1)?.id;
+			}
+		}
+
 		return undefined;
 	}
 
@@ -190,6 +219,9 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 					this._activeNotebookEditor = soleVisibleEditor;
 					this._onDidChangeActiveNotebookEditor.fire(this._activeNotebookEditor.apiEditor);
 				}
+			} else if (this._visibleNotebookEditors.length === 0 && this._activeNotebookEditor) {
+				this._activeNotebookEditor = undefined;
+				this._onDidChangeActiveNotebookEditor.fire(undefined);
 			}
 			return;
 		}
@@ -248,7 +280,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 	}
 
 	private async _waitAndSyncActiveNotebookEditor(notebookUri: URI, preferredViewColumn: vscode.ViewColumn | undefined): Promise<void> {
-		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
+		for (let attempt = 0; attempt < this._getTextEditorSettleAttempts(); attempt++) {
 			const activeTextEditor = this._textDocumentsAndEditors.activeEditor();
 			const activeTextEditorUri = activeTextEditor?.document?.uri;
 			const activeNotebookUri = activeTextEditorUri?.scheme === Schemas.vscodeNotebookCell
@@ -365,28 +397,33 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		const editorId = await this._withTauriNotebookShowTimeout(
 			`$tryShowNotebookDocument(${notebook.uri.toString()})`,
 			this._notebookEditorsProxy.$tryShowNotebookDocument(notebook.uri, viewType, resolvedOptions),
-			20000
+			60000
 		);
 		const editor = editorId ? await this._withTauriNotebookShowTimeout(
 			`_waitForEditor(${notebook.uri.toString()})`,
 			this._waitForEditor(editorId, notebook.uri, existingMatchingEditorIds)
 		) : undefined;
+		const fallbackEditor = editor
+			?? this._findNewVisibleEditorByResource(notebook.uri, existingMatchingEditorIds)?.apiEditor
+			?? this._visibleNotebookEditors.find(candidate => isEqual(candidate.notebookData.uri, notebook.uri))?.apiEditor
+			?? (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebookData.uri, notebook.uri) ? this._activeNotebookEditor.apiEditor : undefined);
 
-		if (editor) {
+		if (fallbackEditor) {
 			if (!resolvedOptions.preserveFocus) {
-				const editorResource = this._editors.get(editorId)?.notebookData.uri ?? editor.notebook?.uri;
-				await this._withTauriNotebookShowTimeout(
+				const editorResource = this._editors.get(editorId)?.notebookData.uri ?? fallbackEditor.notebook?.uri;
+				await this._bestEffortTauriNotebookShowWait(
 					`_waitForActiveEditor(${notebook.uri.toString()})`,
-					this._waitForActiveEditor(editorId, editor)
+					this._waitForActiveEditor(editorId, fallbackEditor)
 				);
 				if (editorResource) {
-					await this._withTauriNotebookShowTimeout(
+					await this._bestEffortTauriNotebookShowWait(
 						`_waitForNotebookTextEditor(${editorResource.toString()})`,
-						this._waitForNotebookTextEditor(editorResource)
+						this._waitForNotebookTextEditor(editorResource),
+						15000
 					);
 				}
 			}
-			return editor;
+			return fallbackEditor;
 		}
 
 		if (editorId) {
@@ -413,6 +450,19 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 			if (handle) {
 				clearTimeout(handle);
 			}
+		}
+	}
+
+	private async _bestEffortTauriNotebookShowWait<T>(label: string, promise: PromiseLike<T>, timeoutMs = 5000): Promise<T | undefined> {
+		if (process.env.VSCODE_TAURI_INTEGRATION !== '1') {
+			return promise;
+		}
+
+		try {
+			return await this._withTauriNotebookShowTimeout(label, promise, timeoutMs);
+		} catch (error) {
+			this._logService.debug(`[tauri.notebook.show] continuing after best-effort wait failure: ${label}`, error);
+			return undefined;
 		}
 	}
 
@@ -489,16 +539,10 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 	}
 
 	private async _waitForNotebookTextEditor(resource: URI): Promise<void> {
-		for (let attempt = 0; attempt < ExtHostNotebookController._textEditorSettleAttempts; attempt++) {
-			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebookData.uri, resource)) {
-				return;
-			}
-
-			const visibleMatchingNotebookEditor = this._visibleNotebookEditors.find(editor => isEqual(editor.notebookData.uri, resource));
-			if (visibleMatchingNotebookEditor) {
-				return;
-			}
-
+		const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
+		const settleAttempts = this._getTextEditorSettleAttempts();
+		const tauriFallbackAttempt = Math.max(0, settleAttempts - 1);
+		for (let attempt = 0; attempt < settleAttempts; attempt++) {
 			const activeTextEditorUri = this._textDocumentsAndEditors.activeEditor()?.document?.uri;
 			if (activeTextEditorUri) {
 				if (isEqual(activeTextEditorUri, resource)) {
@@ -511,8 +555,27 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 				}
 			}
 
+			if (this._activeNotebookEditor && isEqual(this._activeNotebookEditor.notebookData.uri, resource)) {
+				if (!isTauriIntegration || !activeTextEditorUri || attempt >= tauriFallbackAttempt) {
+					return;
+				}
+			}
+
+			const visibleMatchingNotebookEditor = this._visibleNotebookEditors.find(editor => isEqual(editor.notebookData.uri, resource));
+			if (visibleMatchingNotebookEditor) {
+				if (!isTauriIntegration || !activeTextEditorUri || attempt >= tauriFallbackAttempt) {
+					return;
+				}
+			}
+
 			await timeout(50);
 		}
+	}
+
+	private _getTextEditorSettleAttempts(): number {
+		return process.env.VSCODE_TAURI_INTEGRATION === '1'
+			? Math.max(ExtHostNotebookController._textEditorSettleAttempts, 160)
+			: ExtHostNotebookController._textEditorSettleAttempts;
 	}
 
 	async $provideNotebookCellStatusBarItems(handle: number, uri: UriComponents, index: number, token: CancellationToken): Promise<INotebookCellStatusBarListDto | undefined> {

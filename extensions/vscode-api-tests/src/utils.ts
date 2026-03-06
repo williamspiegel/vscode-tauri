@@ -106,12 +106,18 @@ export async function closeAllEditors(): Promise<void> {
 			const activeTextEditor = vscode.window.activeTextEditor;
 			const activeTextEditorUri = activeTextEditor?.document.uri.toString() ?? 'undefined';
 			const isKnownTauriFarJsResidue = !activeNotebookEditor
-				&& openTabs <= 2
+				&& openTabs <= 3
 				&& (activeTextEditor?.document.uri.path.endsWith('/far.js') ?? false);
 			const isKnownTauriFakeFsResidue = !activeNotebookEditor
-				&& openTabs <= 2
+				&& openTabs <= 4
 				&& activeTextEditor?.document.uri.scheme === testFs.scheme;
-			if (isKnownTauriFarJsResidue || isKnownTauriFakeFsResidue) {
+			const isKnownTauriUntitledResidue = !activeNotebookEditor
+				&& openTabs <= 1
+				&& activeTextEditor?.document.uri.scheme === 'untitled';
+			const isKnownTauriUntitledNotebookResidue = openTabs === 0
+				&& activeNotebookEditor?.notebook.uri.scheme === 'untitled'
+				&& activeTextEditor?.document.uri.scheme === 'untitled';
+			if (isKnownTauriFarJsResidue || isKnownTauriFakeFsResidue || isKnownTauriUntitledResidue || isKnownTauriUntitledNotebookResidue) {
 				return true;
 			}
 

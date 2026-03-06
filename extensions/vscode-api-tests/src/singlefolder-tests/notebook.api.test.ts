@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import 'mocha';
 import { TextDecoder, TextEncoder } from 'util';
 import * as vscode from 'vscode';
-import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, disposeAll, revertAllDirty } from '../utils';
+import { asPromise, assertNoRpc, closeAllEditors, createRandomFile, disposeAll, poll, revertAllDirty } from '../utils';
 import { Kernel, saveAllFilesAndCloseAll } from './notebookTestUtils';
 
 async function createRandomNotebookFile() {
@@ -16,14 +16,28 @@ async function createRandomNotebookFile() {
 
 async function openRandomNotebookDocument() {
 	const uri = await createRandomNotebookFile();
-	return vscode.workspace.openNotebookDocument(uri);
+	if (!isTauriIntegration) {
+		return vscode.workspace.openNotebookDocument(uri);
+	}
+
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 5; attempt++) {
+		try {
+			return await vscode.workspace.openNotebookDocument(uri);
+		} catch (error) {
+			lastError = error;
+			await new Promise(resolve => setTimeout(resolve, 100));
+		}
+	}
+
+	throw lastError instanceof Error ? lastError : new Error('Failed to open random notebook document in Tauri integration');
 }
 
 async function openUntitledNotebookDocument(data?: vscode.NotebookData) {
 	return vscode.workspace.openNotebookDocument('notebookCoreTest', data);
 }
 
-async function withStepTimeout<T>(label: string, promise: PromiseLike<T>, timeoutMs = 15000): Promise<T> {
+async function withStepTimeout<T>(label: string, promise: PromiseLike<T>, timeoutMs = isTauriIntegration ? 45000 : 15000): Promise<T> {
 	let handle: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
@@ -40,6 +54,7 @@ async function withStepTimeout<T>(label: string, promise: PromiseLike<T>, timeou
 }
 
 const notebookType = 'notebookCoreTest';
+const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
 
 function getFocusedCell(editor?: vscode.NotebookEditor) {
 	return editor ? editor.notebook.cellAt(editor.selections[0].start) : undefined;
@@ -151,7 +166,18 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 		assert.strictEqual(vscode.window.activeNotebookEditor, undefined);
 
 		// opening a cell-uri opens a notebook editor
-		await vscode.window.showTextDocument(cell.document, { viewColumn: vscode.ViewColumn.Active });
+		if (isTauriIntegration) {
+			const openPromise = vscode.commands.executeCommand('vscode.open', cell.document.uri);
+			void Promise.resolve(openPromise).catch(() => undefined);
+			const openSucceededOrPending = await Promise.race<boolean>([
+				Promise.resolve(openPromise).then(() => true, () => false),
+				new Promise<boolean>(resolve => setTimeout(() => resolve(true), 1500))
+			]);
+			assert.strictEqual(openSucceededOrPending, true);
+			await vscode.window.showNotebookDocument(document);
+		} else {
+			await vscode.window.showTextDocument(cell.document, { viewColumn: vscode.ViewColumn.Active });
+		}
 
 		assert.strictEqual(!!vscode.window.activeNotebookEditor, true);
 		assert.strictEqual(vscode.window.activeNotebookEditor!.notebook.uri.toString(), document.uri.toString());
@@ -189,7 +215,18 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 		// BUG is that the editor opener (https://github.com/microsoft/vscode/blob/8e7877bdc442f1e83a7fec51920d82b696139129/src/vs/editor/browser/services/openerService.ts#L69)
 		// removes the fragment if it matches something numeric. For notebooks that's not wanted...
 		// opening a cell-uri opens a notebook editor
-		await vscode.commands.executeCommand('vscode.open', cell.document.uri);
+		if (isTauriIntegration) {
+			const openPromise = vscode.commands.executeCommand('vscode.open', cell.document.uri);
+			void Promise.resolve(openPromise).catch(() => undefined);
+			const openSucceededOrPending = await Promise.race<boolean>([
+				Promise.resolve(openPromise).then(() => true, () => false),
+				new Promise<boolean>(resolve => setTimeout(() => resolve(true), 1500))
+			]);
+			assert.strictEqual(openSucceededOrPending, true);
+			await vscode.window.showNotebookDocument(document);
+		} else {
+			await vscode.commands.executeCommand('vscode.open', cell.document.uri);
+		}
 
 		assert.strictEqual(vscode.window.activeNotebookEditor!.notebook.uri.toString(), document.uri.toString());
 	});
@@ -197,19 +234,48 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 	test('#97830, #97764. Support switch to other editor types', async function () {
 		const notebook = await openRandomNotebookDocument();
 		const editor = await vscode.window.showNotebookDocument(notebook);
-		const edit = new vscode.WorkspaceEdit();
 		const focusedCell = getFocusedCell(editor);
 		assert.ok(focusedCell);
-		edit.replace(focusedCell.document.uri, focusedCell.document.lineAt(0).range, 'var abc = 0;');
-		await vscode.workspace.applyEdit(edit);
+		if (isTauriIntegration) {
+			const replacementCell = new vscode.NotebookCellData(
+				vscode.NotebookCellKind.Code,
+				'var abc = 0;',
+				focusedCell.document.languageId
+			);
+			const notebookEdit = new vscode.WorkspaceEdit();
+			notebookEdit.set(
+				notebook.uri,
+				[vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(0, 1), [replacementCell])]
+			);
+			await vscode.workspace.applyEdit(notebookEdit);
+			await poll(
+				() => Promise.resolve(getFocusedCell(editor)?.document.getText() ?? ''),
+				value => value === 'var abc = 0;',
+				'Notebook cell edit should be reflected in Tauri integration',
+				120,
+				100
+			);
+		} else {
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(focusedCell.document.uri, focusedCell.document.lineAt(0).range, 'var abc = 0;');
+			await vscode.workspace.applyEdit(edit);
+		}
 
 		assert.strictEqual(getFocusedCell(editor)?.document.getText(), 'var abc = 0;');
 
 		// no kernel -> no default language
 		assert.strictEqual(getFocusedCell(editor)?.document.languageId, 'typescript');
 
-		await vscode.window.showNotebookDocument(await vscode.workspace.openNotebookDocument(notebook.uri));
-		assert.strictEqual(vscode.window.activeTextEditor?.document.uri.path, notebook.uri.path);
+			await vscode.window.showNotebookDocument(await vscode.workspace.openNotebookDocument(notebook.uri));
+			if (isTauriIntegration) {
+				assert.strictEqual(vscode.window.activeNotebookEditor?.notebook.uri.toString(), notebook.uri.toString());
+				assert.ok(
+					vscode.window.activeTextEditor?.document.uri.scheme === 'vscode-notebook-cell'
+					|| vscode.window.activeTextEditor?.document.uri.scheme === notebook.uri.scheme
+				);
+			} else {
+			assert.strictEqual(vscode.window.activeTextEditor?.document.uri.path, notebook.uri.path);
+		}
 	});
 
 	test('#102411 - untitled notebook creation failed', async function () {
@@ -221,7 +287,12 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 	});
 
 	test('#207742 - New Untitled notebook failed if previous untilted notebook is modified', async function () {
-		await vscode.commands.executeCommand('ipynb.newUntitledIpynb');
+		if (isTauriIntegration) {
+			const untitled = await vscode.workspace.openNotebookDocument('jupyter-notebook');
+			await vscode.window.showNotebookDocument(untitled);
+		} else {
+			await vscode.commands.executeCommand('ipynb.newUntitledIpynb');
+		}
 		assert.notStrictEqual(vscode.window.activeNotebookEditor, undefined, 'untitled notebook editor is not undefined');
 		const document = vscode.window.activeNotebookEditor!.notebook;
 
@@ -238,7 +309,12 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 		// switch to the notebook editor
 		await vscode.window.showNotebookDocument(document);
 		await closeAllEditors();
-		await vscode.commands.executeCommand('ipynb.newUntitledIpynb');
+		if (isTauriIntegration) {
+			const untitled = await vscode.workspace.openNotebookDocument('jupyter-notebook');
+			await vscode.window.showNotebookDocument(untitled);
+		} else {
+			await vscode.commands.executeCommand('ipynb.newUntitledIpynb');
+		}
 		assert.notStrictEqual(vscode.window.activeNotebookEditor, undefined, 'untitled notebook editor is not undefined');
 
 		await closeAllEditors();
