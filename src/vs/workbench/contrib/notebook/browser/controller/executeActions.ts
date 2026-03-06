@@ -373,7 +373,7 @@ registerAction2(class ExecuteNotebookAction extends NotebookAction {
 	}
 
 	override getEditorContextFromArgsOrActive(accessor: ServicesAccessor, context?: UriComponents): INotebookActionContext | undefined {
-		return getContextFromUri(accessor, context) ?? getContextFromActiveEditor(accessor.get(IEditorService));
+		return getContextFromUri(accessor, context) ?? getContextFromActiveEditor(accessor.get(IEditorService), accessor.get(INotebookEditorService));
 	}
 
 	async runWithContext(accessor: ServicesAccessor, context: INotebookActionContext | DetachedNotebookActionContext): Promise<void> {
@@ -814,7 +814,7 @@ registerAction2(class ExecuteCellInsertBelow extends NotebookCellAction {
 
 class CancelNotebook extends NotebookAction {
 	override getEditorContextFromArgsOrActive(accessor: ServicesAccessor, context?: UriComponents): INotebookActionContext | undefined {
-		return getContextFromUri(accessor, context) ?? getContextFromActiveEditor(accessor.get(IEditorService));
+		return getContextFromUri(accessor, context) ?? getContextFromActiveEditor(accessor.get(IEditorService), accessor.get(INotebookEditorService));
 	}
 
 	async runWithContext(accessor: ServicesAccessor, context: INotebookActionContext): Promise<void> {

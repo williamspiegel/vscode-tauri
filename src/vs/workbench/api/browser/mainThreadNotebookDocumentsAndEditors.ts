@@ -5,6 +5,7 @@
 
 import { diffMaps, diffSets } from '../../../base/common/collections.js';
 import { combinedDisposable, DisposableStore, DisposableMap } from '../../../base/common/lifecycle.js';
+import { isEqual } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../platform/log/common/log.js';
@@ -17,6 +18,7 @@ import { getNotebookEditorFromEditorPane, IActiveNotebookEditor, INotebookEditor
 import { INotebookEditorService } from '../../contrib/notebook/browser/services/notebookEditorService.js';
 import { NotebookTextModel } from '../../contrib/notebook/common/model/notebookTextModel.js';
 import { INotebookService } from '../../contrib/notebook/common/notebookService.js';
+import { EditorResourceAccessor, SideBySideEditor } from '../../common/editor.js';
 import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../services/editor/common/editorService.js';
 import { ExtHostContext, ExtHostNotebookShape, INotebookDocumentsAndEditorsDelta, INotebookEditorAddData, INotebookModelAddedData, MainContext } from '../common/extHost.protocol.js';
@@ -160,12 +162,25 @@ export class MainThreadNotebooksAndEditors {
 		}
 
 		let visibleEditorInActiveGroup: IActiveNotebookEditor | undefined;
+		const usedVisibleEditorIds = new Set<string>();
 
 		for (const editorPane of this._editorService.visibleEditorPanes) {
-			const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+			let notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+			if (!notebookEditor?.hasModel() && editorPane.input) {
+				const resource = EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
+				if (resource) {
+					notebookEditor = this._notebookEditorService.listNotebookEditors().find(candidate =>
+						candidate.hasModel()
+						&& !!candidate.textModel
+						&& isEqual(candidate.textModel.uri, resource)
+						&& !usedVisibleEditorIds.has(candidate.getId())
+					);
+				}
+			}
 			if (!notebookEditor?.hasModel()) {
 				continue;
 			}
+			usedVisibleEditorIds.add(notebookEditor.getId());
 
 			if (!editors.has(notebookEditor.getId())) {
 				editors.set(notebookEditor.getId(), notebookEditor);

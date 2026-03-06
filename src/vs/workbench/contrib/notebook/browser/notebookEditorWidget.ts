@@ -24,7 +24,7 @@ import * as domStylesheets from '../../../../base/browser/domStylesheets.js';
 import { IMouseWheelEvent, StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
 import { IListContextMenuEvent } from '../../../../base/browser/ui/list/list.js';
 import { mainWindow } from '../../../../base/browser/window.js';
-import { SequencerByKey } from '../../../../base/common/async.js';
+import { SequencerByKey, timeout } from '../../../../base/common/async.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Color, RGBA } from '../../../../base/common/color.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
@@ -266,8 +266,12 @@ export class NotebookEditorWidget extends Disposable implements INotebookEditorD
 			return;
 		}
 
-		const [focused] = this._list.getFocusedElements();
-		return this._renderedEditors.get(focused);
+		const focused = this.getActiveCell();
+		if (!focused) {
+			return;
+		}
+		return this._renderedEditors.get(focused)
+			?? (this._editorPool.activeCell === focused ? this._editorPool.activeEditor : undefined);
 	}
 
 	get activeCellAndCodeEditor(): [ICellViewModel, ICodeEditor] | undefined {
@@ -275,8 +279,12 @@ export class NotebookEditorWidget extends Disposable implements INotebookEditorD
 			return;
 		}
 
-		const [focused] = this._list.getFocusedElements();
-		const editor = this._renderedEditors.get(focused);
+		const focused = this.getActiveCell();
+		if (!focused) {
+			return;
+		}
+		const editor = this._renderedEditors.get(focused)
+			?? (this._editorPool.activeCell === focused ? this._editorPool.activeEditor : undefined);
 		if (!editor) {
 			return;
 		}
@@ -2058,6 +2066,7 @@ export class NotebookEditorWidget extends Disposable implements INotebookEditorD
 
 	onWillHide() {
 		this._isVisible = false;
+		this._editorPool.clearPreservedEditor();
 		this._editorFocus.set(false);
 		this._overlayContainer.inert = true;
 		this._overlayContainer.style.visibility = 'hidden';
@@ -2382,6 +2391,11 @@ export class NotebookEditorWidget extends Disposable implements INotebookEditorD
 			return elements[0];
 		}
 
+		const focusRange = this.viewModel?.getFocus();
+		if (focusRange) {
+			return this.viewModel?.cellAt(focusRange.start);
+		}
+
 		return undefined;
 	}
 
@@ -2449,12 +2463,21 @@ export class NotebookEditorWidget extends Disposable implements INotebookEditorD
 						const firstSelectionPosition = selectionsStartPosition[0];
 						await this.revealRangeInViewAsync(cell, Range.fromPositions(firstSelectionPosition, firstSelectionPosition));
 					} else {
-						await this.revealInView(cell);
+						await this.revealRangeInViewAsync(cell, new Range(1, 1, 1, 1));
 					}
 
 				}
 
 			}
+
+			let activeEditor = this._renderedEditors.get(cell);
+			if (!activeEditor) {
+				this._editorPool.preserveFocusedEditor(cell);
+				await timeout(0);
+				activeEditor = this._renderedEditors.get(cell) ?? (this._editorPool.activeCell === cell ? this._editorPool.activeEditor : undefined);
+			}
+
+			activeEditor?.focus();
 		} else if (focusItem === 'output') {
 			this.focusElement(cell);
 

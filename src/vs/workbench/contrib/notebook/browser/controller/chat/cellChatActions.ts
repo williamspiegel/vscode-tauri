@@ -25,6 +25,7 @@ import { IEditorService } from '../../../../../services/editor/common/editorServ
 import { ChatContextKeys } from '../../../../chat/common/actions/chatContextKeys.js';
 import { InlineChatController } from '../../../../inlineChat/browser/inlineChatController.js';
 import { EditorAction2 } from '../../../../../../editor/browser/editorExtensions.js';
+import { INotebookEditorService } from '../../services/notebookEditorService.js';
 
 interface IInsertCellWithChatArgs extends INotebookActionContext {
 	input?: string;
@@ -250,7 +251,7 @@ export class AcceptChangesAndRun extends EditorAction2 {
 	}
 
 	override runEditorCommand(accessor: ServicesAccessor, codeEditor: ICodeEditor) {
-		const editor = getContextFromActiveEditor(accessor.get(IEditorService));
+		const editor = getContextFromActiveEditor(accessor.get(IEditorService), accessor.get(INotebookEditorService));
 		const ctrl = InlineChatController.get(codeEditor);
 
 		if (!editor || !ctrl) {

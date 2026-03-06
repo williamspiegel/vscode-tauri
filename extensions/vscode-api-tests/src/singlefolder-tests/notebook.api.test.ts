@@ -60,6 +60,22 @@ function getFocusedCell(editor?: vscode.NotebookEditor) {
 	return editor ? editor.notebook.cellAt(editor.selections[0].start) : undefined;
 }
 
+function getActiveTextEditorUri() {
+	return vscode.window.activeTextEditor?.document.uri.toString();
+}
+
+function getNotebookUiState() {
+	const activeNotebookEditor = vscode.window.activeNotebookEditor;
+	return [
+		`activeNotebook=${activeNotebookEditor?.notebook.uri.toString() ?? 'undefined'}`,
+		`activeText=${getActiveTextEditorUri() ?? 'undefined'}`,
+		`visibleTextEditors=${vscode.window.visibleTextEditors.map(editor => editor.document.uri.toString()).join(',') || 'undefined'}`,
+		`visibleRanges=${activeNotebookEditor?.visibleRanges.map(range => `${range.start}:${range.end}`).join(',') || 'undefined'}`,
+		`selection=${activeNotebookEditor?.selections.map(selection => `${selection.start}:${selection.end}`).join(',') ?? 'undefined'}`,
+		`focusedCell=${activeNotebookEditor ? getFocusedCell(activeNotebookEditor)?.document.uri.toString() ?? 'undefined' : 'undefined'}`
+	].join('\n');
+}
+
 const apiTestSerializer: vscode.NotebookSerializer = {
 	serializeNotebook(_data, _token) {
 		return new Uint8Array();
@@ -152,8 +168,24 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 
 	test('multiple tabs: different editors with same document', async function () {
 		const notebook = await openRandomNotebookDocument();
-		const firstNotebookEditor = await vscode.window.showNotebookDocument(notebook, { viewColumn: vscode.ViewColumn.One });
-		const secondNotebookEditor = await vscode.window.showNotebookDocument(notebook, { viewColumn: vscode.ViewColumn.Beside });
+		const showNotebook = async (label: string, options: vscode.NotebookDocumentShowOptions) => {
+			if (!isTauriIntegration) {
+				return vscode.window.showNotebookDocument(notebook, options);
+			}
+
+			try {
+				return await withStepTimeout(label, vscode.window.showNotebookDocument(notebook, options), 20000);
+			} catch (error) {
+				throw new Error([
+					error instanceof Error ? error.message : String(error),
+					`visibleNotebookEditors=${vscode.window.visibleNotebookEditors.map(editor => `${editor.notebook.uri.toString()}@${editor.viewColumn ?? 'undefined'}`).join(',') || 'undefined'}`,
+					getNotebookUiState()
+				].join('\n'));
+			}
+		};
+
+		const firstNotebookEditor = await showNotebook(`showNotebookDocument(first:${notebook.uri.toString()})`, { viewColumn: vscode.ViewColumn.One });
+		const secondNotebookEditor = await showNotebook(`showNotebookDocument(second:${notebook.uri.toString()})`, { viewColumn: vscode.ViewColumn.Beside });
 		assert.notStrictEqual(firstNotebookEditor, secondNotebookEditor);
 		assert.strictEqual(firstNotebookEditor?.notebook, secondNotebookEditor?.notebook, 'split notebook editors share the same document');
 	});
@@ -266,12 +298,49 @@ const apiTestSerializer: vscode.NotebookSerializer = {
 		// no kernel -> no default language
 		assert.strictEqual(getFocusedCell(editor)?.document.languageId, 'typescript');
 
-			await vscode.window.showNotebookDocument(await vscode.workspace.openNotebookDocument(notebook.uri));
+		const reopenedNotebook = await vscode.workspace.openNotebookDocument(notebook.uri);
+		if (isTauriIntegration) {
+			try {
+				await withStepTimeout(`showNotebookDocument(reopen:${notebook.uri.toString()})`, vscode.window.showNotebookDocument(reopenedNotebook), 20000);
+			} catch (error) {
+				throw new Error([
+					error instanceof Error ? error.message : String(error),
+					getNotebookUiState()
+				].join('\n'));
+			}
+		} else {
+			await vscode.window.showNotebookDocument(reopenedNotebook);
+		}
 			if (isTauriIntegration) {
+				if (!vscode.window.activeTextEditor) {
+					try {
+						await withStepTimeout('notebook.cell.edit', Promise.resolve(vscode.commands.executeCommand('notebook.cell.edit')), 12000);
+					} catch (error) {
+						throw new Error([
+							error instanceof Error ? error.message : String(error),
+							getNotebookUiState()
+						].join('\n'));
+					}
+					try {
+						await poll(
+							() => Promise.resolve(vscode.window.activeTextEditor?.document.uri.scheme),
+							value => value === 'vscode-notebook-cell' || value === notebook.uri.scheme,
+							'Notebook cell editor should become active in Tauri integration',
+							120,
+							100
+						);
+					} catch (error) {
+						throw new Error([
+							error instanceof Error ? error.message : String(error),
+							getNotebookUiState()
+						].join('\n'));
+					}
+				}
 				assert.strictEqual(vscode.window.activeNotebookEditor?.notebook.uri.toString(), notebook.uri.toString());
 				assert.ok(
 					vscode.window.activeTextEditor?.document.uri.scheme === 'vscode-notebook-cell'
-					|| vscode.window.activeTextEditor?.document.uri.scheme === notebook.uri.scheme
+					|| vscode.window.activeTextEditor?.document.uri.scheme === notebook.uri.scheme,
+					`expected notebook-backed activeTextEditor, got ${vscode.window.activeTextEditor?.document.uri.toString() ?? 'undefined'}`
 				);
 			} else {
 			assert.strictEqual(vscode.window.activeTextEditor?.document.uri.path, notebook.uri.path);

@@ -18,7 +18,7 @@ import { MainThreadTextEditor } from './mainThreadEditor.js';
 import { IMainThreadEditorLocator, MainThreadTextEditors } from './mainThreadEditors.js';
 import { ExtHostContext, ExtHostDocumentsAndEditorsShape, IDocumentsAndEditorsDelta, IModelAddedData, ITextEditorAddData, MainContext } from '../common/extHost.protocol.js';
 import { AbstractTextEditor } from '../../browser/parts/editor/textEditor.js';
-import { IEditorPane } from '../../common/editor.js';
+import { EditorResourceAccessor, IEditorPane, SideBySideEditor } from '../../common/editor.js';
 import { EditorGroupColumn, editorGroupToColumn } from '../../services/editor/common/editorGroupColumn.js';
 import { IEditorService } from '../../services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
@@ -34,6 +34,7 @@ import { ViewContainerLocation } from '../../common/views.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IQuickDiffModelService } from '../../contrib/scm/browser/quickDiffModel.js';
 import { getNotebookEditorFromEditorPane } from '../../contrib/notebook/browser/notebookBrowser.js';
+import { INotebookEditorService } from '../../contrib/notebook/browser/services/notebookEditorService.js';
 import { INotebookService } from '../../contrib/notebook/common/notebookService.js';
 import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
 import { CommandsRegistry } from '../../../platform/commands/common/commands.js';
@@ -123,12 +124,14 @@ CommandsRegistry.registerCommand(ENSURE_ACTIVE_TEXT_EDITOR_MIRROR_COMMAND_ID, ac
 		return undefined;
 	}
 
-	const activeCodeEditor = getCodeEditor(accessor.get(IEditorService).activeTextEditorControl);
+	const editorService = accessor.get(IEditorService);
+	const activeCodeEditor = getCodeEditor(editorService.activeTextEditorControl)
+		?? getActiveNotebookCodeEditor(editorService, accessor.get(INotebookEditorService));
 	if (!activeCodeEditor) {
 		return undefined;
 	}
 
-	return locator.ensureTextEditorForCodeEditor(activeCodeEditor);
+	return locator.adoptTextEditorForCodeEditor(activeCodeEditor);
 });
 
 const enum ActiveEditorOrder {
@@ -270,6 +273,7 @@ class MainThreadDocumentAndEditorStateComputer {
 		const hasActiveEditorPaneInput = !!activeEditorPane?.input && activeEditorPane.group.count > 0 && activeEditorPane.group.contains(activeEditorPane.input);
 		const hasWorkbenchActiveEditor = !!this._editorService.activeEditor;
 		const activeCodeEditor = getCodeEditor(this._editorService.activeTextEditorControl);
+		const activeNotebookResource = this._getActiveNotebookResource();
 		if (activeCodeEditor && !visiblePaneCodeEditors.has(activeCodeEditor)) {
 			const shouldTrackActiveCodeEditor = hasActiveEditorPaneInput || hasWorkbenchActiveEditor || activeCodeEditor.hasTextFocus() || activeCodeEditor.hasWidgetFocus();
 			if (shouldTrackActiveCodeEditor) {
@@ -290,12 +294,14 @@ class MainThreadDocumentAndEditorStateComputer {
 		for (const editor of candidateEditors) {
 			const model = editor.getModel();
 			const isNotebookBackedWidget = model?.uri.scheme === Schemas.vscodeNotebookCell || model?.uri.scheme === Schemas.vscodeInteractiveInput;
+			const notebookCell = model ? parseNotebookCellUri(model.uri) : undefined;
 			const isVisibleOrActiveEditor = visiblePaneCodeEditors.has(editor) || editor === activeCodeEditor;
+			const isActiveNotebookWidget = !!activeNotebookResource && !!notebookCell && notebookCell.notebook.toString() === activeNotebookResource.toString();
 			if (!hasOpenedWorkbenchEditors && !isNotebookBackedWidget && !isVisibleOrActiveEditor) {
 				continue;
 			}
 
-			if (!isVisibleOrActiveEditor && !isNotebookBackedWidget) {
+			if (!isVisibleOrActiveEditor && !isActiveNotebookWidget) {
 				continue;
 			}
 
@@ -340,11 +346,10 @@ class MainThreadDocumentAndEditorStateComputer {
 		}
 
 		if (!activeEditor) {
-			const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
-			if (activeNotebookEditor?.textModel) {
+			if (activeNotebookResource) {
 				for (const snapshot of editors.values()) {
 					const notebookCell = parseNotebookCellUri(snapshot.editor.getModel().uri);
-					if (notebookCell && notebookCell.notebook.toString() === activeNotebookEditor.textModel.uri.toString()) {
+					if (notebookCell && notebookCell.notebook.toString() === activeNotebookResource.toString()) {
 						activeEditor = snapshot.id;
 						break;
 					}
@@ -398,6 +403,20 @@ class MainThreadDocumentAndEditorStateComputer {
 			activeTextEditorControl = activeTextEditorControl.getModifiedEditor();
 		}
 		return activeTextEditorControl;
+	}
+
+	private _getActiveNotebookResource() {
+		const activeEditorPane = this._editorService.activeEditorPane;
+		const activeNotebookEditor = getNotebookEditorFromEditorPane(activeEditorPane);
+		if (activeNotebookEditor?.textModel) {
+			return activeNotebookEditor.textModel.uri;
+		}
+
+		if (!activeEditorPane?.input || activeEditorPane.group.count === 0 || !activeEditorPane.group.contains(activeEditorPane.input)) {
+			return undefined;
+		}
+
+		return EditorResourceAccessor.getCanonicalUri(activeEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
 	}
 }
 
@@ -630,9 +649,12 @@ export class MainThreadDocumentsAndEditors implements IMainThreadEditorLocator {
 			extHostDelta.addedDocuments = [this._toModelAddData(model)];
 		}
 		const activeTextEditorControl = getCodeEditor(this._editorService.activeTextEditorControl);
+		const activeNotebookResource = getActiveNotebookResource(this._editorService);
+		const activeNotebookCell = parseNotebookCellUri(model.uri);
 		if (
 			(this._editorService.activeEditorPane && mainThreadEditor.matches(this._editorService.activeEditorPane)) ||
-			activeTextEditorControl === codeEditor
+			activeTextEditorControl === codeEditor ||
+			(activeNotebookResource && activeNotebookCell && activeNotebookCell.notebook.toString() === activeNotebookResource.toString())
 		) {
 			extHostDelta.newActiveEditor = id;
 		}
@@ -645,7 +667,44 @@ export class MainThreadDocumentsAndEditors implements IMainThreadEditorLocator {
 		return id;
 	}
 
+	adoptTextEditorForCodeEditor(codeEditor: ICodeEditor): string | undefined {
+		const id = this.ensureTextEditorForCodeEditor(codeEditor);
+		if (!id) {
+			return undefined;
+		}
+
+		this._proxy.$acceptDocumentsAndEditorsDelta({ newActiveEditor: id });
+		return id;
+	}
+
 	getEditor(id: string): MainThreadTextEditor | undefined {
 		return this._textEditors.get(id);
 	}
+}
+
+function getActiveNotebookResource(editorService: IEditorService) {
+	const activeEditorPane = editorService.activeEditorPane;
+	const activeNotebookEditor = getNotebookEditorFromEditorPane(activeEditorPane);
+	if (activeNotebookEditor?.textModel) {
+		return activeNotebookEditor.textModel.uri;
+	}
+
+	if (!activeEditorPane?.input || activeEditorPane.group.count === 0 || !activeEditorPane.group.contains(activeEditorPane.input)) {
+		return undefined;
+	}
+
+	return EditorResourceAccessor.getCanonicalUri(activeEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
+}
+
+function getActiveNotebookCodeEditor(editorService: IEditorService, notebookEditorService: INotebookEditorService): ICodeEditor | undefined {
+	const activeEditorPane = editorService.activeEditorPane;
+	const paneNotebookEditor = getNotebookEditorFromEditorPane(activeEditorPane);
+	const activeNotebookResource = getActiveNotebookResource(editorService);
+	const notebookEditor = paneNotebookEditor ?? (activeNotebookResource
+		? notebookEditorService.listNotebookEditors().find(candidate => candidate.textModel?.uri.toString() === activeNotebookResource.toString())
+		: undefined);
+
+	return notebookEditor?.activeCodeEditor
+		?? notebookEditor?.activeCellAndCodeEditor?.[1]
+		?? notebookEditor?.codeEditors[0]?.[1];
 }

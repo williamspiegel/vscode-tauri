@@ -47,6 +47,7 @@ export interface IMainThreadEditorLocator {
 	findTextEditorIdFor(editorControl: IEditorControl): string | undefined;
 	getIdOfCodeEditor(codeEditor: ICodeEditor): string | undefined;
 	ensureTextEditorForCodeEditor(codeEditor: ICodeEditor): string | undefined;
+	adoptTextEditorForCodeEditor(codeEditor: ICodeEditor): string | undefined;
 }
 
 export class MainThreadTextEditors implements MainThreadTextEditorsShape {

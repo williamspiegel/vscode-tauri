@@ -9,8 +9,10 @@ import { equals } from '../../../base/common/objects.js';
 import { isEqual } from '../../../base/common/resources.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
+import { ICommandService } from '../../../platform/commands/common/commands.js';
 import { EditorActivation } from '../../../platform/editor/common/editor.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
+import { getCodeEditor } from '../../../editor/browser/editorBrowser.js';
 import { getNotebookEditorFromEditorPane, INotebookEditor, INotebookEditorOptions } from '../../contrib/notebook/browser/notebookBrowser.js';
 import { INotebookEditorService } from '../../contrib/notebook/browser/services/notebookEditorService.js';
 import { NotebookEditorInput } from '../../contrib/notebook/common/notebookEditorInput.js';
@@ -21,6 +23,8 @@ import { GroupsOrder, IEditorGroup, IEditorGroupsService } from '../../services/
 import { IEditorService } from '../../services/editor/common/editorService.js';
 import { IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
 import { ExtHostContext, ExtHostNotebookEditorsShape, INotebookDocumentShowOptions, INotebookEditorViewColumnInfo, MainThreadNotebookEditorsShape, NotebookEditorRevealType } from '../common/extHost.protocol.js';
+import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
+import { getMainThreadEditorLocator } from './mainThreadDocumentsAndEditors.js';
 
 const isTauriIntegration = typeof process !== 'undefined' && process.env?.VSCODE_TAURI_INTEGRATION === '1';
 
@@ -53,7 +57,8 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		@INotebookEditorService private readonly _notebookEditorService: INotebookEditorService,
 		@IEditorGroupsService private readonly _editorGroupService: IEditorGroupsService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
-		@IInstantiationService private readonly _instantiationService: IInstantiationService
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@ICommandService private readonly _commandService: ICommandService
 	) {
 		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostNotebookEditors);
 
@@ -113,8 +118,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 
 	private _updateEditorViewColumns(): void {
 		const result: INotebookEditorViewColumnInfo = Object.create(null);
-		for (const editorPane of this._editorService.visibleEditorPanes) {
-			const candidate = getNotebookEditorFromEditorPane(editorPane);
+		for (const { editorPane, notebookEditor: candidate } of this._getVisibleNotebookEditorAssignments()) {
 			if (candidate && this._mainThreadEditors.has(candidate.getId())) {
 				result[candidate.getId()] = editorGroupToColumn(this._editorGroupService, editorPane.group);
 			}
@@ -149,20 +153,36 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			&& (targetGroup < 0 || !this._editorGroupService.getGroups(GroupsOrder.GRID_APPEARANCE)[targetGroup]);
 		const groupAdd = needsNewGroup ? this._waitForNextGroupAdd() : undefined;
 		const editorInput = NotebookEditorInput.getOrCreate(this._instantiationService, revivedResource, undefined, viewType, {});
-		await editorInput.resolve();
-		const editorPane = await this._editorService.openEditor(editorInput, editorOptions, targetGroup);
+		if (!isTauriIntegration) {
+			await editorInput.resolve();
+		} else {
+			void editorInput.resolve().catch(() => undefined);
+		}
+		const editorPane = await this._withTauriNotebookStageTimeout(
+			`openEditor(${revivedResource.toString()})`,
+			this._editorService.openEditor(editorInput, editorOptions, targetGroup),
+			() => this._describeNotebookOpenState(revivedResource, undefined, targetGroup)
+		);
 		if (groupAdd) {
 			await groupAdd;
 		}
-		const resolvedTargetGroup = typeof targetGroup === 'number' && targetGroup < 0
-			? targetGroup
-			: (editorPane as IEditorPane | undefined)?.group ?? targetGroup;
-		const notebookEditor = await this._waitForNotebookEditor(editorPane, revivedResource, resolvedTargetGroup, knownMatchingEditorIds);
+		const resolvedTargetGroup = (editorPane as IEditorPane | undefined)?.group ?? targetGroup;
+		const notebookEditor = await this._withTauriNotebookStageTimeout(
+			`waitForNotebookEditor(${revivedResource.toString()})`,
+			this._waitForNotebookEditor(editorPane, revivedResource, resolvedTargetGroup, knownMatchingEditorIds),
+			() => this._describeNotebookOpenState(revivedResource, editorPane, resolvedTargetGroup)
+		);
 
 		if (notebookEditor) {
 			if (!options.preserveFocus) {
 				const targetNotebookGroup = this._getVisibleNotebookEditorPane(notebookEditor)?.group ?? resolvedTargetGroup;
-				await this._waitForActiveNotebookEditor(notebookEditor.getId(), revivedResource, targetNotebookGroup);
+				await this._withTauriNotebookStageTimeout(
+					`waitForActiveNotebookEditor(${revivedResource.toString()})`,
+					this._waitForActiveNotebookEditor(notebookEditor.getId(), revivedResource, targetNotebookGroup),
+					() => this._describeNotebookOpenState(revivedResource, this._editorService.activeEditorPane, targetNotebookGroup)
+				);
+				await this._ensureNotebookCellEditorFocus(notebookEditor);
+				await this._ensureActiveTextEditorMirror(revivedResource, notebookEditor);
 			}
 			return notebookEditor.getId();
 		} else {
@@ -175,7 +195,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 
 	private _describeNotebookOpenState(resource: URI, editorPane: unknown, targetGroup: IEditorGroup | number): string {
 		const candidateEditorPane = editorPane as IEditorPane | undefined;
-		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		const directNotebookEditor = this._getNotebookEditorFromPaneOrResource(candidateEditorPane);
 		const directPaneResource = candidateEditorPane?.input
 			? EditorResourceAccessor.getCanonicalUri(candidateEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })?.toString()
 			: undefined;
@@ -185,7 +205,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			resource: editor.textModel?.uri.toString() ?? 'undefined'
 		}));
 		const visibleEditors = this._editorService.visibleEditorPanes.map(visibleEditorPane => {
-			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
+			const visibleNotebookEditor = this._getNotebookEditorFromPaneOrResource(visibleEditorPane);
 			return {
 				groupId: visibleEditorPane.group.id,
 				editorId: visibleNotebookEditor?.getId() ?? 'undefined',
@@ -223,7 +243,7 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 	private async _waitForActiveNotebookEditor(editorId: string, resource: URI, targetGroup: IEditorGroup | number): Promise<void> {
 		for (let attempt = 0; attempt < MainThreadNotebookEditors._editorSettleAttempts; attempt++) {
 			const activeEditorPane = this._editorService.activeEditorPane;
-			const activeNotebookEditor = getNotebookEditorFromEditorPane(activeEditorPane);
+			const activeNotebookEditor = this._getNotebookEditorFromPaneOrResource(activeEditorPane);
 			if (activeNotebookEditor?.getId() === editorId) {
 				return;
 			}
@@ -241,13 +261,30 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 				}
 			}
 
+			if (isTauriIntegration) {
+				const matchingNotebookEditors = this._notebookEditorService.listNotebookEditors().filter(notebookEditor =>
+					notebookEditor.textModel && isEqual(notebookEditor.textModel.uri, resource)
+				);
+				if (matchingNotebookEditors.length > 1) {
+					const visibleTargetPaneHasResource = this._editorService.visibleEditorPanes.some(visibleEditorPane =>
+						this._isInTargetGroup(visibleEditorPane, targetGroup)
+						&& !!visibleEditorPane.input
+						&& !!EditorResourceAccessor.getCanonicalUri(visibleEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })
+						&& isEqual(EditorResourceAccessor.getCanonicalUri(visibleEditorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })!, resource)
+					);
+					if (visibleTargetPaneHasResource) {
+						return;
+					}
+				}
+			}
+
 			await timeout(50);
 		}
 	}
 
 	private _resolveNotebookEditor(editorPane: unknown, resource: URI, targetGroup: IEditorGroup | number, knownMatchingEditorIds: ReadonlySet<string>): INotebookEditor | undefined {
 		const candidateEditorPane = editorPane as IEditorPane | undefined;
-		const directNotebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		const directNotebookEditor = this._getNotebookEditorFromPaneOrResource(candidateEditorPane);
 		const directNotebookResource = this._getNotebookResource(candidateEditorPane, directNotebookEditor);
 		if (directNotebookEditor
 			&& directNotebookResource
@@ -288,11 +325,11 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		}
 
 		if (typeof targetGroup === 'number' && targetGroup < 0 && candidateEditorPane?.group) {
-			const sideGroupNotebookEditors = this._editorService.visibleEditorPanes
-				.filter(visibleEditorPane => visibleEditorPane.group !== candidateEditorPane.group)
-				.map(visibleEditorPane => getNotebookEditorFromEditorPane(visibleEditorPane))
-				.filter((visibleNotebookEditor): visibleNotebookEditor is INotebookEditor =>
-					!!visibleNotebookEditor && visibleNotebookEditor.hasModel() && !!visibleNotebookEditor.textModel && isEqual(visibleNotebookEditor.textModel.uri, resource)
+			const sideGroupNotebookEditors = this._getVisibleNotebookEditorAssignments()
+				.filter(({ editorPane: visibleEditorPane }) => visibleEditorPane.group !== candidateEditorPane.group)
+				.map(({ notebookEditor }) => notebookEditor)
+				.filter(visibleNotebookEditor =>
+					visibleNotebookEditor.hasModel() && !!visibleNotebookEditor.textModel && isEqual(visibleNotebookEditor.textModel.uri, resource)
 				);
 
 			if (sideGroupNotebookEditors.length === 1) {
@@ -300,12 +337,11 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 			}
 		}
 
-		for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
+		for (const { editorPane: visibleEditorPane, notebookEditor: visibleNotebookEditor } of this._getVisibleNotebookEditorAssignments()) {
 			if (!this._isInTargetGroup(visibleEditorPane, targetGroup)) {
 				continue;
 			}
 
-			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
 			const visibleNotebookResource = this._getNotebookResource(visibleEditorPane, visibleNotebookEditor);
 			if (visibleNotebookEditor && visibleNotebookResource && isEqual(visibleNotebookResource, resource)) {
 				return visibleNotebookEditor;
@@ -328,15 +364,30 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 
 	private _getVisibleNotebookEditorsFor(resource: URI, targetGroup: IEditorGroup | number): INotebookEditor[] {
 		const result: INotebookEditor[] = [];
-		for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
+		const seenEditorIds = new Set<string>();
+		for (const { editorPane: visibleEditorPane, notebookEditor: visibleNotebookEditor } of this._getVisibleNotebookEditorAssignments()) {
 			if (!this._isInTargetGroup(visibleEditorPane, targetGroup)) {
 				continue;
 			}
 
-			const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
 			const visibleNotebookResource = this._getNotebookResource(visibleEditorPane, visibleNotebookEditor);
 			if (visibleNotebookEditor && (!visibleNotebookResource || isEqual(visibleNotebookResource, resource))) {
-				result.push(visibleNotebookEditor);
+				if (!seenEditorIds.has(visibleNotebookEditor.getId())) {
+					seenEditorIds.add(visibleNotebookEditor.getId());
+					result.push(visibleNotebookEditor);
+				}
+				continue;
+			}
+
+			if (visibleNotebookResource && isEqual(visibleNotebookResource, resource)) {
+				for (const candidate of this._notebookEditorService.listNotebookEditors()) {
+					if (!candidate.textModel || !isEqual(candidate.textModel.uri, resource) || seenEditorIds.has(candidate.getId())) {
+						continue;
+					}
+
+					seenEditorIds.add(candidate.getId());
+					result.push(candidate);
+				}
 			}
 		}
 
@@ -356,7 +407,69 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 	}
 
 	private _getVisibleNotebookEditorPane(notebookEditor: INotebookEditor): IEditorPane | undefined {
-		return this._editorService.visibleEditorPanes.find(visibleEditorPane => getNotebookEditorFromEditorPane(visibleEditorPane)?.getId() === notebookEditor.getId());
+		return this._getVisibleNotebookEditorAssignments().find(({ notebookEditor: visibleNotebookEditor }) =>
+			visibleNotebookEditor.getId() === notebookEditor.getId()
+		)?.editorPane;
+	}
+
+	private _getNotebookEditorFromPaneOrResource(editorPane: IEditorPane | undefined): INotebookEditor | undefined {
+		if (!editorPane) {
+			return undefined;
+		}
+
+		const visibleAssignment = this._getVisibleNotebookEditorAssignments().find(candidate => candidate.editorPane === editorPane);
+		if (visibleAssignment) {
+			return visibleAssignment.notebookEditor;
+		}
+
+		const notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+		if (notebookEditor?.hasModel()) {
+			return notebookEditor;
+		}
+
+		if (!editorPane.input) {
+			return undefined;
+		}
+
+		const resource = EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
+		if (!resource) {
+			return undefined;
+		}
+
+		return this._notebookEditorService.listNotebookEditors().find(candidate =>
+			candidate.textModel && isEqual(candidate.textModel.uri, resource)
+		);
+	}
+
+	private _getVisibleNotebookEditorAssignments(): Array<{ editorPane: IEditorPane; notebookEditor: INotebookEditor }> {
+		const result: Array<{ editorPane: IEditorPane; notebookEditor: INotebookEditor }> = [];
+		const usedEditorIds = new Set<string>();
+
+		for (const editorPane of this._editorService.visibleEditorPanes) {
+			let notebookEditor = getNotebookEditorFromEditorPane(editorPane);
+			if (!notebookEditor?.hasModel() || usedEditorIds.has(notebookEditor.getId())) {
+				const resource = editorPane.input
+					? EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })
+					: undefined;
+				if (resource) {
+					notebookEditor = this._notebookEditorService.listNotebookEditors().find(candidate =>
+						candidate.hasModel()
+						&& !!candidate.textModel
+						&& isEqual(candidate.textModel.uri, resource)
+						&& !usedEditorIds.has(candidate.getId())
+					);
+				}
+			}
+
+			if (!notebookEditor?.hasModel()) {
+				continue;
+			}
+
+			usedEditorIds.add(notebookEditor.getId());
+			result.push({ editorPane, notebookEditor });
+		}
+
+		return result;
 	}
 
 	private _isInTargetGroup(editorPane: IEditorPane, targetGroup: IEditorGroup | number): boolean {
@@ -386,6 +499,81 @@ export class MainThreadNotebookEditors implements MainThreadNotebookEditorsShape
 		if (!resolved) {
 			resolved = true;
 			listener.dispose();
+		}
+	}
+
+	private async _ensureActiveTextEditorMirror(resource: URI, notebookEditor: INotebookEditor): Promise<void> {
+		for (let attempt = 0; attempt < 40; attempt++) {
+			const activeCodeEditor = getCodeEditor(this._editorService.activeTextEditorControl)
+				?? notebookEditor.activeCodeEditor
+				?? notebookEditor.activeCellAndCodeEditor?.[1]
+				?? notebookEditor.codeEditors[0]?.[1];
+			const activeModel = activeCodeEditor?.getModel();
+			if (activeCodeEditor && activeModel) {
+				const activeNotebook = parseNotebookCellUri(activeModel.uri)?.notebook;
+				if (isEqual(activeModel.uri, resource) || (activeNotebook && isEqual(activeNotebook, resource))) {
+					activeCodeEditor.focus();
+					getMainThreadEditorLocator()?.ensureTextEditorForCodeEditor(activeCodeEditor);
+					await this._commandService.executeCommand('_workbench.ensureActiveTextEditorMirror');
+
+					const mirroredCodeEditor = getCodeEditor(this._editorService.activeTextEditorControl);
+					const mirroredModel = mirroredCodeEditor?.getModel();
+					const mirroredNotebook = mirroredModel ? parseNotebookCellUri(mirroredModel.uri)?.notebook : undefined;
+					if (mirroredModel && (isEqual(mirroredModel.uri, resource) || (mirroredNotebook && isEqual(mirroredNotebook, resource)))) {
+						return;
+					}
+				}
+			}
+
+			await timeout(50);
+		}
+	}
+
+	private async _ensureNotebookCellEditorFocus(notebookEditor: INotebookEditor): Promise<void> {
+		const focusRange = notebookEditor.getSelections()[0] ?? notebookEditor.getFocus();
+		const cell = notebookEditor.getActiveCell() ?? notebookEditor.cellAt(focusRange.start);
+		if (!cell) {
+			return;
+		}
+
+		for (let attempt = 0; attempt < 40; attempt++) {
+			const activeCodeEditor = notebookEditor.activeCodeEditor
+				?? notebookEditor.activeCellAndCodeEditor?.[1]
+				?? notebookEditor.codeEditors.find(([candidate]) => candidate === cell)?.[1]
+				?? notebookEditor.codeEditors[0]?.[1];
+			const activeModel = activeCodeEditor?.getModel();
+			const activeNotebook = activeModel ? parseNotebookCellUri(activeModel.uri)?.notebook : undefined;
+			if (activeCodeEditor && activeModel && (isEqual(activeModel.uri, cell.uri) || (activeNotebook && notebookEditor.textModel && isEqual(activeNotebook, notebookEditor.textModel.uri)))) {
+				activeCodeEditor.focus();
+				return;
+			}
+
+			notebookEditor.focus();
+			await notebookEditor.focusNotebookCell(cell, 'editor', { skipReveal: attempt > 0 });
+			await timeout(50);
+		}
+	}
+
+	private async _withTauriNotebookStageTimeout<T>(label: string, promise: Promise<T>, getState: () => string, timeoutMs = 15000): Promise<T> {
+		if (!isTauriIntegration) {
+			return promise;
+		}
+
+		let handle: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				promise,
+				new Promise<T>((_, reject) => {
+					handle = setTimeout(() => reject(new Error([
+						`Tauri notebook stage timed out: ${label}`,
+						getState()
+					].join('\n'))), timeoutMs);
+				})
+			]);
+		} finally {
+			if (handle) {
+				clearTimeout(handle);
+			}
 		}
 	}
 

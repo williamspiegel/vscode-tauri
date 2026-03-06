@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { timeout } from '../../../../../base/common/async.js';
+import { Event } from '../../../../../base/common/event.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { Mimes } from '../../../../../base/common/mime.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -19,6 +21,7 @@ import { LineCommentCommand, Type } from '../../../../../editor/contrib/comment/
 import { localize, localize2 } from '../../../../../nls.js';
 import { MenuId, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
 import { InputFocusedContext, InputFocusedContextKey } from '../../../../../platform/contextkey/common/contextkeys.js';
 import { IConfirmationResult, IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
@@ -49,6 +52,35 @@ const QUIT_EDIT_ALL_CELLS_COMMAND_ID = 'notebook.quitEditAllCells';
 export const CLEAR_CELL_OUTPUTS_COMMAND_ID = 'notebook.cell.clearOutputs';
 export const SELECT_NOTEBOOK_INDENTATION_ID = 'notebook.selectIndentation';
 export const COMMENT_SELECTED_CELLS_ID = 'notebook.commentSelectedCells';
+
+async function waitForCellEditorToAttach(context: INotebookCellActionContext, targetCell: ICellViewModel, maxAttempts = 20): Promise<ICodeEditor | undefined> {
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		const editor = findTargetCellEditor(context, targetCell)
+			?? context.notebookEditor.activeCodeEditor
+			?? context.notebookEditor.activeCellAndCodeEditor?.[1]
+			?? context.notebookEditor.codeEditors.find(([candidate]) => candidate === targetCell)?.[1]
+			?? context.notebookEditor.codeEditors[0]?.[1];
+		if (editor?.hasModel()) {
+			return editor;
+		}
+
+		if (!targetCell.editorAttached) {
+			await Promise.race([
+				Event.toPromise(targetCell.onDidChangeEditorAttachState),
+				timeout(50)
+			]);
+			continue;
+		}
+
+		await timeout(50);
+	}
+
+	return findTargetCellEditor(context, targetCell)
+		?? context.notebookEditor.activeCodeEditor
+		?? context.notebookEditor.activeCellAndCodeEditor?.[1]
+		?? context.notebookEditor.codeEditors.find(([candidate]) => candidate === targetCell)?.[1]
+		?? context.notebookEditor.codeEditors[0]?.[1];
+}
 
 registerAction2(class EditCellAction extends NotebookCellAction {
 	constructor() {
@@ -86,7 +118,11 @@ registerAction2(class EditCellAction extends NotebookCellAction {
 		}
 
 		await context.notebookEditor.focusNotebookCell(context.cell, 'editor');
-		const foundEditor: ICodeEditor | undefined = context.cell ? findTargetCellEditor(context, context.cell) : undefined;
+		const foundEditor = await waitForCellEditorToAttach(context, context.cell);
+		if (foundEditor) {
+			foundEditor.focus();
+			await accessor.get(ICommandService).executeCommand('_workbench.ensureActiveTextEditorMirror');
+		}
 		if (foundEditor && foundEditor.hasTextFocus() && InlineChatController.get(foundEditor)?.getWidgetPosition()?.lineNumber === foundEditor.getPosition()?.lineNumber) {
 			InlineChatController.get(foundEditor)?.focus();
 		}

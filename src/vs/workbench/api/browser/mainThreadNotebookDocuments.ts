@@ -17,6 +17,8 @@ import { NotebookDto } from './mainThreadNotebookDto.js';
 import { SerializableObjectWithBuffers } from '../../services/extensions/common/proxyIdentifier.js';
 import { IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
 
+const isTauriIntegration = typeof process !== 'undefined' && process.env?.VSCODE_TAURI_INTEGRATION === '1';
+
 export class MainThreadNotebookDocuments implements MainThreadNotebookDocumentsShape {
 
 	private readonly _disposables = new DisposableStore();
@@ -148,6 +150,17 @@ export class MainThreadNotebookDocuments implements MainThreadNotebookDocumentsS
 		} else {
 			// If we aren't adding content, we don't need to resolve the full editor model yet.
 			// This will allow us to adjust settings when the editor is opened, e.g. scratchpad
+			if (isTauriIntegration) {
+				const ref = await this._notebookEditorModelResolverService.resolve({ untitledResource: undefined }, options.viewType);
+
+				Event.once(ref.object.notebook.onWillDispose)(() => {
+					this._modelReferenceCollection.remove(ref.object.resource);
+				});
+
+				this._modelReferenceCollection.add(ref.object.resource, ref);
+				return ref.object.notebook.uri;
+			}
+
 			const notebook = await this._notebookEditorModelResolverService.createUntitledNotebookTextModel(options.viewType);
 			return notebook.uri;
 		}

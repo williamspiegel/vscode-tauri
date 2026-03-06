@@ -43,6 +43,8 @@ import { ITextEditorDiffInformation } from '../../../../platform/editor/common/e
 import { ITreeSitterLibraryService } from '../../../../editor/common/services/treeSitter/treeSitterLibraryService.js';
 import { TestTreeSitterLibraryService } from '../../../../editor/test/common/services/testTreeSitterLibraryService.js';
 import { createTextModel } from '../../../../editor/test/common/testTextModel.js';
+import { URI } from '../../../../base/common/uri.js';
+import { CellUri } from '../../../contrib/notebook/common/notebookCommon.js';
 
 suite('MainThreadDocumentsAndEditors', () => {
 
@@ -395,6 +397,35 @@ suite('MainThreadDocumentsAndEditors', () => {
 
 		editor.dispose();
 		model.dispose();
+	});
+
+	test('tracks notebook cell editors from the active notebook pane resource', () => {
+		const notebookUri = URI.parse('file:///test/notebook.vsctestnb');
+		const cellModel = modelService.createModel('test', null, CellUri.generate(notebookUri, 0));
+		const editor = myCreateTestCodeEditor(cellModel);
+		const notebookInput = { resource: notebookUri };
+		const notebookPane = {
+			input: notebookInput,
+			group: { count: 1, contains: (candidate: unknown) => candidate === notebookInput },
+			getControl: () => undefined
+		} as unknown as IEditorPane;
+
+		workbenchEditorService.activeEditor = notebookInput as never;
+		workbenchEditorService.activeEditorPane = notebookPane;
+		workbenchEditorService.activeTextEditorControl = undefined;
+		workbenchEditorService.visibleEditorPanes = [notebookPane];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 1);
+		const [delta] = deltas;
+		assert.strictEqual(delta.addedDocuments?.length, 1);
+		assert.strictEqual(delta.addedEditors?.length, 1);
+		assert.ok(typeof delta.newActiveEditor === 'string');
+
+		editor.dispose();
+		cellModel.dispose();
 	});
 
 	test('ignore simple widget model', function () {

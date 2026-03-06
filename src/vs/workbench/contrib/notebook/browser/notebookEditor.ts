@@ -177,6 +177,11 @@ export class NotebookEditor extends EditorPane implements INotebookEditorPane, I
 				// the widget is not transfered to other editor inputs
 				this._widget.value.onWillHide();
 			}
+		} else if (this._widget.value) {
+			this._widget.value.onShow();
+			if (this._pagePosition && this.input instanceof NotebookEditorInput) {
+				this._widget.value.layout(this._pagePosition.dimension, this._rootElement, this._pagePosition.position);
+			}
 		}
 	}
 

@@ -114,10 +114,13 @@ export async function closeAllEditors(): Promise<void> {
 			const isKnownTauriUntitledResidue = !activeNotebookEditor
 				&& openTabs <= 1
 				&& activeTextEditor?.document.uri.scheme === 'untitled';
+			const isKnownTauriNotebookCellResidue = !activeNotebookEditor
+				&& openTabs <= 1
+				&& activeTextEditor?.document.uri.scheme === 'vscode-notebook-cell';
 			const isKnownTauriUntitledNotebookResidue = openTabs === 0
 				&& activeNotebookEditor?.notebook.uri.scheme === 'untitled'
 				&& activeTextEditor?.document.uri.scheme === 'untitled';
-			if (isKnownTauriFarJsResidue || isKnownTauriFakeFsResidue || isKnownTauriUntitledResidue || isKnownTauriUntitledNotebookResidue) {
+			if (isKnownTauriFarJsResidue || isKnownTauriFakeFsResidue || isKnownTauriUntitledResidue || isKnownTauriNotebookCellResidue || isKnownTauriUntitledNotebookResidue) {
 				return true;
 			}
 

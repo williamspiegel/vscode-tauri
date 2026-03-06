@@ -62,15 +62,11 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
   const workspaceProvider = createWorkspaceProvider(windowConfig);
   const developmentOptions = createDevelopmentOptions(windowConfig);
   if (Array.isArray(windowConfig.extensionDevelopmentPath) || typeof windowConfig.extensionTestsPath === 'string') {
-    void host.invokeMethod('host.log', {
-      level: 'info',
-      source: 'ui.startup',
-      message: [
-        `workbenchBoot extensionDevelopmentPathCount=${Array.isArray(windowConfig.extensionDevelopmentPath) ? windowConfig.extensionDevelopmentPath.length : 0}`,
-        `extensionTestsPathPresent=${typeof windowConfig.extensionTestsPath === 'string'}`,
-        `developmentOptionsPresent=${developmentOptions ? 'true' : 'false'}`
-      ].join(' ')
-    }).catch(() => undefined);
+    logWorkbenchBootStartup(host, [
+      `workbenchBoot extensionDevelopmentPathCount=${Array.isArray(windowConfig.extensionDevelopmentPath) ? windowConfig.extensionDevelopmentPath.length : 0}`,
+      `extensionTestsPathPresent=${typeof windowConfig.extensionTestsPath === 'string'}`,
+      `developmentOptionsPresent=${developmentOptions ? 'true' : 'false'}`
+    ].join(' '));
   }
   const enableWorkspaceTrust = windowConfig['disable-workspace-trust'] !== true;
   workbenchWindow._VSCODE_FILE_ROOT = fileRoot;
@@ -143,6 +139,19 @@ export async function bootWorkbench(container: HTMLElement, host: HostClient): P
       }
     ]
   });
+}
+
+function logWorkbenchBootStartup(host: HostClient, message: string): void {
+  const invokeMethod = (host as Partial<HostClient>).invokeMethod;
+  if (typeof invokeMethod !== 'function') {
+    return;
+  }
+
+  void invokeMethod.call(host, 'host.log', {
+    level: 'info',
+    source: 'ui.startup',
+    message
+  }).catch(() => undefined);
 }
 
 async function openFolderViaWorkbenchPicker(

@@ -13,7 +13,7 @@ import { getNotebookEditorFromEditorPane, IActiveNotebookEditor, ICellViewModel,
 import { INTERACTIVE_WINDOW_IS_ACTIVE_EDITOR, NOTEBOOK_EDITOR_EDITABLE, NOTEBOOK_EDITOR_FOCUSED, NOTEBOOK_IS_ACTIVE_EDITOR, NOTEBOOK_KERNEL_COUNT, NOTEBOOK_KERNEL_SOURCE_COUNT, REPL_NOTEBOOK_IS_ACTIVE_EDITOR } from '../../common/notebookContextKeys.js';
 import { ICellRange, isICellRange } from '../../common/notebookRange.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
-import { isEditorCommandsContext } from '../../../../common/editor.js';
+import { EditorResourceAccessor, isEditorCommandsContext, SideBySideEditor } from '../../../../common/editor.js';
 import { INotebookEditorService } from '../services/notebookEditorService.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { WorkbenchActionExecutedClassification, WorkbenchActionExecutedEvent } from '../../../../../base/common/actions.js';
@@ -76,11 +76,11 @@ export interface INotebookOutputActionContext extends INotebookCellActionContext
 	outputViewModel: ICellOutputViewModel;
 }
 
-export function getContextFromActiveEditor(editorService: IEditorService): INotebookActionContext | undefined {
-	let editor = getNotebookEditorFromEditorPane(editorService.activeEditorPane);
+export function getContextFromActiveEditor(editorService: IEditorService, notebookEditorService?: INotebookEditorService): INotebookActionContext | undefined {
+	let editor = getNotebookEditorFromPaneOrResource(editorService.activeEditorPane, notebookEditorService);
 	if (!editor || !editor.hasModel()) {
 		const visibleNotebookEditors = editorService.visibleEditorPanes
-			.map(editorPane => getNotebookEditorFromEditorPane(editorPane))
+			.map(editorPane => getNotebookEditorFromPaneOrResource(editorPane, notebookEditorService))
 			.filter((candidate): candidate is IActiveNotebookEditor => !!candidate && candidate.hasModel());
 		editor = visibleNotebookEditors[0];
 	}
@@ -88,8 +88,11 @@ export function getContextFromActiveEditor(editorService: IEditorService): INote
 		return;
 	}
 
-	const activeCell = editor.getActiveCell();
 	const selectedCells = editor.getSelectionViewModels();
+	const focus = editor.getFocus();
+	const activeCell = editor.getActiveCell()
+		?? (focus.start < editor.getLength() ? editor.cellAt(focus.start) : undefined)
+		?? selectedCells[0];
 	return {
 		cell: activeCell,
 		selectedCells,
@@ -182,7 +185,7 @@ export abstract class NotebookAction extends Action2 {
 	}
 
 	getEditorContextFromArgsOrActive(accessor: ServicesAccessor, context?: any, ...additionalArgs: any[]): INotebookActionContext | undefined {
-		return getContextFromActiveEditor(accessor.get(IEditorService));
+		return getContextFromActiveEditor(accessor.get(IEditorService), accessor.get(INotebookEditorService));
 	}
 }
 
@@ -346,12 +349,36 @@ export function getEditorFromArgsOrActivePane(accessor: ServicesAccessor, contex
 		return editorFromUri;
 	}
 
-	const editor = getNotebookEditorFromEditorPane(accessor.get(IEditorService).activeEditorPane);
+	const editor = getNotebookEditorFromPaneOrResource(accessor.get(IEditorService).activeEditorPane, accessor.get(INotebookEditorService));
 	if (!editor || !editor.hasModel()) {
 		return;
 	}
 
 	return editor;
+}
+
+function getNotebookEditorFromPaneOrResource(editorPane: IEditorService['activeEditorPane'], notebookEditorService?: INotebookEditorService): IActiveNotebookEditor | undefined {
+	const editor = getNotebookEditorFromEditorPane(editorPane);
+	if (editor?.hasModel()) {
+		return editor;
+	}
+
+	if (!notebookEditorService) {
+		return undefined;
+	}
+
+	const resource = editorPane?.input
+		? EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY })
+		: undefined;
+	if (!resource) {
+		return undefined;
+	}
+
+	const matchingEditor = notebookEditorService.listNotebookEditors().find(candidate =>
+		candidate.hasModel() && candidate.textModel.uri.toString() === resource.toString()
+	);
+
+	return matchingEditor?.hasModel() ? matchingEditor : undefined;
 }
 
 export function parseMultiCellExecutionArgs(accessor: ServicesAccessor, ...args: any[]): INotebookCommandContext | undefined {
@@ -404,7 +431,7 @@ export function parseMultiCellExecutionArgs(accessor: ServicesAccessor, ...args:
 	}
 
 	// let's just execute the active cell
-	const context = getContextFromActiveEditor(accessor.get(IEditorService));
+	const context = getContextFromActiveEditor(accessor.get(IEditorService), accessor.get(INotebookEditorService));
 	return context ? {
 		ui: false,
 		notebookEditor: context.notebookEditor,

@@ -22,6 +22,7 @@ export class NotebookCellEditorPool extends Disposable {
 	private _editorContextKeyService!: IScopedContextKeyService;
 	private _editor!: CodeEditorWidget;
 	private _focusEditorCancellablePromise: CancelablePromise<void> | undefined;
+	private _focusedCell: ICellViewModel | undefined;
 	private _isInitialized = false;
 	private _isDisposed = false;
 
@@ -69,18 +70,37 @@ export class NotebookCellEditorPool extends Disposable {
 		this._isInitialized = true;
 	}
 
+	get activeEditor(): CodeEditorWidget | undefined {
+		return this._isInitialized && this._editor.hasModel() ? this._editor : undefined;
+	}
+
+	get activeCell(): ICellViewModel | undefined {
+		return this._focusedCell;
+	}
+
+	clearPreservedEditor(): void {
+		this._focusEditorCancellablePromise?.cancel();
+		this._focusEditorCancellablePromise = undefined;
+		this._editorDisposable.clear();
+		this._focusedCell = undefined;
+		if (this._isInitialized) {
+			this._editor.setModel(null);
+		}
+	}
+
 	preserveFocusedEditor(cell: ICellViewModel): void {
 		if (!this._isInitialized) {
 			this._initializeEditor(cell);
 		}
 
-		this._editorDisposable.clear();
-		this._focusEditorCancellablePromise?.cancel();
+		this.clearPreservedEditor();
+		this._focusedCell = cell;
 
 		this._focusEditorCancellablePromise = createCancelablePromise(async token => {
 			const ref = await this.textModelService.createModelReference(cell.uri);
 
 			if (this._isDisposed || token.isCancellationRequested) {
+				this._focusedCell = undefined;
 				ref.dispose();
 				return;
 			}
@@ -99,6 +119,7 @@ export class NotebookCellEditorPool extends Disposable {
 
 				this.notebookEditor.revealInView(cell);
 				this._editor.setModel(null);
+				this._focusedCell = undefined;
 				ref.dispose();
 			};
 
@@ -120,6 +141,7 @@ export class NotebookCellEditorPool extends Disposable {
 					// we should stop preserving the editor
 					this._editorDisposable.clear();
 					this._editor.setModel(null);
+					this._focusedCell = undefined;
 					ref.dispose();
 				}
 			}));
@@ -130,7 +152,7 @@ export class NotebookCellEditorPool extends Disposable {
 
 	override dispose() {
 		this._isDisposed = true;
-		this._focusEditorCancellablePromise?.cancel();
+		this.clearPreservedEditor();
 
 		super.dispose();
 	}
