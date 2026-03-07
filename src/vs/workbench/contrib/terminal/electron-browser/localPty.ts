@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ITerminalLaunchResult, IProcessPropertyMap, IPtyService, ITerminalChildProcess, ITerminalLaunchError, ProcessPropertyType } from '../../../../platform/terminal/common/terminal.js';
+import { ITerminalLaunchResult, IProcessPropertyMap, IPtyService, ITerminalChildProcess, ITerminalLaunchError, ProcessPropertyType, type IProcessReadyEvent } from '../../../../platform/terminal/common/terminal.js';
 import { BasePty } from '../common/basePty.js';
 
 /**
@@ -11,6 +11,8 @@ import { BasePty } from '../common/basePty.js';
  * created on the local pty host.
  */
 export class LocalPty extends BasePty implements ITerminalChildProcess {
+	private _didHandleReady = false;
+
 	constructor(
 		id: number,
 		shouldPersist: boolean,
@@ -19,8 +21,21 @@ export class LocalPty extends BasePty implements ITerminalChildProcess {
 		super(id, shouldPersist);
 	}
 
-	start(): Promise<ITerminalLaunchError | ITerminalLaunchResult | undefined> {
-		return this._proxy.start(this.id);
+	async start(): Promise<ITerminalLaunchError | ITerminalLaunchResult | undefined> {
+		const result = await this._proxy.start(this.id);
+		if (isProcessReadyEvent(result)) {
+			this.handleReady(result);
+			return undefined;
+		}
+		return result;
+	}
+
+	override handleReady(e: IProcessReadyEvent) {
+		if (this._didHandleReady) {
+			return;
+		}
+		this._didHandleReady = true;
+		super.handleReady(e);
 	}
 
 	detach(forcePersist?: boolean): Promise<void> {
@@ -94,4 +109,11 @@ export class LocalPty extends BasePty implements ITerminalChildProcess {
 	handleOrphanQuestion() {
 		this._proxy.orphanQuestionReply(this.id);
 	}
+}
+
+function isProcessReadyEvent(value: unknown): value is IProcessReadyEvent {
+	return !!value
+		&& typeof value === 'object'
+		&& typeof (value as IProcessReadyEvent).pid === 'number'
+		&& typeof (value as IProcessReadyEvent).cwd === 'string';
 }

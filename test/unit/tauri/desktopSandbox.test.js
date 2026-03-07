@@ -743,6 +743,65 @@ suite('Tauri Desktop Sandbox', () => {
 		messageEvent.ports[0].close();
 	});
 
+	test('local pty host preserves string shell args and executable env overrides', async () => {
+		createWindow('', {
+			moduleOverrides: createRendererIpcModuleOverrides()
+		});
+		const mock = createHost();
+		mock.host.invokeMethod = async (method, params) => {
+			mock.methodCalls.push({ method, params });
+			if (method === 'terminal.create') {
+				return { id: 17, pid: 1701 };
+			}
+			if (method === 'process.env') {
+				return { env: { PATH: '/usr/bin', SHELL: '/bin/zsh', FALLBACK: '1' } };
+			}
+			return {};
+		};
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		const messageEventPromise = waitForMessageEvent('nonce-pty-env');
+		vscode.ipcMessagePort.acquire('vscode:createPtyHostMessageChannelResult', 'nonce-pty-env');
+		const messageEvent = await messageEventPromise;
+		const registration = global.__tauriChannelServerState.registered.find(entry => entry.name === 'ptyHostWindow');
+		assert.ok(registration, 'ptyHostWindow channel should be registered');
+
+		const processId = await registration.channel.createProcess(
+			{ executable: '/bin/zsh', args: '-l' },
+			'/workspace',
+			80,
+			24,
+			'11',
+			{ A: 'a1', B: 'b1', C: 'c1', REMOVE: null },
+			{ PATH: '/exec/path', SHELL: '/bin/zsh', BASE: 'base' },
+			{
+				environmentVariableCollections: [[
+					'test.extension',
+					[
+						['A', { variable: 'A', value: '~a2~', type: 1 }],
+						['B', { variable: 'B', value: '~b2~', type: 2 }],
+						['C', { variable: 'C', value: '~c2~', type: 3 }]
+					]
+				]]
+			}
+		);
+
+		assert.strictEqual(processId, 17);
+		const terminalCreate = mock.methodCalls.find(call => call.method === 'terminal.create');
+		assert.ok(terminalCreate, 'terminal.create should be invoked');
+		assert.deepStrictEqual(terminalCreate.params.args, ['-l']);
+		assert.strictEqual(terminalCreate.params.cwd, '/workspace');
+		assert.strictEqual(terminalCreate.params.env.PATH, '/exec/path');
+		assert.strictEqual(terminalCreate.params.env.BASE, 'base');
+		assert.strictEqual(terminalCreate.params.env.A, '~a2~');
+		assert.strictEqual(terminalCreate.params.env.B, 'b1~b2~');
+		assert.strictEqual(terminalCreate.params.env.C, '~c2~c1');
+		assert.strictEqual('REMOVE' in terminalCreate.params.env, false);
+
+		messageEvent.ports[0].close();
+	});
+
 	test('ipcMessagePort emits a close event when the extension host bridge fails', async () => {
 		createWindow('');
 		/** @type {(error: Error) => void} */

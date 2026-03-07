@@ -784,14 +784,9 @@ function suiteRequiresNativeTerminalParity(title: string, fn: (this: Mocha.Suite
 				terminal.sendText('echo "$A $B $C"');
 
 				// Poll for the echo results to show up
-				try {
-					await poll<void>(() => Promise.resolve(), () => data.includes('~a2~'), '~a2~ should be printed');
-					await poll<void>(() => Promise.resolve(), () => data.includes('b1~b2~'), 'b1~b2~ should be printed');
-					await poll<void>(() => Promise.resolve(), () => data.includes('~c2~c1'), '~c2~c1 should be printed');
-				} catch (err) {
-					console.error('DATA UP UNTIL NOW:', data);
-					throw err;
-				}
+				await poll<void>(() => Promise.resolve(), () => data.includes('~a2~'), '~a2~ should be printed');
+				await poll<void>(() => Promise.resolve(), () => data.includes('b1~b2~'), 'b1~b2~ should be printed');
+				await poll<void>(() => Promise.resolve(), () => data.includes('~c2~c1'), '~c2~c1 should be printed');
 
 				// Wait for terminal to be disposed
 				await new Promise<void>(r => {

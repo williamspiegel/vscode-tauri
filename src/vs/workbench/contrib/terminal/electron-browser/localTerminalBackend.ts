@@ -118,8 +118,7 @@ class LocalTerminalBackend extends BaseTerminalBackend implements ITerminalBacke
 		this._logService.debug('Starting pty host');
 		const directProxyClientEventually = new DeferredPromise<MessagePortClient>();
 		this._directProxyClientEventually = directProxyClientEventually;
-		const directProxy = ProxyChannel.toService<IPtyService>(getDelayedChannel(this._directProxyClientEventually.p.then(client => client.getChannel(TerminalIpcChannels.PtyHostWindow))));
-		this._directProxy = directProxy;
+		this._directProxy = undefined;
 		this._directProxyDisposables.clear();
 
 		// The pty host should not get launched until at least the window restored phase
@@ -130,40 +129,43 @@ class LocalTerminalBackend extends BaseTerminalBackend implements ITerminalBacke
 
 		mark('code/terminal/willConnectPtyHost');
 		this._logService.trace('Renderer->PtyHost#connect: before acquirePort');
-		acquirePort('vscode:createPtyHostMessageChannel', 'vscode:createPtyHostMessageChannelResult').then(port => {
-			mark('code/terminal/didConnectPtyHost');
-			this._logService.trace('Renderer->PtyHost#connect: connection established');
+		const port = await acquirePort('vscode:createPtyHostMessageChannel', 'vscode:createPtyHostMessageChannelResult');
+		mark('code/terminal/didConnectPtyHost');
+		this._logService.trace('Renderer->PtyHost#connect: connection established');
 
-			const store = new DisposableStore();
-			this._directProxyDisposables.value = store;
+		const store = new DisposableStore();
+		this._directProxyDisposables.value = store;
 
-			// There are two connections to the pty host; one to the regular shared process
-			// _localPtyService, and one directly via message port _ptyHostDirectProxy. The former is
-			// used for pty host management messages, it would make sense in the future to use a
-			// separate interface/service for this one.
-			const client = store.add(new MessagePortClient(port, `window:${this._nativeHostService.windowId}`));
-			directProxyClientEventually.complete(client);
-			this._onPtyHostConnected.fire();
+		// There are two connections to the pty host; one to the regular shared process
+		// _localPtyService, and one directly via message port _ptyHostDirectProxy. The former is
+		// used for pty host management messages, it would make sense in the future to use a
+		// separate interface/service for this one.
+		const client = store.add(new MessagePortClient(port, `window:${this._nativeHostService.windowId}`));
+		const directProxy = ProxyChannel.toService<IPtyService>(client.getChannel(TerminalIpcChannels.PtyHostWindow));
 
-			// Attach process listeners
-			store.add(directProxy.onProcessData(e => this._ptys.get(e.id)?.handleData(e.event)));
-			store.add(directProxy.onDidChangeProperty(e => this._ptys.get(e.id)?.handleDidChangeProperty(e.property)));
-			store.add(directProxy.onProcessExit(e => {
-				const pty = this._ptys.get(e.id);
-				if (pty) {
-					pty.handleExit(e.event);
-					pty.dispose();
-					this._ptys.delete(e.id);
-				}
-			}));
-			store.add(directProxy.onProcessReady(e => this._ptys.get(e.id)?.handleReady(e.event)));
-			store.add(directProxy.onProcessReplay(e => this._ptys.get(e.id)?.handleReplay(e.event)));
-			store.add(directProxy.onProcessOrphanQuestion(e => this._ptys.get(e.id)?.handleOrphanQuestion()));
-			store.add(directProxy.onDidRequestDetach(e => this._onDidRequestDetach.fire(e)));
+		// Attach process listeners before exposing the proxy to callers so launch/start events
+		// emitted during the first RPC roundtrip are not lost.
+		store.add(directProxy.onProcessData(e => this._ptys.get(e.id)?.handleData(e.event)));
+		store.add(directProxy.onDidChangeProperty(e => this._ptys.get(e.id)?.handleDidChangeProperty(e.property)));
+		store.add(directProxy.onProcessExit(e => {
+			const pty = this._ptys.get(e.id);
+			if (pty) {
+				pty.handleExit(e.event);
+				pty.dispose();
+				this._ptys.delete(e.id);
+			}
+		}));
+		store.add(directProxy.onProcessReady(e => this._ptys.get(e.id)?.handleReady(e.event)));
+		store.add(directProxy.onProcessReplay(e => this._ptys.get(e.id)?.handleReplay(e.event)));
+		store.add(directProxy.onProcessOrphanQuestion(e => this._ptys.get(e.id)?.handleOrphanQuestion()));
+		store.add(directProxy.onDidRequestDetach(e => this._onDidRequestDetach.fire(e)));
 
-			// Eagerly fetch the backend's environment for memoization
-			this.getEnvironment();
-		});
+		this._directProxy = directProxy;
+		directProxyClientEventually.complete(client);
+		this._onPtyHostConnected.fire();
+
+		// Eagerly fetch the backend's environment for memoization
+		this.getEnvironment();
 	}
 
 	async requestDetachInstance(workspaceId: string, instanceId: number): Promise<IProcessDetails | undefined> {

@@ -88,6 +88,8 @@ import { TerminalResizeDebouncer } from './terminalResizeDebouncer.js';
 import { openContextMenu } from './terminalContextMenu.js';
 import type { IMenu } from '../../../../platform/actions/common/actions.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
+
+const isTauriDesktopRuntime = typeof process !== 'undefined' && process.env?.VSCODE_DESKTOP_RUNTIME === 'electrobun';
 import { TerminalContribCommandId } from '../terminalContribExports.js';
 import type { IProgressState } from '@xterm/addon-progress';
 import { generateUuid } from '../../../../base/common/uuid.js';
@@ -525,11 +527,11 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this.statusList = this._register(this._scopedInstantiationService.createInstance(TerminalStatusList));
 		this._initDimensions();
 		this._processManager = this._createProcessManager();
+		this._register(this._processManager.onProcessData(e => this._onProcessData(e)));
 
 		this._containerReadyBarrier = new AutoOpenBarrier(Constants.WaitForContainerThreshold);
 		this._attachBarrier = new AutoOpenBarrier(1000);
-		this._xtermReadyPromise = this._createXterm();
-		this._xtermReadyPromise.then(async () => {
+		const startProcess = async () => {
 			// Wait for a period to allow a container to be ready
 			await this._containerReadyBarrier.wait();
 
@@ -561,6 +563,15 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 				this._cwd = this.shellLaunchConfig.attachPersistentProcess.cwd;
 				this._setTitle(this.shellLaunchConfig.attachPersistentProcess.title, this.shellLaunchConfig.attachPersistentProcess.titleSource);
 				this.setShellType(this.shellType);
+			}
+		};
+		this._xtermReadyPromise = this._createXterm();
+		const tauriProcessStartup = isTauriDesktopRuntime ? startProcess() : undefined;
+		this._xtermReadyPromise.then(async () => {
+			if (tauriProcessStartup) {
+				await tauriProcessStartup;
+			} else {
+				await startProcess();
 			}
 
 			if (this._fixedCols) {
@@ -853,7 +864,6 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this._register(xterm.raw.onSelectionChange(() => this._onDidChangeSelection.fire(this)));
 		this._register(xterm.raw.buffer.onBufferChange(() => this._refreshAltBufferContextKey()));
 
-		this._register(this._processManager.onProcessData(e => this._onProcessData(e)));
 		this._register(xterm.raw.onData(async data => {
 			await this._handleOnData(data);
 		}));
@@ -1643,7 +1653,20 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	private _writeProcessData(data: string, cb?: () => void) {
 		this._onWillData.fire(data);
 		const messageId = ++this._latestXtermWriteData;
-		this.xterm?.raw.write(data, () => {
+		const xterm = this.xterm;
+		// Hidden terminals still need to surface data events to extensions even before the xterm
+		// renderer is attached to the DOM. Waiting for the write callback in that state can stall
+		// indefinitely because there is no live renderer to flush against yet.
+		if (!xterm?.raw.element) {
+			xterm?.raw.write(data);
+			this._latestXtermParseData = messageId;
+			this._processManager.acknowledgeDataEvent(data.length);
+			cb?.();
+			this._onData.fire(data);
+			return;
+		}
+
+		xterm.raw.write(data, () => {
 			this._latestXtermParseData = messageId;
 			this._processManager.acknowledgeDataEvent(data.length);
 			cb?.();

@@ -747,6 +747,9 @@ async function createLocalPtyHostLoopbackPort(
   };
 
   const parseShellLaunchArgs = (value: unknown): string[] => {
+    if (typeof value === 'string') {
+      return value.length > 0 ? [value] : [];
+    }
     if (!Array.isArray(value)) {
       return [];
     }
@@ -886,9 +889,15 @@ async function createLocalPtyHostLoopbackPort(
       _executableEnv?: Record<string, string | null> | undefined,
       options?: { environmentVariableCollections?: unknown }
     ): Promise<number> {
-      const mergedEnv = {
-        ...(await shellEnv())
-      } as Record<string, string>;
+      const mergedEnv = {} as Record<string, string>;
+      const baseEnv = _executableEnv && typeof _executableEnv === 'object'
+        ? _executableEnv
+        : await shellEnv();
+      for (const [key, value] of Object.entries(baseEnv)) {
+        if (typeof value === 'string') {
+          mergedEnv[key] = value;
+        }
+      }
 
       if (env && typeof env === 'object') {
         for (const [key, value] of Object.entries(env)) {
@@ -932,18 +941,33 @@ async function createLocalPtyHostLoopbackPort(
         hostTerminalId,
         pid
       });
+      const readyEvent = {
+        pid,
+        cwd,
+        windowsPty: undefined
+      };
+      setTimeout(() => {
+        onProcessReady.fire({
+          id,
+          event: readyEvent
+        });
+      }, 0);
       return id;
     },
-    async start(id: number): Promise<void> {
+    async start(id: number): Promise<{ pid: number; cwd: string; windowsPty: undefined }> {
       const process = resolveProcess(id);
-      onProcessReady.fire({
-        id,
-        event: {
-          pid: process.pid,
-          cwd: process.cwd,
-          windowsPty: undefined
-        }
-      });
+      const readyEvent = {
+        pid: process.pid,
+        cwd: process.cwd,
+        windowsPty: undefined
+      };
+      setTimeout(() => {
+        onProcessReady.fire({
+          id,
+          event: readyEvent
+        });
+      }, 0);
+      return readyEvent;
     },
     input(id: number, data: string): void {
       const process = resolveProcess(id);
