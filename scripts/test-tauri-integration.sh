@@ -171,3 +171,17 @@ VSCODE_TAURI_INTEGRATION=1 "$INTEGRATION_TEST_ELECTRON_PATH" \
 	$BUILTIN_EXTENSION_TESTS_EXTRA_ARGS \
 	"$@"
 kill_app
+
+echo
+echo "### CSS tests"
+(
+	cd "$ROOT/extensions/css-language-features/server"
+	"$ROOT/scripts/node-electron.sh" test/index.js
+)
+
+echo
+echo "### HTML tests"
+(
+	cd "$ROOT/extensions/html-language-features/server"
+	"$ROOT/scripts/node-electron.sh" test/index.js
+)
