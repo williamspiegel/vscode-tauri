@@ -581,11 +581,23 @@ export class InteractiveEditor extends EditorPane implements IEditorPaneWithScro
 	}
 
 	private _cellAtBottom(cell: ICellViewModel): boolean {
-		const visibleRanges = this._notebookWidget.value?.visibleRanges || [];
-		const cellIndex = this._notebookWidget.value?.getCellIndex(cell);
+		const notebookWidget = this._notebookWidget.value;
+		const visibleRanges = notebookWidget?.visibleRanges || [];
+		const cellIndex = notebookWidget?.getCellIndex(cell);
 		if (cellIndex === Math.max(...visibleRanges.map(range => range.end - 1))) {
 			return true;
 		}
+
+		// Tauri can intermittently lag updating visibleRanges for interactive cells
+		// even though scroll metrics are current enough to determine whether the
+		// newest cell is already in view.
+		if (notebookWidget && cellIndex !== undefined && cellIndex >= 0) {
+			const cellBottom = notebookWidget.getAbsoluteBottomOfElement(cell);
+			if (cellBottom <= notebookWidget.scrollBottom + 8) {
+				return true;
+			}
+		}
+
 		return false;
 	}
 

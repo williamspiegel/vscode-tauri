@@ -65,6 +65,7 @@ import { InlineChatController } from '../../inlineChat/browser/inlineChatControl
 import { IsLinuxContext, IsWindowsContext } from '../../../../platform/contextkey/common/contextkeys.js';
 
 const interactiveWindowCategory: ILocalizedString = localize2('interactiveWindow', "Interactive Window");
+const isTauriIntegration = typeof process !== 'undefined' && process.env?.VSCODE_TAURI_INTEGRATION === '1';
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(
@@ -395,7 +396,8 @@ registerAction2(class extends Action2 {
 		};
 		const waitForNotebookEditorReady = async (editorPane: ReturnType<IEditorService['openEditor']> extends Promise<infer T> ? T : never, controllerId: string | undefined): Promise<string | undefined> => {
 			let notebookEditorIdCandidate: string | undefined;
-			for (let attempt = 0; attempt < 200; attempt++) {
+			const maxAttempts = isTauriIntegration ? 40 : 200;
+			for (let attempt = 0; attempt < maxAttempts; attempt++) {
 				const editorControl = editorPane?.getControl() as ReplEditorControl | undefined;
 				const notebookEditorId = editorControl?.notebookEditor?.getId();
 				const activeKernelId = editorControl?.notebookEditor?.activeKernel?.id;
@@ -404,6 +406,9 @@ registerAction2(class extends Action2 {
 				}
 				if (notebookEditorId && (!controllerId || activeKernelId === controllerId)) {
 					return notebookEditorId;
+				}
+				if (isTauriIntegration && notebookEditorIdCandidate) {
+					return notebookEditorIdCandidate;
 				}
 
 				await timeout(50);

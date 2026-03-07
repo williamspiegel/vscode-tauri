@@ -166,7 +166,7 @@ export class MainThreadNotebooksAndEditors {
 
 		for (const editorPane of this._editorService.visibleEditorPanes) {
 			let notebookEditor = getNotebookEditorFromEditorPane(editorPane);
-			if (!notebookEditor?.hasModel() && editorPane.input) {
+			if ((!notebookEditor?.hasModel() || usedVisibleEditorIds.has(notebookEditor.getId())) && editorPane.input) {
 				const resource = EditorResourceAccessor.getCanonicalUri(editorPane.input, { supportSideBySide: SideBySideEditor.PRIMARY });
 				if (resource) {
 					notebookEditor = this._notebookEditorService.listNotebookEditors().find(candidate =>

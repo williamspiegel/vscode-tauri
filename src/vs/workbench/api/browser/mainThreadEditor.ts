@@ -474,10 +474,10 @@ export class MainThreadTextEditor {
 		if (!editor) {
 			return false;
 		}
-		if (getCodeEditor(editor.getControl()) === this._codeEditor) {
-			return true;
+		const paneCodeEditor = getCodeEditor(editor.getControl());
+		if (paneCodeEditor) {
+			return paneCodeEditor === this._codeEditor;
 		}
-
 		const resource = editor.input ? EditorResourceAccessor.getCanonicalUri(editor.input, { supportSideBySide: SideBySideEditor.PRIMARY }) : undefined;
 		return !!resource && resource.toString() === this._model.uri.toString();
 	}

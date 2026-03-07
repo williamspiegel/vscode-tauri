@@ -38,9 +38,9 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 
 			const notebookUri = URI.revive(result.notebookUri);
 			const inputUri = URI.revive(result.inputUri);
-			const notebookEditor = await this._resolveNotebookEditor(result.notebookEditorId, notebookUri);
 			const isTauriIntegration = process.env.VSCODE_TAURI_INTEGRATION === '1';
 			const showNotebookOptions = typeof showOptions === 'number' ? { viewColumn: showOptions } : showOptions;
+			const notebookEditor = await this._resolveNotebookEditor(result.notebookEditorId, notebookUri, isTauriIntegration ? 40 : 200);
 
 			if (notebookEditor) {
 				_logService.debug('[ExtHostInteractive] notebook editor found', notebookEditor.id);
@@ -58,7 +58,7 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 				return { notebookUri, inputUri, notebookEditor: notebookEditor.apiEditor };
 			}
 
-			for (let attempt = 0; attempt < 200; attempt++) {
+			for (let attempt = 0; attempt < (isTauriIntegration ? 80 : 200); attempt++) {
 				try {
 					const notebookDocument = await this._extHostNotebooks.openNotebookDocument(notebookUri);
 					const notebookEditor = await this._extHostNotebooks.showNotebookDocument(
@@ -81,8 +81,8 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 		});
 	}
 
-	private async _resolveNotebookEditor(editorId: string | undefined, notebookUri: URI): Promise<ReturnType<ExtHostNotebookController['getEditorById']> | undefined> {
-		for (let attempt = 0; attempt < 200; attempt++) {
+	private async _resolveNotebookEditor(editorId: string | undefined, notebookUri: URI, maxAttempts = 200): Promise<ReturnType<ExtHostNotebookController['getEditorById']> | undefined> {
+		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			if (editorId) {
 				try {
 					return this._extHostNotebooks.getEditorById(editorId);

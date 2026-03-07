@@ -275,7 +275,8 @@ class MainThreadDocumentAndEditorStateComputer {
 		const activeCodeEditor = getCodeEditor(this._editorService.activeTextEditorControl);
 		const activeNotebookResource = this._getActiveNotebookResource();
 		if (activeCodeEditor && !visiblePaneCodeEditors.has(activeCodeEditor)) {
-			const shouldTrackActiveCodeEditor = hasActiveEditorPaneInput || hasWorkbenchActiveEditor || activeCodeEditor.hasTextFocus() || activeCodeEditor.hasWidgetFocus();
+			const hasFocusedOpenWorkbenchEditor = hasOpenedWorkbenchEditors && (activeCodeEditor.hasTextFocus() || activeCodeEditor.hasWidgetFocus());
+			const shouldTrackActiveCodeEditor = hasActiveEditorPaneInput || hasWorkbenchActiveEditor || hasFocusedOpenWorkbenchEditor;
 			if (shouldTrackActiveCodeEditor) {
 				visiblePaneCodeEditors.add(activeCodeEditor);
 				if (!candidateEditors.includes(activeCodeEditor)) {
