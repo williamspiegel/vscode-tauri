@@ -65,6 +65,13 @@ suite('MainThreadDocumentsAndEditors', () => {
 		});
 	}
 
+	function connectEditor(editor: ITestCodeEditor): void {
+		document.body.appendChild(editor.getContainerDomNode());
+		disposables.add({
+			dispose: () => editor.getContainerDomNode().remove()
+		});
+	}
+
 	function createMainThreadDocumentsAndEditors(): MainThreadDocumentsAndEditors {
 		const editorGroupService = new TestEditorGroupsService();
 
@@ -267,7 +274,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 		model.dispose();
 	});
 
-	test('tracks focused active text editor controls without an active workbench editor', () => {
+	test('ignores disconnected focused active text editor controls without an active workbench editor', () => {
 		const model = modelService.createModel('test', null);
 		const editor = createTestCodeEditor(model, {
 			hasTextFocus: true,
@@ -275,6 +282,34 @@ suite('MainThreadDocumentsAndEditors', () => {
 				[ICodeEditorService, codeEditorService]
 			)
 		});
+
+		workbenchEditorService.activeTextEditorControl = editor;
+		workbenchEditorService.activeEditor = undefined;
+		workbenchEditorService.activeEditorPane = undefined;
+		workbenchEditorService.visibleEditorPanes = [];
+
+		deltas.length = 0;
+		disposables.add(createMainThreadDocumentsAndEditors());
+
+		assert.strictEqual(deltas.length, 1);
+		const [delta] = deltas;
+		assert.strictEqual(delta.addedDocuments?.length, 1);
+		assert.strictEqual(delta.addedEditors, undefined);
+		assert.strictEqual(delta.newActiveEditor, undefined);
+
+		editor.dispose();
+		model.dispose();
+	});
+
+	test('tracks connected focused active text editor controls without an active workbench editor', () => {
+		const model = modelService.createModel('test', null);
+		const editor = createTestCodeEditor(model, {
+			hasTextFocus: true,
+			serviceCollection: new ServiceCollection(
+				[ICodeEditorService, codeEditorService]
+			)
+		});
+		connectEditor(editor);
 
 		workbenchEditorService.activeTextEditorControl = editor;
 		workbenchEditorService.activeEditor = undefined;
@@ -302,6 +337,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 				[ICodeEditorService, codeEditorService]
 			)
 		});
+		connectEditor(editor);
 
 		workbenchEditorService.activeTextEditorControl = editor;
 		workbenchEditorService.activeEditor = undefined;
