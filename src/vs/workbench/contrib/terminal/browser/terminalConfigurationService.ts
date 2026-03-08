@@ -16,6 +16,10 @@ import { TerminalLocation, TerminalLocationConfigValue } from '../../../../platf
 import { isString } from '../../../../base/common/types.js';
 import { clamp } from '../../../../base/common/numbers.js';
 
+function isTauriDesktopRuntime(): boolean {
+	return typeof process !== 'undefined' && process.env?.VSCODE_DESKTOP_RUNTIME === 'electrobun';
+}
+
 // #region TerminalConfigurationService
 
 export class TerminalConfigurationService extends Disposable implements ITerminalConfigurationService {
@@ -56,6 +60,9 @@ export class TerminalConfigurationService extends Disposable implements ITermina
 
 	private _updateConfig(): void {
 		const configValues = { ...this._configurationService.getValue<ITerminalConfiguration>(TERMINAL_CONFIG_SECTION) };
+		if (isTauriDesktopRuntime() && configValues.gpuAcceleration === 'auto') {
+			configValues.gpuAcceleration = 'off';
+		}
 		configValues.fontWeight = this._normalizeFontWeight(configValues.fontWeight, DEFAULT_FONT_WEIGHT);
 		configValues.fontWeightBold = this._normalizeFontWeight(configValues.fontWeightBold, DEFAULT_BOLD_FONT_WEIGHT);
 		this._config = configValues;

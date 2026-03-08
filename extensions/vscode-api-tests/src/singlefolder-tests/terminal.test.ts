@@ -79,7 +79,7 @@ function suiteRequiresNativeTerminalParity(title: string, fn: (this: Mocha.Suite
 			});
 		});
 
-		testRequiresNativeTerminalParity('echo works in the default shell', async () => {
+		test('echo works in the default shell', async () => {
 			const terminal = await new Promise<Terminal>(r => {
 				disposables.push(window.onDidOpenTerminal(t => {
 					if (t === terminal) {

@@ -8,12 +8,13 @@ import { setTerminalTestSettings } from './terminal-helpers';
 
 export function setup(options?: { skipSuite: boolean }) {
 	(options?.skipSuite ? describe.skip : describe)('Terminal Input', () => {
+		let app: Application;
 		let terminal: Terminal;
 		let settingsEditor: SettingsEditor;
 
 		// Acquire automation API
 		before(async function () {
-			const app = this.app as Application;
+			app = this.app as Application;
 			terminal = app.workbench.terminal;
 			settingsEditor = app.workbench.settingsEditor;
 			await setTerminalTestSettings(app);
@@ -43,6 +44,16 @@ export function setup(options?: { skipSuite: boolean }) {
 				await writeTextForAutoReply('foo');
 				await terminal.waitForTerminalText(buffer => buffer.some(line => line.match(/foo.*bar/)));
 			});
+		});
+
+		it('should render shell output in the terminal viewport', async () => {
+			const text = 'tauri_terminal_viewport_smoke';
+			await terminal.createTerminal();
+			await terminal.runCommandInTerminal(`echo ${text}`);
+			await app.code.waitForElement(
+				'#terminal .xterm-rows',
+				element => !!element?.textContent && element.textContent.includes(text)
+			);
 		});
 	});
 }

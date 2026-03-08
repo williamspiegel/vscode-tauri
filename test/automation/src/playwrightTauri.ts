@@ -33,7 +33,9 @@ async function launchTauriHost(options: LaunchOptions): Promise<ChildProcess> {
 
 	const env = {
 		...process.env,
-		VSCODE_SKIP_PRELAUNCH: process.env.VSCODE_SKIP_PRELAUNCH ?? '1'
+		VSCODE_SKIP_PRELAUNCH: process.env.VSCODE_SKIP_PRELAUNCH ?? '1',
+		VSCODE_TAURI_NO_DEV_SERVER: process.env.VSCODE_TAURI_NO_DEV_SERVER ?? '1',
+		VSCODE_TAURI_NO_WATCH: process.env.VSCODE_TAURI_NO_WATCH ?? '1'
 	};
 
 	options.logger.log(`Starting Tauri host with '${script} ${args.join(' ')}'`);

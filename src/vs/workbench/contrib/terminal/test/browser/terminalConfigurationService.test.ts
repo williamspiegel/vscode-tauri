@@ -17,14 +17,24 @@ import { TestTerminalConfigurationService, workbenchInstantiationService } from 
 
 suite('Workbench - TerminalConfigurationService', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	const originalDesktopRuntime = process.env.VSCODE_DESKTOP_RUNTIME;
 
 	let configurationService: TestConfigurationService;
 	let terminalConfigurationService: ITerminalConfigurationService;
 
 	setup(() => {
+		delete process.env.VSCODE_DESKTOP_RUNTIME;
 		const instantiationService = workbenchInstantiationService(undefined, store);
 		configurationService = instantiationService.get(IConfigurationService) as TestConfigurationService;
 		terminalConfigurationService = instantiationService.get(ITerminalConfigurationService);
+	});
+
+	teardown(() => {
+		if (originalDesktopRuntime === undefined) {
+			delete process.env.VSCODE_DESKTOP_RUNTIME;
+			return;
+		}
+		process.env.VSCODE_DESKTOP_RUNTIME = originalDesktopRuntime;
 	});
 
 	suite('config', () => {
@@ -51,6 +61,30 @@ suite('Workbench - TerminalConfigurationService', () => {
 					});
 				});
 			});
+		});
+
+		test('should disable gpuAcceleration auto in Tauri', () => {
+			process.env.VSCODE_DESKTOP_RUNTIME = 'electrobun';
+			const terminalConfigurationService = createTerminalConfigationService({
+				terminal: {
+					integrated: {
+						gpuAcceleration: 'auto'
+					}
+				}
+			});
+			strictEqual(terminalConfigurationService.config.gpuAcceleration, 'off');
+		});
+
+		test('should preserve explicit gpuAcceleration on in Tauri', () => {
+			process.env.VSCODE_DESKTOP_RUNTIME = 'electrobun';
+			const terminalConfigurationService = createTerminalConfigationService({
+				terminal: {
+					integrated: {
+						gpuAcceleration: 'on'
+					}
+				}
+			});
+			strictEqual(terminalConfigurationService.config.gpuAcceleration, 'on');
 		});
 	});
 
