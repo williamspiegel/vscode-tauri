@@ -46,6 +46,7 @@ import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uri
 import { UriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentityService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { BulkEditService } from '../../../contrib/bulkEdit/browser/bulkEditService.js';
+import { CellUri } from '../../../contrib/notebook/common/notebookCommon.js';
 import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
@@ -210,7 +211,9 @@ suite('MainThreadEditors', () => {
 				return id === editorId ? testEditor : undefined;
 			},
 			findTextEditorIdFor() { return undefined; },
-			getIdOfCodeEditor() { return undefined; }
+			getIdOfCodeEditor() { return undefined; },
+			ensureTextEditorForCodeEditor() { return undefined; },
+			adoptTextEditorForCodeEditor() { return undefined; }
 		};
 
 		editors = instaService.createInstance(MainThreadTextEditors, editorLocator, SingleProxyRPCProtocol(null));
@@ -398,5 +401,23 @@ suite('MainThreadEditors', () => {
 
 		await model.undo();
 		assert.strictEqual(model.getValue(), 'hello world!');
+	});
+
+	test('does not resolve a different notebook cell editor for showTextDocument', () => {
+		const notebookUri = URI.parse('vscode-notebook:/workspace/notebook.ipynb');
+		const requestedCellUri = CellUri.generate(notebookUri, 1);
+		const otherCellUri = CellUri.generate(notebookUri, 2);
+		const otherCellModel = disposables.add(modelService.createModel('other', null, otherCellUri));
+		const otherCellEditor = disposables.add(createTestCodeEditor(otherCellModel));
+		const notebookEditor = {
+			activeCodeEditor: otherCellEditor,
+			codeEditors: [[{ uri: otherCellUri }, otherCellEditor]]
+		};
+
+		const editorId = (editors as unknown as {
+			_findNotebookCellCodeEditorId(notebookEditor: unknown, resource: URI): string | undefined;
+		})._findNotebookCellCodeEditorId(notebookEditor, requestedCellUri);
+
+		assert.strictEqual(editorId, undefined);
 	});
 });

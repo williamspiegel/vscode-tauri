@@ -484,8 +484,6 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 			return undefined;
 		}
 
-		const targetNotebook = parseNotebookCellUri(resource)?.notebook;
-		let fallbackCodeEditorId: string | undefined;
 		const candidateCodeEditors = notebookEditor.activeCodeEditor
 			? [notebookEditor.activeCodeEditor, ...notebookEditor.codeEditors.map(([, codeEditor]) => codeEditor).filter(codeEditor => codeEditor !== notebookEditor.activeCodeEditor)]
 			: notebookEditor.codeEditors.map(([, codeEditor]) => codeEditor);
@@ -504,22 +502,12 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 				}
 				return candidateCodeEditorId;
 			}
-
-			if (!fallbackCodeEditorId && targetNotebook) {
-				const candidateNotebook = parseNotebookCellUri(candidateModel.uri)?.notebook;
-				if (candidateNotebook && this._uriIdentityService.extUri.isEqual(candidateNotebook, targetNotebook)) {
-					fallbackCodeEditorId = candidateCodeEditorId ?? this._editorLocator.ensureTextEditorForCodeEditor(candidateCodeEditor);
-				}
-			}
 		}
 
-		return fallbackCodeEditorId;
+		return undefined;
 	}
 
 	private _findTrackedCodeEditorIdForResource(resource: URI): string | undefined {
-		const targetNotebook = parseNotebookCellUri(resource)?.notebook;
-		let fallbackCodeEditorId: string | undefined;
-
 		for (const codeEditor of this._codeEditorService.listCodeEditors()) {
 			const model = codeEditor.getModel();
 			if (!model || !isITextModel(model)) {
@@ -534,16 +522,9 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 			if (this._uriIdentityService.extUri.isEqual(model.uri, resource)) {
 				return editorId;
 			}
-
-			if (!fallbackCodeEditorId && targetNotebook) {
-				const candidateNotebook = parseNotebookCellUri(model.uri)?.notebook;
-				if (candidateNotebook && this._uriIdentityService.extUri.isEqual(candidateNotebook, targetNotebook)) {
-					fallbackCodeEditorId = editorId;
-				}
-			}
 		}
 
-		return fallbackCodeEditorId;
+		return undefined;
 	}
 
 	private async _waitForNotebookCellOwner(resource: URI): Promise<void> {

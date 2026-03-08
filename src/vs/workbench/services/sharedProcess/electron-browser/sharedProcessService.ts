@@ -19,11 +19,6 @@ interface ISharedProcessConnectionLike {
 	registerChannel(channelName: string, channel: IServerChannel<string>): void;
 }
 
-const noopSharedProcessConnection: ISharedProcessConnectionLike = {
-	getChannel: () => ({ listen: () => Event.None, call: async () => undefined }),
-	registerChannel: () => undefined
-};
-
 export class SharedProcessService extends Disposable implements ISharedProcessService {
 
 	declare readonly _serviceBrand: undefined;
@@ -62,15 +57,8 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 		// Acquire a message port connected to the shared process
 		mark('code/willConnectSharedProcess');
 		this.logService.trace('Renderer->SharedProcess#connect: before acquirePort');
-		const port = await Promise.race([
-			acquirePort(SharedProcessChannelConnection.request, SharedProcessChannelConnection.response).catch(() => undefined),
-			timeout(4000).then(() => undefined)
-		]);
+		const port = await this.acquirePortWithRetry(SharedProcessChannelConnection.request, SharedProcessChannelConnection.response, 'connect');
 		mark('code/didConnectSharedProcess');
-		if (!port) {
-			this.logService.warn('Renderer->SharedProcess#connect: timed out waiting for MessagePort, using no-op shared process connection.');
-			return noopSharedProcessConnection;
-		}
 		this.logService.trace('Renderer->SharedProcess#connect: connection established');
 
 		return this._register(new MessagePortClient(port, `window:${this.windowId}`));
@@ -101,17 +89,26 @@ export class SharedProcessService extends Disposable implements ISharedProcessSe
 
 		// Create a new port to the shared process
 		this.logService.trace('Renderer->SharedProcess#createRawConnection: before acquirePort');
-		const port = await Promise.race([
-			acquirePort(SharedProcessRawConnection.request, SharedProcessRawConnection.response).catch(() => undefined),
-			timeout(4000).then(() => undefined)
-		]);
-		if (!port) {
-			this.logService.warn('Renderer->SharedProcess#createRawConnection: timed out waiting for MessagePort, returning local fallback port.');
-			const fallbackChannel = new MessageChannel();
-			return fallbackChannel.port1;
-		}
+		const port = await this.acquirePortWithRetry(SharedProcessRawConnection.request, SharedProcessRawConnection.response, 'createRawConnection');
 		this.logService.trace('Renderer->SharedProcess#createRawConnection: connection established');
 
 		return port;
+	}
+
+	private async acquirePortWithRetry(requestChannel: string, responseChannel: string, operation: string): Promise<MessagePort> {
+		let attempt = 0;
+
+		while (true) {
+			const port = await Promise.race([
+				acquirePort(requestChannel, responseChannel).catch(() => undefined),
+				timeout(4000).then(() => undefined)
+			]);
+			if (port) {
+				return port;
+			}
+
+			attempt += 1;
+			this.logService.warn(`Renderer->SharedProcess#${operation}: timed out waiting for MessagePort (attempt ${attempt}), retrying.`);
+		}
 	}
 }

@@ -16,7 +16,6 @@ import { ExtHostDocumentsAndEditors } from './extHostDocumentsAndEditors.js';
 import { ExtHostTextEditor, TextEditorDecorationType } from './extHostTextEditor.js';
 import * as TypeConverters from './extHostTypeConverters.js';
 import { TextEditorSelectionChangeKind, TextEditorChangeKind } from './extHostTypes.js';
-import { parse as parseNotebookCellUri } from '../../services/notebook/common/notebookDocumentService.js';
 import * as vscode from 'vscode';
 
 export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
@@ -219,25 +218,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 	}
 
 	private _matchesRequestedResource(candidate: URI, requested: URI): boolean {
-		if (isEqual(candidate, requested)) {
-			return true;
-		}
-
-		if (requested.scheme !== Schemas.vscodeNotebookCell) {
-			return false;
-		}
-
-		const requestedNotebook = parseNotebookCellUri(requested)?.notebook;
-		if (!requestedNotebook) {
-			return false;
-		}
-
-		if (isEqual(candidate, requestedNotebook)) {
-			return true;
-		}
-
-		const candidateNotebook = candidate.scheme === Schemas.vscodeNotebookCell ? parseNotebookCellUri(candidate)?.notebook : undefined;
-		return !!candidateNotebook && isEqual(candidateNotebook, requestedNotebook);
+		return isEqual(candidate, requested);
 	}
 
 	createTextEditorDecorationType(extension: IExtensionDescription, options: vscode.DecorationRenderOptions): vscode.TextEditorDecorationType {

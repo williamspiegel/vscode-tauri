@@ -10,7 +10,7 @@ import { ITreeSitterLibraryService } from '../../../../editor/common/services/tr
 import { canASAR, importAMDNodeModule } from '../../../../amdX.js';
 import { Lazy } from '../../../../base/common/lazy.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-import { IFileService } from '../../../../platform/files/common/files.js';
+import { FileOperationResult, IFileService, toFileOperationResult } from '../../../../platform/files/common/files.js';
 import { observableConfigValue } from '../../../../platform/observable/common/platformObservableUtils.js';
 import { CachedFunction } from '../../../../base/common/cache.js';
 import { IEnvironmentService } from '../../../../platform/environment/common/environment.js';
@@ -50,11 +50,9 @@ export class TreeSitterLibraryService extends Disposable implements ITreeSitterL
 	private readonly _treeSitterImport = new Lazy(async () => {
 		const TreeSitter = await importAMDNodeModule<typeof import('@vscode/tree-sitter-wasm')>('@vscode/tree-sitter-wasm', 'wasm/tree-sitter.js');
 		const wasmLocation: AppResourcePath = `${getModuleLocation(this._environmentService)}/${FILENAME_TREESITTER_WASM}`;
-		const wasmBrowserUri = FileAccess.asBrowserUri(wasmLocation).toString(true);
-		const wasmBinary = await this._readWasmResource(wasmLocation);
+		const wasmLocationUri = this.isTest ? FileAccess.asFileUri(wasmLocation).toString(true) : FileAccess.asBrowserUri(wasmLocation).toString(true);
 		await withTimeout(TreeSitter.Parser.init({
-			locateFile: () => wasmBrowserUri,
-			wasmBinary
+			locateFile: () => wasmLocationUri,
 		}), 'TreeSitter.Parser.init');
 		return TreeSitter;
 	});
@@ -83,11 +81,7 @@ export class TreeSitterLibraryService extends Disposable implements ITreeSitterL
 	private readonly _injectionQueries = new CachedFunction({ getCacheKey: JSON.stringify }, (arg: { languageId: string; kind: 'injections' | 'highlights' }) => {
 		const loadQuerySource = async () => {
 			const queriesLocation: AppResourcePath = `vs/editor/common/languages/${arg.kind}/${arg.languageId}.scm`;
-			const response = await fetch(FileAccess.asBrowserUri(queriesLocation).toString(true));
-			if (!response.ok) {
-				return undefined;
-			}
-			return await response.text();
+			return this._readTextResource(queriesLocation);
 		};
 
 		return ObservablePromise.fromFn(async () => {
@@ -161,10 +155,36 @@ export class TreeSitterLibraryService extends Disposable implements ITreeSitterL
 	}
 
 	private async _readWasmResource(resourcePath: AppResourcePath): Promise<Uint8Array> {
+		if (this.isTest) {
+			const result = await this._fileService.readFile(FileAccess.asFileUri(resourcePath));
+			return result.value.buffer;
+		}
+
 		const response = await fetch(FileAccess.asBrowserUri(resourcePath).toString(true));
 		if (!response.ok) {
 			throw new Error(`Failed to fetch tree-sitter asset ${resourcePath}: ${response.status} ${response.statusText}`);
 		}
 		return new Uint8Array(await response.arrayBuffer());
+	}
+
+	private async _readTextResource(resourcePath: AppResourcePath): Promise<string | undefined> {
+		if (this.isTest) {
+			try {
+				const result = await this._fileService.readFile(FileAccess.asFileUri(resourcePath));
+				return result.value.toString();
+			} catch (error) {
+				if (toFileOperationResult(error) === FileOperationResult.FILE_NOT_FOUND) {
+					return undefined;
+				}
+
+				throw error;
+			}
+		}
+
+		const response = await fetch(FileAccess.asBrowserUri(resourcePath).toString(true));
+		if (!response.ok) {
+			return undefined;
+		}
+		return await response.text();
 	}
 }
