@@ -79,7 +79,7 @@ import { IHistoryService } from '../../../services/history/common/history.js';
 import { isHorizontal, IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { IPreferencesService } from '../../../services/preferences/common/preferences.js';
-import { importAMDNodeModule } from '../../../../amdX.js';
+import { importAMDNodeModule, resolveAmdNodeModulePath } from '../../../../amdX.js';
 import type { IMarker, Terminal as XTermTerminal, IBufferLine } from '@xterm/xterm';
 import { AccessibilityCommandId } from '../../accessibility/common/accessibilityCommands.js';
 import { terminalStrings } from '../common/terminalStrings.js';
@@ -110,6 +110,23 @@ const enum Constants {
 }
 
 let xtermConstructor: Promise<typeof XTermTerminal> | undefined;
+
+async function loadXtermConstructor(): Promise<typeof XTermTerminal> {
+	const amdModule = await importAMDNodeModule<typeof import('@xterm/xterm')>('@xterm/xterm', 'lib/xterm.js');
+	if (amdModule?.Terminal) {
+		return amdModule.Terminal;
+	}
+
+	if (isTauriDesktopRuntime) {
+		const esmPath = resolveAmdNodeModulePath('@xterm/xterm', 'lib/xterm.mjs');
+		const esmModule = await import(/* @vite-ignore */ esmPath) as typeof import('@xterm/xterm');
+		if (esmModule?.Terminal) {
+			return esmModule.Terminal;
+		}
+	}
+
+	throw new TypeError('Failed to load @xterm/xterm Terminal constructor');
+}
 
 interface ICanvasDimensions {
 	width: number;
@@ -201,6 +218,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	private _lineDataEventAddon: LineDataEventAddon | undefined;
 	private readonly _scopedContextKeyService: IContextKeyService;
 	private _resizeDebouncer?: TerminalResizeDebouncer;
+	private _pendingXtermOpenData: string[] | undefined;
 
 	readonly capabilities = this._register(new TerminalCapabilityStoreMultiplexer());
 	readonly statusList: ITerminalStatusList;
@@ -786,7 +804,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 			return xtermConstructor;
 		}
 		xtermConstructor = Promises.withAsyncBody<typeof XTermTerminal>(async (resolve) => {
-			const Terminal = (await importAMDNodeModule<typeof import('@xterm/xterm')>('@xterm/xterm', 'lib/xterm.js')).Terminal;
+			const Terminal = await loadXtermConstructor();
 			// Localize strings
 			Terminal.strings.promptLabel = nls.localize('terminal.integrated.a11yPromptLabel', 'Terminal input');
 			Terminal.strings.tooMuchOutput = keybinding ? nls.localize('terminal.integrated.useAccessibleBuffer', 'Use the accessible buffer {0} to manually review output', keybinding.getLabel()) : nls.localize('terminal.integrated.useAccessibleBufferNoKb', 'Use the Terminal: Focus Accessible Buffer command to manually review output');
@@ -1054,6 +1072,8 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		// If xterm is already attached, call open again to pick up any changes to the window.
 		if (this.xterm?.raw.element) {
 			this.xterm.raw.open(this.xterm.raw.element);
+		} else if (this._isVisible && this.xterm) {
+			this._open();
 		}
 
 		this.xterm?.refresh();
@@ -1211,6 +1231,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 			this.layout(this._lastLayoutDimensions);
 		}
 		this.updateConfig();
+		this._flushPendingXtermOpenData();
 
 		// If IShellLaunchConfig.waitOnExit was true and the process finished before the terminal
 		// panel was initialized.
@@ -1407,6 +1428,9 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 			// using the most up to date dimensions (eg. when terminal is created in the background
 			// using cached dimensions of a split terminal).
 			this._resize();
+			if (isTauriDesktopRuntime) {
+				setTimeout(() => this.xterm?.refreshForTauri(), 0);
+			}
 		}
 		if (didChange) {
 			this._onDidChangeVisibility.fire(visible);
@@ -1654,11 +1678,8 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this._onWillData.fire(data);
 		const messageId = ++this._latestXtermWriteData;
 		const xterm = this.xterm;
-		// Hidden terminals still need to surface data events to extensions even before the xterm
-		// renderer is attached to the DOM. Waiting for the write callback in that state can stall
-		// indefinitely because there is no live renderer to flush against yet.
 		if (!xterm?.raw.element) {
-			xterm?.raw.write(data);
+			(this._pendingXtermOpenData ??= []).push(data);
 			this._latestXtermParseData = messageId;
 			this._processManager.acknowledgeDataEvent(data.length);
 			cb?.();
@@ -1667,10 +1688,31 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		}
 
 		xterm.raw.write(data, () => {
+			if (isTauriDesktopRuntime && this._isVisible) {
+				xterm.refreshForTauri();
+			}
 			this._latestXtermParseData = messageId;
 			this._processManager.acknowledgeDataEvent(data.length);
 			cb?.();
 			this._onData.fire(data);
+		});
+	}
+
+	private _flushPendingXtermOpenData(): void {
+		if (!this.xterm?.raw.element || !this._pendingXtermOpenData?.length) {
+			return;
+		}
+
+		const pendingData = this._pendingXtermOpenData.join('');
+		this._pendingXtermOpenData = undefined;
+		this.xterm.raw.write(pendingData, () => {
+			if (this.isDisposed || !this.xterm?.raw.element) {
+				return;
+			}
+			if (isTauriDesktopRuntime && this._isVisible) {
+				this.xterm.refreshForTauri();
+			}
+			this.xterm.refresh();
 		});
 	}
 
@@ -1944,7 +1986,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this.xterm!.raw.options.screenReaderMode = this._accessibilityService.isScreenReaderOptimized();
 	}
 
-	private _setCommandsToSkipShell(commands: string[]): void {
+	private _setCommandsToSkipShell(commands: string[] = []): void {
 		const excludeCommands = commands.filter(command => command[0] === '-').map(command => command.slice(1));
 		this._skipTerminalCommands = DEFAULT_COMMANDS_TO_SKIP_SHELL.filter(defaultCommand => {
 			return !excludeCommands.includes(defaultCommand);
@@ -1974,6 +2016,9 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		// Signal the container is ready
 		if (!this._containerReadyBarrier.isOpen()) {
 			this._containerReadyBarrier.open();
+		}
+		if (isTauriDesktopRuntime && this._isVisible) {
+			setTimeout(() => this.xterm?.refreshForTauri(), 0);
 		}
 
 		// Layout all contributions

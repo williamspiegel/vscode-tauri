@@ -56,6 +56,68 @@ const enum TextBlinkConstants {
 	IntervalDuration = 600
 }
 
+function isTauriDesktopRuntime(): boolean {
+	return typeof process !== 'undefined' && process.env?.VSCODE_DESKTOP_RUNTIME === 'electrobun';
+}
+
+export function withTauriOffscreenCanvasDisabled<T>(callback: () => T): T {
+	if (!isTauriDesktopRuntime() || typeof globalThis.OffscreenCanvas === 'undefined') {
+		return callback();
+	}
+
+	const originalOffscreenCanvas = globalThis.OffscreenCanvas;
+	try {
+		// xterm's DOM renderer prefers OffscreenCanvas-based char measurement when available.
+		// In Tauri's WebView this can exist but still produce unusable metrics, leaving rows blank.
+		(globalThis as typeof globalThis & { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = undefined;
+		return callback();
+	} finally {
+		(globalThis as typeof globalThis & { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = originalOffscreenCanvas;
+	}
+}
+
+export function withTauriIntersectionObserverDisabled<T>(targetWindow: Window & typeof globalThis, callback: () => T): T {
+	if (!isTauriDesktopRuntime() || typeof targetWindow.IntersectionObserver === 'undefined') {
+		return callback();
+	}
+
+	const originalIntersectionObserver = targetWindow.IntersectionObserver;
+	class TauriIntersectionObserverStub implements IntersectionObserver {
+		readonly root = null;
+		readonly rootMargin = '0px';
+		readonly thresholds = [0];
+
+		constructor(
+			private readonly _callback: IntersectionObserverCallback
+		) { }
+
+		disconnect(): void { }
+
+		observe(target: Element): void {
+			queueMicrotask(() => {
+				this._callback([{
+					boundingClientRect: target.getBoundingClientRect(),
+					intersectionRatio: 1,
+					intersectionRect: target.getBoundingClientRect(),
+					isIntersecting: true,
+					rootBounds: null,
+					target,
+					time: typeof performance !== 'undefined' ? performance.now() : Date.now()
+				}], this);
+			});
+		}
+
+		takeRecords(): IntersectionObserverEntry[] { return []; }
+
+		unobserve(): void { }
+	}
+	try {
+		(targetWindow as Window & typeof globalThis & { IntersectionObserver?: typeof IntersectionObserver }).IntersectionObserver = TauriIntersectionObserverStub as unknown as typeof IntersectionObserver;
+		return callback();
+	} finally {
+		(targetWindow as Window & typeof globalThis & { IntersectionObserver?: typeof IntersectionObserver }).IntersectionObserver = originalIntersectionObserver;
+	}
+}
 
 function getFullBufferLineAsString(lineIndex: number, buffer: IBuffer): { lineData: string | undefined; lineIndex: number } {
 	let line = buffer.getLine(lineIndex);
@@ -213,7 +275,7 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 		const config = this._terminalConfigurationService.config;
 		const editorOptions = this._configurationService.getValue<IEditorOptions>('editor');
 
-		this.raw = this._register(new xtermCtor({
+		this.raw = this._register(withTauriOffscreenCanvasDisabled(() => new xtermCtor({
 			allowProposedApi: true,
 			cols: options.cols,
 			rows: options.rows,
@@ -262,7 +324,7 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 				getCellSizePixels: true,
 				getWinSizeChars: true,
 			},
-		}));
+		})));
 		this._updateSmoothScrolling();
 		interface ITerminalWithCore extends RawXtermTerminal {
 			_core: IXtermCore;
@@ -475,7 +537,8 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 	attachToElement(container: HTMLElement, partialOptions?: Partial<IXtermAttachToElementOptions>): HTMLElement {
 		const options: IXtermAttachToElementOptions = { enableGpu: true, ...partialOptions };
 		if (!this._attached) {
-			this.raw.open(container);
+			withTauriIntersectionObserverDisabled(dom.getWindow(container), () => withTauriOffscreenCanvasDisabled(() => this.raw.open(container)));
+			this._scheduleTauriAttachRefresh(container);
 		}
 
 		// TODO: Move before open so the DOM renderer doesn't initialize
@@ -513,6 +576,45 @@ export class XtermTerminal extends Disposable implements IXtermTerminal, IDetach
 		// Screen must be created at this point as xterm.open is called
 		// eslint-disable-next-line no-restricted-syntax
 		return this._attached?.container.querySelector('.xterm-screen')!;
+	}
+
+	private _scheduleTauriAttachRefresh(container: HTMLElement): void {
+		if (!isTauriDesktopRuntime()) {
+			return;
+		}
+
+		const win = dom.getWindow(container);
+		win.requestAnimationFrame(() => {
+			this.refreshForTauri();
+			win.setTimeout(() => this.refreshForTauri(), 0);
+		});
+	}
+
+	refreshForTauri(): void {
+		if (!isTauriDesktopRuntime()) {
+			return;
+		}
+
+		const internalCore = this._core as IXtermCore & {
+			_charSizeService?: { measure(): void };
+			_renderService?: {
+				_isPaused?: boolean;
+				_needsFullRefresh?: boolean;
+				_observerDisposable?: { clear?(): void; dispose?(): void };
+				handleCharSizeChanged(): void;
+				refreshRows(start: number, end: number, force?: boolean): void;
+			};
+		};
+		internalCore._renderService?._observerDisposable?.clear?.();
+		internalCore._renderService?._observerDisposable?.dispose?.();
+		if (internalCore._renderService) {
+			internalCore._renderService._isPaused = false;
+			internalCore._renderService._needsFullRefresh = false;
+		}
+		internalCore._charSizeService?.measure();
+		internalCore._renderService?.handleCharSizeChanged();
+		internalCore._renderService?.refreshRows(0, this.raw.rows - 1, true);
+		this._core.viewport?._innerRefresh();
 	}
 
 	private _setFocused(isFocused: boolean) {

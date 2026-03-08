@@ -792,6 +792,8 @@ suite('Tauri Desktop Sandbox', () => {
 		assert.ok(terminalCreate, 'terminal.create should be invoked');
 		assert.deepStrictEqual(terminalCreate.params.args, ['-l']);
 		assert.strictEqual(terminalCreate.params.cwd, '/workspace');
+		assert.strictEqual(terminalCreate.params.cols, 80);
+		assert.strictEqual(terminalCreate.params.rows, 24);
 		assert.strictEqual(terminalCreate.params.env.PATH, '/exec/path');
 		assert.strictEqual(terminalCreate.params.env.BASE, 'base');
 		assert.strictEqual(terminalCreate.params.env.A, '~a2~');

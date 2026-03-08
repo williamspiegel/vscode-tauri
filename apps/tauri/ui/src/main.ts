@@ -1429,15 +1429,30 @@ function isExtensionTestsWindow(
 	);
 }
 
+function isSmokeDriverWindow(
+	config: Record<string, unknown> | undefined,
+): boolean {
+	return (
+		hasWindowConfigFlag(config, "enable-smoke-test-driver") ||
+		hasProcessArgFlag("enable-smoke-test-driver")
+	);
+}
+
+function isAutomationWindow(
+	config: Record<string, unknown> | undefined,
+): boolean {
+	return isExtensionTestsWindow(config) || isSmokeDriverWindow(config);
+}
+
 function shouldFailFastOnStartupFailure(): boolean {
-	return isExtensionTestsWindow(startupWindowConfig);
+	return isAutomationWindow(startupWindowConfig);
 }
 
 function installAutomationWindowHooks(
 	host: HostClient,
 	windowConfig: Record<string, unknown>,
 ): void {
-	if (!isExtensionTestsWindow(windowConfig)) {
+	if (!isAutomationWindow(windowConfig)) {
 		return;
 	}
 
@@ -1821,6 +1836,9 @@ async function main(): Promise<void> {
 			}`,
 			`extensionTestsPathPresent=${
 				typeof windowConfig.extensionTestsPath === "string"
+			}`,
+			`enableSmokeTestDriver=${
+				windowConfig["enable-smoke-test-driver"] === true
 			}`,
 		].join(" "),
 	);

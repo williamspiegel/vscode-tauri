@@ -14,6 +14,8 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use libc::winsize;
 
 #[async_trait]
 pub trait TerminalCapability: Send + Sync {
@@ -28,6 +30,8 @@ pub struct RustPrimaryTerminalCapability {
 struct TerminalSession {
     child: Child,
     writer: Box<dyn Write + Send>,
+    #[cfg(unix)]
+    pty_master_fd: std::os::fd::RawFd,
 }
 
 struct SpawnedTerminal {
@@ -35,6 +39,8 @@ struct SpawnedTerminal {
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
     stream: &'static str,
+    #[cfg(unix)]
+    pty_master_fd: std::os::fd::RawFd,
 }
 
 impl RustPrimaryTerminalCapability {
@@ -54,13 +60,18 @@ impl TerminalCapability for RustPrimaryTerminalCapability {
                 let shell = parse_required_string(params, "shell")?;
                 let args = parse_optional_string_array(params.get("args"))?;
                 let cwd = params.get("cwd").and_then(Value::as_str);
+                let cols = parse_optional_u16(params.get("cols"));
+                let rows = parse_optional_u16(params.get("rows"));
                 let env_overrides = parse_optional_string_map(params.get("env"))?;
+                let initial_size = cols.zip(rows);
                 if std::env::var("VSCODE_TAURI_INTEGRATION").ok().as_deref() == Some("1") {
                     eprintln!(
-                        "[host.terminal.create] shell={} cwd={} args={:?} envKeys={}",
+                        "[host.terminal.create] shell={} cwd={} args={:?} cols={:?} rows={:?} envKeys={}",
                         shell,
                         cwd.unwrap_or_default(),
                         args,
+                        cols,
+                        rows,
                         env_overrides.len()
                     );
                 }
@@ -69,16 +80,31 @@ impl TerminalCapability for RustPrimaryTerminalCapability {
                     reader,
                     writer,
                     stream,
-                } = spawn_terminal_process(shell, &args, cwd, &env_overrides)
+                    #[cfg(unix)]
+                    pty_master_fd,
+                } = spawn_terminal_process(shell, &args, cwd, &env_overrides, initial_size)
                     .map_err(|error| format!("terminal.create failed for '{shell}': {error}"))?;
                 let pid = child.id();
 
                 let session_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                #[cfg(unix)]
+                if let Some((cols, rows)) = initial_size {
+                    resize_pty(pty_master_fd, cols, rows)
+                        .map_err(|error| format!("terminal.create failed to size PTY: {error}"))?;
+                }
                 let mut sessions = self
                     .sessions
                     .lock()
                     .map_err(|_| "terminal session mutex poisoned".to_string())?;
-                sessions.insert(session_id, TerminalSession { child, writer });
+                sessions.insert(
+                    session_id,
+                    TerminalSession {
+                        child,
+                        writer,
+                        #[cfg(unix)]
+                        pty_master_fd,
+                    },
+                );
                 drop(sessions);
 
                 let app_handle = crate::capabilities::window::app_handle();
@@ -100,23 +126,29 @@ impl TerminalCapability for RustPrimaryTerminalCapability {
                     .sessions
                     .lock()
                     .map_err(|_| "terminal session mutex poisoned".to_string())?;
-                if !sessions.contains_key(&id) {
+                let session = sessions
+                    .get(&id)
+                    .ok_or_else(|| format!("terminal.resize unknown session id {id}"))?;
+                #[cfg(unix)]
+                resize_pty(session.pty_master_fd, cols as u16, rows as u16)
+                    .map_err(|error| format!("terminal.resize failed for session {id}: {error}"))?;
+                #[cfg(not(unix))]
+                if session.child.id() == 0 {
                     return Err(format!("terminal.resize unknown session id {id}"));
                 }
 
-                // PTY-specific resize is pending. Keep command contract stable for now.
                 Ok(Some(json!({
                     "id": id,
                     "cols": cols,
                     "rows": rows,
-                    "applied": false,
-                    "note": "PTY resize not yet wired in rust-primary",
+                    "applied": true,
                     "handledBy": "rust-primary"
                 })))
             }
             "terminal.write" => {
                 let id = parse_required_u64(params, "id")?;
                 let data = parse_required_string(params, "data")?;
+                let normalized_input = normalize_terminal_input(data);
 
                 let mut sessions = self
                     .sessions
@@ -128,23 +160,23 @@ impl TerminalCapability for RustPrimaryTerminalCapability {
 
                 session
                     .writer
-                    .write_all(data.as_bytes())
+                    .write_all(normalized_input.as_bytes())
                     .map_err(|error| format!("terminal.write failed for session {id}: {error}"))?;
                 session
                     .writer
                     .flush()
                     .map_err(|error| format!("terminal.write flush failed for session {id}: {error}"))?;
                 if std::env::var("VSCODE_TAURI_INTEGRATION").ok().as_deref() == Some("1") {
-                    let preview = data.replace('\n', "\\n").replace('\r', "\\r");
+                    let preview = normalized_input.replace('\n', "\\n").replace('\r', "\\r");
                     eprintln!(
                         "[host.terminal.write] id={id} bytes={} data={preview}",
-                        data.len()
+                        normalized_input.len()
                     );
                 }
 
                 Ok(Some(json!({
                     "id": id,
-                    "bytesWritten": data.len(),
+                    "bytesWritten": normalized_input.len(),
                     "handledBy": "rust-primary"
                 })))
             }
@@ -176,10 +208,11 @@ fn spawn_terminal_process(
     args: &[String],
     cwd: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
+    initial_size: Option<(u16, u16)>,
 ) -> Result<SpawnedTerminal, String> {
     #[cfg(unix)]
     {
-        spawn_terminal_process_with_pty(shell, args, cwd, env_overrides)
+        spawn_terminal_process_with_pty(shell, args, cwd, env_overrides, initial_size)
     }
 
     #[cfg(not(unix))]
@@ -194,16 +227,26 @@ fn spawn_terminal_process_with_pty(
     args: &[String],
     cwd: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
+    initial_size: Option<(u16, u16)>,
 ) -> Result<SpawnedTerminal, String> {
     let mut master_fd = 0;
     let mut slave_fd = 0;
+    let mut initial_winsize = initial_size.map(|(cols, rows)| winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    });
     let openpty_result = unsafe {
         libc::openpty(
             &mut master_fd,
             &mut slave_fd,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            initial_winsize
+                .as_mut()
+                .map(|winsize| winsize as *mut winsize)
+                .unwrap_or(std::ptr::null_mut()),
         )
     };
     if openpty_result != 0 {
@@ -253,6 +296,7 @@ fn spawn_terminal_process_with_pty(
         reader: Box::new(reader),
         writer: Box::new(master),
         stream: "pty",
+        pty_master_fd: master_fd,
     })
 }
 
@@ -351,6 +395,44 @@ fn parse_optional_string_map(value: Option<&Value>) -> Result<BTreeMap<String, S
     }
 
     Ok(output)
+}
+
+fn normalize_terminal_input(data: &str) -> String {
+    let mut normalized = String::with_capacity(data.len());
+    let mut chars = data.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                normalized.push('\r');
+            } else {
+                normalized.push('\n');
+            }
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
+}
+
+fn parse_optional_u16(value: Option<&Value>) -> Option<u16> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+}
+
+#[cfg(unix)]
+fn resize_pty(fd: std::os::fd::RawFd, cols: u16, rows: u16) -> Result<(), String> {
+    let winsize = winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &winsize) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
 }
 
 fn spawn_terminal_data_pump<R>(
@@ -574,7 +656,7 @@ mod tests {
             reader,
             writer,
             ..
-        } = spawn_terminal_process_with_pty(shell, &[], None, &env_overrides)
+        } = spawn_terminal_process_with_pty(shell, &[], None, &env_overrides, Some((80, 24)))
             .expect("pty-backed shell should spawn");
 
         let (output_tx, output_rx) = std::sync::mpsc::channel();
@@ -629,5 +711,158 @@ mod tests {
             output.contains("~a2~"),
             "interactive PTY shell should expose the inherited environment, got {output:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_spawn_executes_command_sent_with_carriage_return() {
+        let shell = if std::path::Path::new("/bin/zsh").exists() {
+            "/bin/zsh"
+        } else {
+            "/bin/sh"
+        };
+        let mut env_overrides = BTreeMap::new();
+        env_overrides.insert("A".to_string(), "~a2~".to_string());
+
+        let SpawnedTerminal {
+            mut child,
+            reader,
+            writer,
+            ..
+        } = spawn_terminal_process_with_pty(shell, &[], None, &env_overrides, Some((80, 24)))
+            .expect("pty-backed shell should spawn");
+
+        let (output_tx, output_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut output = String::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(size) if size > 0 => {
+                        output.push_str(&String::from_utf8_lossy(&buffer[..size]));
+                        if output.contains("~a2~") {
+                            let _ = output_tx.send(output);
+                            return;
+                        }
+                    }
+                    Ok(_) => {
+                        let _ = output_tx.send(output);
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = output_tx.send(format!("read error: {error}; output={output}"));
+                        return;
+                    }
+                }
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(200));
+        let (write_tx, write_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut writer = writer;
+            let input = normalize_terminal_input("echo \"$A\"\r");
+            let result = writer
+                .write_all(input.as_bytes())
+                .and_then(|_| writer.flush())
+                .map(|_| ());
+            let _ = write_tx.send(result);
+        });
+        let write_result = write_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writing carriage-return terminated input should not block");
+        write_result.expect("writing carriage-return terminated input should succeed");
+
+        let output = output_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("PTY output should arrive for carriage-return terminated input");
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            output.contains("~a2~"),
+            "interactive PTY shell should execute carriage-return terminated input, got {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_and_resize_apply_pty_dimensions() {
+        let capability = RustPrimaryTerminalCapability::new();
+        let create_result = capability
+            .invoke(
+                "terminal.create",
+                &json!({
+                    "shell": if std::path::Path::new("/bin/zsh").exists() { "/bin/zsh" } else { "/bin/sh" },
+                    "cols": 91,
+                    "rows": 33
+                }),
+            )
+            .await
+            .expect("terminal.create should succeed")
+            .expect("terminal.create should return a payload");
+        let session_id = create_result
+            .get("id")
+            .and_then(Value::as_u64)
+            .expect("terminal.create should return an id");
+
+        {
+            let sessions = capability
+                .sessions
+                .lock()
+                .expect("terminal sessions lock should succeed");
+            let session = sessions
+                .get(&session_id)
+                .expect("terminal session should exist after create");
+            let mut current_size = winsize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let result = unsafe { libc::ioctl(session.pty_master_fd, libc::TIOCGWINSZ, &mut current_size) };
+            assert_ne!(result, -1, "initial TIOCGWINSZ should succeed");
+            assert_eq!(current_size.ws_col, 91);
+            assert_eq!(current_size.ws_row, 33);
+        }
+
+        capability
+            .invoke(
+                "terminal.resize",
+                &json!({
+                    "id": session_id,
+                    "cols": 120,
+                    "rows": 40
+                }),
+            )
+            .await
+            .expect("terminal.resize should succeed");
+
+        {
+            let sessions = capability
+                .sessions
+                .lock()
+                .expect("terminal sessions lock should succeed");
+            let session = sessions
+                .get(&session_id)
+                .expect("terminal session should exist after resize");
+            let mut current_size = winsize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let result = unsafe { libc::ioctl(session.pty_master_fd, libc::TIOCGWINSZ, &mut current_size) };
+            assert_ne!(result, -1, "resized TIOCGWINSZ should succeed");
+            assert_eq!(current_size.ws_col, 120);
+            assert_eq!(current_size.ws_row, 40);
+        }
+
+        capability
+            .invoke("terminal.kill", &json!({ "id": session_id }))
+            .await
+            .expect("terminal.kill should succeed");
     }
 }

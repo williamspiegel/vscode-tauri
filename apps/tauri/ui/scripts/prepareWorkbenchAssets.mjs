@@ -14,6 +14,15 @@ const requiredWorkbenchBootstrap = path.join(
 );
 const sourceMinRoot = path.join(repoRoot, 'out-vscode-min', 'vs');
 const fallbackNodeModulePackages = [
+  '@xterm/xterm',
+  '@xterm/addon-clipboard',
+  '@xterm/addon-image',
+  '@xterm/addon-ligatures',
+  '@xterm/addon-progress',
+  '@xterm/addon-search',
+  '@xterm/addon-serialize',
+  '@xterm/addon-unicode11',
+  '@xterm/addon-webgl',
   'vscode-textmate',
   'vscode-oniguruma',
   '@vscode/tree-sitter-wasm'

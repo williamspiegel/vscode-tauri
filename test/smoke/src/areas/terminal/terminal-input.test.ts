@@ -17,14 +17,16 @@ export function setup(options?: { skipSuite: boolean }) {
 			app = this.app as Application;
 			terminal = app.workbench.terminal;
 			settingsEditor = app.workbench.settingsEditor;
-			await setTerminalTestSettings(app);
-		});
-
-		after(async function () {
-			await settingsEditor.clearUserSettings();
 		});
 
 		describe('Auto replies', function () {
+			before(async function () {
+				await setTerminalTestSettings(app);
+			});
+
+			after(async function () {
+				await settingsEditor.clearUserSettings();
+			});
 
 			// HACK: Retry this suite only on Windows because conpty can rarely lead to unexpected behavior which would
 			// cause flakiness. If this does happen, the feature is expected to fail.

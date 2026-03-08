@@ -8,6 +8,15 @@ const repoRoot = path.resolve(uiRoot, '../../..');
 const uiNodeModulesRoot = path.join(uiRoot, 'node_modules');
 const repoNodeModulesRoot = path.join(repoRoot, 'node_modules');
 const fallbackNodeModulePackages = new Set([
+  '@xterm/xterm',
+  '@xterm/addon-clipboard',
+  '@xterm/addon-image',
+  '@xterm/addon-ligatures',
+  '@xterm/addon-progress',
+  '@xterm/addon-search',
+  '@xterm/addon-serialize',
+  '@xterm/addon-unicode11',
+  '@xterm/addon-webgl',
   'vscode-textmate',
   'vscode-oniguruma',
   '@vscode/tree-sitter-wasm'

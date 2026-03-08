@@ -98,7 +98,7 @@ function suiteRequiresNativeTerminalParity(title: string, fn: (this: Mocha.Suite
 				disposables.push(window.onDidWriteTerminalData(e => {
 					if (e.terminal === terminal) {
 						data += e.data;
-						if (data.indexOf('`') !== 0) {
+						if (data.includes('`')) {
 							r();
 						}
 					}

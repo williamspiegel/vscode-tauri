@@ -17,7 +17,7 @@ import { IThemeService } from '../../../../../../platform/theme/common/themeServ
 import { TestColorTheme, TestThemeService } from '../../../../../../platform/theme/test/common/testThemeService.js';
 import { PANEL_BACKGROUND, SIDE_BAR_BACKGROUND } from '../../../../../common/theme.js';
 import { IViewDescriptor, IViewDescriptorService, ViewContainerLocation } from '../../../../../common/views.js';
-import { XtermTerminal } from '../../../browser/xterm/xtermTerminal.js';
+import { withTauriIntersectionObserverDisabled, withTauriOffscreenCanvasDisabled, XtermTerminal } from '../../../browser/xterm/xtermTerminal.js';
 import { ITerminalConfiguration, TERMINAL_VIEW_ID } from '../../../common/terminal.js';
 import { registerColors, TERMINAL_BACKGROUND_COLOR, TERMINAL_CURSOR_BACKGROUND_COLOR, TERMINAL_CURSOR_FOREGROUND_COLOR, TERMINAL_FOREGROUND_COLOR, TERMINAL_INACTIVE_SELECTION_BACKGROUND_COLOR, TERMINAL_SELECTION_BACKGROUND_COLOR, TERMINAL_SELECTION_FOREGROUND_COLOR } from '../../../common/terminalColorRegistry.js';
 import { workbenchInstantiationService } from '../../../../../test/browser/workbenchTestServices.js';
@@ -58,6 +58,8 @@ const defaultTerminalConfig: Partial<ITerminalConfiguration> = {
 
 suite('XtermTerminal', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	const originalDesktopRuntime = process.env.VSCODE_DESKTOP_RUNTIME;
+	const originalOffscreenCanvas = globalThis.OffscreenCanvas;
 
 	let instantiationService: TestInstantiationService;
 	let configurationService: TestConfigurationService;
@@ -72,6 +74,7 @@ suite('XtermTerminal', () => {
 	}
 
 	setup(async () => {
+		delete process.env.VSCODE_DESKTOP_RUNTIME;
 		configurationService = new TestConfigurationService({
 			editor: {
 				fastScrollSensitivity: 2,
@@ -104,9 +107,93 @@ suite('XtermTerminal', () => {
 		TestWebglAddon.isEnabled = false;
 	});
 
+	teardown(() => {
+		if (originalDesktopRuntime === undefined) {
+			delete process.env.VSCODE_DESKTOP_RUNTIME;
+		} else {
+			process.env.VSCODE_DESKTOP_RUNTIME = originalDesktopRuntime;
+		}
+		(globalThis as typeof globalThis & { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = originalOffscreenCanvas;
+	});
+
 	test('should use fallback dimensions of 80x30', () => {
 		strictEqual(xterm.raw.cols, 80);
 		strictEqual(xterm.raw.rows, 30);
+	});
+
+	test('should disable OffscreenCanvas only while constructing xterm in Tauri', () => {
+		process.env.VSCODE_DESKTOP_RUNTIME = 'electrobun';
+		class FakeOffscreenCanvas { }
+		(globalThis as typeof globalThis & { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = FakeOffscreenCanvas as unknown as typeof OffscreenCanvas;
+
+		let seenInCallback: unknown;
+		const result = withTauriOffscreenCanvasDisabled(() => {
+			seenInCallback = globalThis.OffscreenCanvas;
+			return 'ok';
+		});
+
+		strictEqual(result, 'ok');
+		strictEqual(seenInCallback, undefined);
+		strictEqual(globalThis.OffscreenCanvas, FakeOffscreenCanvas as unknown as typeof OffscreenCanvas);
+	});
+
+	test('should patch IntersectionObserver only while opening xterm in Tauri', () => {
+		process.env.VSCODE_DESKTOP_RUNTIME = 'electrobun';
+		class FakeIntersectionObserver {
+			disconnect(): void { }
+			observe(): void { }
+			unobserve(): void { }
+			takeRecords(): IntersectionObserverEntry[] { return []; }
+			root = null;
+			rootMargin = '';
+			thresholds = [];
+		}
+		const targetWindow = globalThis as typeof globalThis & { IntersectionObserver?: typeof IntersectionObserver };
+		targetWindow.IntersectionObserver = FakeIntersectionObserver as unknown as typeof IntersectionObserver;
+
+		let seenInCallback: unknown;
+		const result = withTauriIntersectionObserverDisabled(targetWindow as Window & typeof globalThis, () => {
+			seenInCallback = targetWindow.IntersectionObserver;
+			return 'ok';
+		});
+
+		strictEqual(result, 'ok');
+		strictEqual(typeof seenInCallback, 'function');
+		strictEqual(targetWindow.IntersectionObserver, FakeIntersectionObserver as unknown as typeof IntersectionObserver);
+	});
+
+	test('should disable OffscreenCanvas and IntersectionObserver together for Tauri open', () => {
+		process.env.VSCODE_DESKTOP_RUNTIME = 'electrobun';
+		class FakeOffscreenCanvas { }
+		class FakeIntersectionObserver {
+			disconnect(): void { }
+			observe(): void { }
+			unobserve(): void { }
+			takeRecords(): IntersectionObserverEntry[] { return []; }
+			root = null;
+			rootMargin = '';
+			thresholds = [];
+		}
+		const targetWindow = globalThis as typeof globalThis & {
+			OffscreenCanvas?: typeof OffscreenCanvas;
+			IntersectionObserver?: typeof IntersectionObserver;
+		};
+		targetWindow.OffscreenCanvas = FakeOffscreenCanvas as unknown as typeof OffscreenCanvas;
+		targetWindow.IntersectionObserver = FakeIntersectionObserver as unknown as typeof IntersectionObserver;
+
+		let seenOffscreenCanvas: unknown;
+		let seenIntersectionObserver: unknown;
+		const result = withTauriIntersectionObserverDisabled(targetWindow as Window & typeof globalThis, () => withTauriOffscreenCanvasDisabled(() => {
+			seenOffscreenCanvas = targetWindow.OffscreenCanvas;
+			seenIntersectionObserver = targetWindow.IntersectionObserver;
+			return 'ok';
+		}));
+
+		strictEqual(result, 'ok');
+		strictEqual(seenOffscreenCanvas, undefined);
+		strictEqual(typeof seenIntersectionObserver, 'function');
+		strictEqual(targetWindow.OffscreenCanvas, FakeOffscreenCanvas as unknown as typeof OffscreenCanvas);
+		strictEqual(targetWindow.IntersectionObserver, FakeIntersectionObserver as unknown as typeof IntersectionObserver);
 	});
 
 	suite('getContentsAsText', () => {

@@ -882,8 +882,8 @@ async function createLocalPtyHostLoopbackPort(
     async createProcess(
       shellLaunchConfig: Record<string, unknown> | undefined,
       cwd: string,
-      _cols: number,
-      _rows: number,
+      cols: number,
+      rows: number,
       _unicodeVersion: string,
       env: Record<string, string | null> | undefined,
       _executableEnv?: Record<string, string | null> | undefined,
@@ -925,7 +925,9 @@ async function createLocalPtyHostLoopbackPort(
         shell: executable,
         args,
         cwd,
-        env: mergedEnv
+        env: mergedEnv,
+        cols,
+        rows
       });
       const hostTerminalId = typeof result.id === 'number' ? result.id : undefined;
       const pid = typeof result.pid === 'number' ? result.pid : -1;

@@ -6,6 +6,7 @@
 import * as playwright from '@playwright/test';
 import { ChildProcess, spawn } from 'child_process';
 import { join } from 'path';
+import { URI } from 'vscode-uri';
 import { PlaywrightDriver } from './playwrightDriver';
 import { Logger, measureAndLog } from './logger';
 import type { LaunchOptions } from './code';
@@ -26,16 +27,53 @@ export async function launch(options: LaunchOptions): Promise<{ tauriProcess: Ch
 
 async function launchTauriHost(options: LaunchOptions): Promise<ChildProcess> {
 	const script = join(root, 'scripts', process.platform === 'win32' ? 'code-tauri.bat' : 'code-tauri.sh');
-	const args: string[] = [];
+	const args: string[] = [
+		'--enable-smoke-test-driver',
+		'--skip-release-notes',
+		'--skip-welcome',
+		'--disable-telemetry',
+		'--disable-experiments',
+		'--no-cached-data',
+		'--disable-updates',
+		'--disable-workspace-trust',
+		`--crash-reporter-directory=${options.crashesPath}`,
+		`--logsPath=${options.logsPath}`
+	];
+	if (options.workspacePath) {
+		args.unshift(options.workspacePath);
+	}
+	if (options.useInMemorySecretStorage) {
+		args.push('--use-inmemory-secretstorage');
+	}
+	if (options.userDataDir) {
+		args.push(`--user-data-dir=${options.userDataDir}`);
+	}
+	if (options.extensionsPath) {
+		args.push(`--extensions-dir=${options.extensionsPath}`);
+	}
+	if (options.verbose) {
+		args.push('--verbose');
+	}
+	if (options.extensionDevelopmentPath) {
+		args.push(`--extensionDevelopmentPath=${options.extensionDevelopmentPath}`);
+	}
+	if (options.remote && options.workspacePath) {
+		args[0] = `--${options.workspacePath.endsWith('.code-workspace') ? 'file' : 'folder'}-uri=vscode-remote://test+test/${URI.file(options.workspacePath).path}`;
+		args.push('--enable-proposed-api=vscode.vscode-test-resolver');
+	}
+	if (options.extraArgs) {
+		args.push(...options.extraArgs);
+	}
 	if (options.codePath) {
-		args.push('--build');
+		args.unshift('--build');
 	}
 
 	const env = {
 		...process.env,
 		VSCODE_SKIP_PRELAUNCH: process.env.VSCODE_SKIP_PRELAUNCH ?? '1',
 		VSCODE_TAURI_NO_DEV_SERVER: process.env.VSCODE_TAURI_NO_DEV_SERVER ?? '1',
-		VSCODE_TAURI_NO_WATCH: process.env.VSCODE_TAURI_NO_WATCH ?? '1'
+		VSCODE_TAURI_NO_WATCH: process.env.VSCODE_TAURI_NO_WATCH ?? '1',
+		VSCODE_TAURI_DISABLE_DEFAULT_EXTENSIONS_GALLERY: process.env.VSCODE_TAURI_DISABLE_DEFAULT_EXTENSIONS_GALLERY ?? '1'
 	};
 
 	options.logger.log(`Starting Tauri host with '${script} ${args.join(' ')}'`);

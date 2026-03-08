@@ -3,7 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { deepStrictEqual, strictEqual } from 'assert';
+import { deepStrictEqual, ok, strictEqual } from 'assert';
+import * as dom from '../../../../../base/browser/dom.js';
 import { Event } from '../../../../../base/common/event.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../base/common/network.js';
@@ -56,6 +57,16 @@ const terminalShellTypeContextKey = {
 	set: () => { },
 	reset: () => { },
 	get: () => undefined
+};
+
+type TerminalInstanceTestAccess = TerminalInstance & {
+	_terminalConfigurationService: {
+		_config: {
+			commandsToSkipShell: string[];
+		};
+	};
+	['_writeProcessData'](data: string, cb?: () => void): void;
+	_isVisible: boolean;
 };
 
 class TestTerminalChildProcess extends Disposable implements ITerminalChildProcess {
@@ -191,6 +202,96 @@ suite('Workbench - TerminalInstance', () => {
 
 			// Verify that the task name is preserved
 			strictEqual(taskTerminal.title, 'Test Task Name', 'Task terminal should preserve API-set title');
+		});
+
+		test('should flush process data written before open when the terminal becomes visible', async () => {
+			const instantiationService = workbenchInstantiationService({
+				configurationService: () => new TestConfigurationService({
+					files: {},
+					terminal: {
+						integrated: {
+							fontFamily: 'monospace',
+							scrollback: 1000,
+							fastScrollSensitivity: 2,
+							mouseWheelScrollSensitivity: 1,
+							commandsToSkipShell: [],
+							unicodeVersion: '6',
+							shellIntegration: {
+								enabled: false
+							}
+						}
+					},
+				})
+			}, store);
+			instantiationService.stub(IViewDescriptorService, new TestViewDescriptorService());
+			instantiationService.stub(IEnvironmentVariableService, store.add(instantiationService.createInstance(EnvironmentVariableService)));
+			instantiationService.stub(ITerminalInstanceService, store.add(new TestTerminalInstanceService()));
+			instantiationService.stub(ITerminalService, { setNextCommandId: async () => { } } as Partial<ITerminalService>);
+			const instance = store.add(instantiationService.createInstance(TerminalInstance, terminalShellTypeContextKey, {}));
+			const instanceAccessor = instance as TerminalInstanceTestAccess;
+			await instance.xtermReadyPromise;
+			instanceAccessor._terminalConfigurationService._config.commandsToSkipShell = [];
+
+			instanceAccessor._writeProcessData('hello from hidden terminal');
+
+			const container = document.createElement('div');
+			container.style.width = '800px';
+			container.style.height = '600px';
+			document.body.appendChild(container);
+			store.add({
+				dispose: () => container.remove()
+			});
+
+			instance.attachToElement(container);
+			instance.layout(new dom.Dimension(800, 600));
+			instance.setVisible(true);
+
+			await new Promise(resolve => setTimeout(resolve, 50));
+
+			const firstLine = instance.xterm?.raw.buffer.active.getLine(0)?.translateToString(true) ?? '';
+			ok(firstLine.includes('hello from hidden terminal'));
+		});
+
+		test('should open xterm when a visible instance is attached after xterm creation', async () => {
+			const instantiationService = workbenchInstantiationService({
+				configurationService: () => new TestConfigurationService({
+					files: {},
+					terminal: {
+						integrated: {
+							fontFamily: 'monospace',
+							scrollback: 1000,
+							fastScrollSensitivity: 2,
+							mouseWheelScrollSensitivity: 1,
+							commandsToSkipShell: [],
+							unicodeVersion: '6',
+							shellIntegration: {
+								enabled: false
+							}
+						}
+					},
+				})
+			}, store);
+			instantiationService.stub(IViewDescriptorService, new TestViewDescriptorService());
+			instantiationService.stub(IEnvironmentVariableService, store.add(instantiationService.createInstance(EnvironmentVariableService)));
+			instantiationService.stub(ITerminalInstanceService, store.add(new TestTerminalInstanceService()));
+			instantiationService.stub(ITerminalService, { setNextCommandId: async () => { } } as Partial<ITerminalService>);
+			const instance = store.add(instantiationService.createInstance(TerminalInstance, terminalShellTypeContextKey, {}));
+			const instanceAccessor = instance as TerminalInstanceTestAccess;
+			await instance.xtermReadyPromise;
+
+			instanceAccessor._isVisible = true;
+
+			const container = document.createElement('div');
+			container.style.width = '800px';
+			container.style.height = '600px';
+			document.body.appendChild(container);
+			store.add({
+				dispose: () => container.remove()
+			});
+
+			instance.attachToElement(container);
+
+			ok(instance.xterm?.raw.element);
 		});
 	});
 	suite('parseExitResult', () => {
