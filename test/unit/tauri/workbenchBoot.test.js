@@ -267,7 +267,7 @@ suite('Tauri Workbench Boot', () => {
 		assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/?folder=%2Ftmp%2Freuse-me');
 	});
 
-		test('workspaceProvider.open encodes workspace target and payload for new window flow', async () => {
+	test('workspaceProvider.open encodes workspace target and payload for new window flow', async () => {
 		const booted = await boot({
 			href: 'http://127.0.0.1:1420/'
 		});
@@ -287,28 +287,44 @@ suite('Tauri Workbench Boot', () => {
 		assert.strictEqual(opened, true);
 		assert.match(booted.getOpenedUrl(), /\?workspace=file%3A%2F%2F%2Ftmp%2Fdemo\.code-workspace/);
 		assert.match(booted.getOpenedUrl(), /&payload=%7B%22source%22%3A%22unit-test%22%7D$/);
-			assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/');
+		assert.strictEqual(booted.getLocationHref(), 'http://127.0.0.1:1420/');
+	});
+
+	test('open-folder command preserves Windows drive-letter paths as file URIs', async () => {
+		const { createOptions, getLocationHref } = await boot({
+			href: 'http://127.0.0.1:1420/',
+			desktopChannelCall: async () => ({ canceled: false, filePath: 'C:\\Users\\tester\\project' })
 		});
 
-		test('workspaceProvider.open falls back to current window when popup is blocked', async () => {
-			const booted = await boot({
-				href: 'http://127.0.0.1:1420/',
-				openReturnsNull: true
-			});
-			const workspaceProvider = booted.createOptions.workspaceProvider;
+		const openFolderCommand = createOptions.commands.find(command => command.id === 'workbench.action.files.openFolder');
+		assert.ok(openFolderCommand, 'open-folder command should be registered');
+		await openFolderCommand.handler();
 
-			const opened = await workspaceProvider.open({
-				folderUri: {
-					scheme: 'file',
-					authority: '',
-					path: '/tmp/blocked-popup'
-				}
-			}, { reuse: false });
+		assert.strictEqual(
+			getLocationHref(),
+			'http://127.0.0.1:1420/?folder=file%3A%2F%2F%2FC%3A%2FUsers%2Ftester%2Fproject'
+		);
+	});
 
-			assert.strictEqual(opened, true);
-			assert.match(booted.getOpenedUrl(), /\?folder=file%3A%2F%2F%2Ftmp%2Fblocked-popup$/);
-			assert.match(booted.getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fblocked-popup$/);
+	test('workspaceProvider.open falls back to current window when popup is blocked', async () => {
+		const booted = await boot({
+			href: 'http://127.0.0.1:1420/',
+			openReturnsNull: true
 		});
+		const workspaceProvider = booted.createOptions.workspaceProvider;
+
+		const opened = await workspaceProvider.open({
+			folderUri: {
+				scheme: 'file',
+				authority: '',
+				path: '/tmp/blocked-popup'
+			}
+		}, { reuse: false });
+
+		assert.strictEqual(opened, true);
+		assert.match(booted.getOpenedUrl(), /\?folder=file%3A%2F%2F%2Ftmp%2Fblocked-popup$/);
+		assert.match(booted.getLocationHref(), /\?folder=file%3A%2F%2F%2Ftmp%2Fblocked-popup$/);
+	});
 
 		test('workspaceProvider.open encodes empty-window targets when payload is present', async () => {
 			const booted = await boot({

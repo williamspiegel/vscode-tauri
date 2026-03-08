@@ -133,4 +133,38 @@ suite('ExtHostDocumentsAndEditors', () => {
 		}
 	});
 
+	test('does not expose the sole visible editor when active editor becomes null', () => {
+		const resource = URI.parse('test:/file.txt');
+
+		editors.$acceptDocumentsAndEditorsDelta({
+			addedDocuments: [{
+				isDirty: false,
+				languageId: 'plaintext',
+				uri: resource,
+				versionId: 1,
+				lines: ['hello'],
+				EOL: '\n',
+				encoding: 'utf8'
+			}],
+			addedEditors: [{
+				id: 'editor-1',
+				documentUri: resource,
+				selections: [],
+				options: { tabSize: 4, indentSize: 4, insertSpaces: true, cursorStyle: 1, lineNumbers: 1 },
+				visibleRanges: [],
+				editorPosition: 1
+			}],
+			newActiveEditor: 'editor-1'
+		});
+
+		assert.strictEqual(editors.activeEditor()?.document.uri.toString(), resource.toString());
+
+		editors.$acceptDocumentsAndEditorsDelta({
+			newActiveEditor: null
+		});
+
+		assert.strictEqual(editors.activeEditor(), undefined);
+		assert.strictEqual(editors.activeEditor(true), undefined);
+	});
+
 });

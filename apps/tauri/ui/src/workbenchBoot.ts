@@ -349,12 +349,9 @@ function uriComponentsFromConfig(value: unknown): UriComponents | undefined {
 }
 
 function parseWorkspaceUri(value: string): UriComponents {
-  if (value.startsWith('/')) {
-    return {
-      scheme: 'file',
-      authority: '',
-      path: value
-    };
+  const nativeFilePath = parseNativeFilePath(value);
+  if (nativeFilePath) {
+    return nativeFilePath;
   }
 
   try {
@@ -367,13 +364,53 @@ function parseWorkspaceUri(value: string): UriComponents {
       fragment: parsed.hash ? parsed.hash.slice(1) : undefined
     };
   } catch {
-    const absolute = value.startsWith('/') ? value : `/${value}`;
+    const absolute = value.startsWith('/') ? value : `/${value.replace(/\\/g, '/')}`;
     return {
       scheme: 'file',
       authority: '',
       path: absolute
     };
   }
+}
+
+function parseNativeFilePath(value: string): UriComponents | undefined {
+  if (value.startsWith('/')) {
+    return {
+      scheme: 'file',
+      authority: '',
+      path: value
+    };
+  }
+
+  if (/^[A-Za-z]:[\\/]/.test(value)) {
+    return {
+      scheme: 'file',
+      authority: '',
+      path: `/${value.replace(/\\/g, '/')}`
+    };
+  }
+
+  if (value.startsWith('\\\\') || value.startsWith('//')) {
+    const normalized = value.replace(/\\/g, '/').replace(/^\/+/, '');
+    const firstSlashIndex = normalized.indexOf('/');
+    const authority = firstSlashIndex === -1 ? normalized : normalized.slice(0, firstSlashIndex);
+    const remainder = firstSlashIndex === -1 ? '/' : `/${normalized.slice(firstSlashIndex + 1)}`;
+    if (!authority) {
+      return {
+        scheme: 'file',
+        authority: '',
+        path: remainder
+      };
+    }
+
+    return {
+      scheme: 'file',
+      authority,
+      path: remainder
+    };
+  }
+
+  return undefined;
 }
 
 function createTargetUrl(workspace: WorkspaceToOpen, payload?: object): string | undefined {

@@ -450,5 +450,24 @@ suite('File Service', () => {
 		assert.strictEqual(bytes.byteLength, 0);
 	});
 
+	test('disk file system provider client preserves cancellation errors for readFileStream', async () => {
+		const client = disposables.add(new DiskFileSystemProviderClient({
+			call() {
+				throw new Error('Unexpected call');
+			},
+			listen(command) {
+				assert.strictEqual(command, 'readFileStream');
+				return Event.None;
+			}
+		}, {}));
+
+		const cts = new CancellationTokenSource();
+		const stream = client.readFileStream(URI.file('/tmp/cancel.bin'), Object.create(null), cts.token);
+		const consumed = consumeStream(stream, chunk => chunk[0]);
+		cts.cancel();
+
+		await assert.rejects(consumed);
+	});
+
 	ensureNoDisposablesAreLeakedInTestSuite();
 });

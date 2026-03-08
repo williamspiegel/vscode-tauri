@@ -6,6 +6,7 @@
 import { decodeBase64, VSBuffer } from '../../../base/common/buffer.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { toErrorMessage } from '../../../base/common/errorMessage.js';
+import { canceled } from '../../../base/common/errors.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { newWriteableStream, ReadableStreamEventPayload, ReadableStreamEvents } from '../../../base/common/stream.js';
@@ -447,6 +448,7 @@ export class DiskFileSystemProviderClient extends Disposable implements
 					return;
 				}
 				if (token.isCancellationRequested || isCancellationLikeError(error)) {
+					stream.error(canceled());
 					stream.end();
 					disposables.dispose();
 					return;
@@ -463,6 +465,7 @@ export class DiskFileSystemProviderClient extends Disposable implements
 		// Support cancellation
 		disposables.add(token.onCancellationRequested(() => {
 			streamEnded = true;
+			stream.error(canceled());
 			stream.end();
 
 			// Ensure to dispose the listener upon cancellation. This will
