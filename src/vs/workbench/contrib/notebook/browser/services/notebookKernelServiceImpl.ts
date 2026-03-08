@@ -311,7 +311,7 @@ export class NotebookKernelService extends Disposable implements INotebookKernel
 		this._onDidChangeNotebookAffinity.fire();
 
 		if (process.env.VSCODE_TAURI_INTEGRATION === '1' && preference === 2 /* vscode.NotebookControllerPriority.Preferred */) {
-			const notebookModel = this._notebookService.getNotebookTextModels().find(candidate => candidate.uri.toString() === notebook.toString())
+			const notebookModel = [...this._notebookService.getNotebookTextModels()].find(candidate => candidate.uri.toString() === notebook.toString())
 				?? this._notebookService.listNotebookDocuments().find(candidate => candidate.uri.toString() === notebook.toString())
 				?? { uri: notebook, notebookType: kernel.viewType };
 			this.selectKernelForNotebook(kernel, notebookModel);

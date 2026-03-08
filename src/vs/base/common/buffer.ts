@@ -52,7 +52,7 @@ export class VSBuffer {
 			// Create a zero-copy Buffer wrapper around the ArrayBuffer pointed to by the Uint8Array
 			actual = Buffer.from(actual.buffer, actual.byteOffset, actual.byteLength);
 		}
-		return new VSBuffer(actual);
+		return new VSBuffer(actual as Uint8Array);
 	}
 
 	/**

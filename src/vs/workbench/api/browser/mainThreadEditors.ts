@@ -349,8 +349,12 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 
 			for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
 				const candidateCodeEditor = getCodeEditor(visibleEditorPane.getControl());
-				const candidateModel = candidateCodeEditor?.getModel();
-				if (!candidateCodeEditor || !isITextModel(candidateModel) || !this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
+				if (!candidateCodeEditor) {
+					continue;
+				}
+
+				const candidateModel = candidateCodeEditor.getModel();
+				if (!candidateModel || !isITextModel(candidateModel) || !this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
 					continue;
 				}
 
@@ -437,18 +441,6 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 						return untrackedActiveCodeEditorId;
 					}
 				}
-
-				const requestedNotebook = parseNotebookCellUri(resource)?.notebook;
-				const activeNotebook = parseNotebookCellUri(activeModel.uri)?.notebook;
-				if (requestedNotebook && activeNotebook && this._uriIdentityService.extUri.isEqual(activeNotebook, requestedNotebook)) {
-					if (activeCodeEditorId) {
-						return activeCodeEditorId;
-					}
-					const adoptedActiveNotebookEditorId = this._editorLocator.ensureTextEditorForCodeEditor(activeCodeEditor);
-					if (adoptedActiveNotebookEditorId) {
-						return adoptedActiveNotebookEditorId;
-					}
-				}
 			}
 
 			for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
@@ -458,8 +450,12 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 				}
 
 				const candidateCodeEditor = getCodeEditor(visibleEditorPane.getControl());
-				const candidateModel = candidateCodeEditor?.getModel();
-				if (!candidateCodeEditor || !isITextModel(candidateModel) || !this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
+				if (!candidateCodeEditor) {
+					continue;
+				}
+
+				const candidateModel = candidateCodeEditor.getModel();
+				if (!candidateModel || !isITextModel(candidateModel) || !this._uriIdentityService.extUri.isEqual(candidateModel.uri, resource)) {
 					continue;
 				}
 
@@ -527,24 +523,6 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 		return undefined;
 	}
 
-	private async _waitForNotebookCellOwner(resource: URI): Promise<void> {
-		for (let attempt = 0; attempt < MainThreadTextEditors._notebookCellEditorSettleAttempts; attempt++) {
-			const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
-			if (activeNotebookEditor?.textModel && this._uriIdentityService.extUri.isEqual(activeNotebookEditor.textModel.uri, resource)) {
-				return;
-			}
-
-			for (const visibleEditorPane of this._editorService.visibleEditorPanes) {
-				const visibleNotebookEditor = getNotebookEditorFromEditorPane(visibleEditorPane);
-				if (visibleNotebookEditor?.textModel && this._uriIdentityService.extUri.isEqual(visibleNotebookEditor.textModel.uri, resource)) {
-					return;
-				}
-			}
-
-			await timeout(50);
-		}
-	}
-
 	private async _focusNotebookCellOwner(ownerResource: URI, cellResource: URI): Promise<void> {
 		if (this._uriIdentityService.extUri.isEqual(parseNotebookCellUri(cellResource)?.notebook ?? cellResource, ownerResource)) {
 			await this._focusNotebookCellEditorInPane(this._editorService.activeEditorPane, cellResource);
@@ -554,26 +532,6 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 				}
 				await this._focusNotebookCellEditorInPane(visibleEditorPane, cellResource);
 			}
-		}
-	}
-
-	private async _waitForActiveNotebookCellOwner(resource: URI): Promise<void> {
-		for (let attempt = 0; attempt < MainThreadTextEditors._notebookCellEditorSettleAttempts; attempt++) {
-			const activeNotebookEditor = getNotebookEditorFromEditorPane(this._editorService.activeEditorPane);
-			if (activeNotebookEditor?.textModel && this._uriIdentityService.extUri.isEqual(activeNotebookEditor.textModel.uri, resource)) {
-				return;
-			}
-
-			const activeCodeEditor = getCodeEditor(this._editorService.activeTextEditorControl);
-			const activeModel = activeCodeEditor?.getModel();
-			if (activeModel && isITextModel(activeModel)) {
-				const activeNotebook = parseNotebookCellUri(activeModel.uri)?.notebook;
-				if (activeNotebook && this._uriIdentityService.extUri.isEqual(activeNotebook, resource)) {
-					return;
-				}
-			}
-
-			await timeout(50);
 		}
 	}
 

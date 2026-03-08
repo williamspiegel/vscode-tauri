@@ -28,10 +28,10 @@ import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { ActiveGroupEditorsByMostRecentlyUsedQuickAccess } from './editorQuickAccess.js';
-import { SideBySideEditor } from './sideBySideEditor.js';
+import { SideBySideEditor as SideBySideEditorPane } from './sideBySideEditor.js';
 import { TextDiffEditor } from './textDiffEditor.js';
 import { ActiveEditorCanSplitInGroupContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupLockedContext, ActiveEditorStickyContext, EditorPartModalContext, EditorPartModalMaximizedContext, EditorPartModalNavigationContext, IsSessionsWindowContext, MultipleEditorGroupsContext, SideBySideEditorActiveContext, TextCompareEditorActiveContext } from '../../../common/contextkeys.js';
-import { CloseDirection, EditorInputCapabilities, EditorsOrder, IEditorPane, IResourceDiffEditorInput, IUntitledTextResourceEditorInput, isEditorInputWithOptionsAndGroup } from '../../../common/editor.js';
+import { CloseDirection, EditorInputCapabilities, EditorResourceAccessor, EditorsOrder, IEditorPane, IResourceDiffEditorInput, IUntitledTextResourceEditorInput, isEditorInputWithOptionsAndGroup, SideBySideEditor } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { SideBySideEditorInput } from '../../../common/editor/sideBySideEditorInput.js';
 import { EditorGroupColumn, columnToEditorGroup } from '../../../services/editor/common/editorGroupColumn.js';
@@ -475,7 +475,7 @@ function registerEditorGroupsLayoutCommands(): void {
 					const editorsToClose = group.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
 					if (editorsToClose.length > 0) {
 						try {
-							await group.closeEditors(editorsToClose, { preserveFocus: true });
+							await group.closeEditors([...editorsToClose], { preserveFocus: true });
 						} catch {
 							// Continue into the stronger closeAll path below.
 						}
@@ -638,7 +638,8 @@ function registerOpenEditorAPICommands(): void {
 			if (typeof columnOrOptions === 'number') {
 				normalizedColumnAndOptions = [columnOrOptions, undefined];
 			} else if (columnOrOptions && !Array.isArray(columnOrOptions) && typeof columnOrOptions === 'object') {
-				normalizedColumnAndOptions = [columnOrOptions.viewColumn, columnOrOptions];
+				const editorOptionsWithColumn = columnOrOptions as ITextEditorOptions & { viewColumn?: EditorGroupColumn };
+				normalizedColumnAndOptions = [editorOptionsWithColumn.viewColumn, editorOptionsWithColumn];
 			}
 
 			await accessor.get(ICommandService).executeCommand(API_OPEN_EDITOR_COMMAND_ID, resourceArg, normalizedColumnAndOptions, label);
@@ -1389,7 +1390,7 @@ function registerSplitEditorInGroupCommands(): void {
 
 		let options: IEditorOptions | undefined = undefined;
 		const activeEditorPane = group.activeEditorPane;
-		if (activeEditorPane instanceof SideBySideEditor && group.activeEditor === editor) {
+		if (activeEditorPane instanceof SideBySideEditorPane && group.activeEditor === editor) {
 			for (const pane of [activeEditorPane.getPrimaryEditorPane(), activeEditorPane.getSecondaryEditorPane()]) {
 				if (pane?.hasFocus()) {
 					options = { viewState: pane.getViewState() };
@@ -1463,7 +1464,7 @@ function registerSplitEditorInGroupCommands(): void {
 		}
 		async run(accessor: ServicesAccessor): Promise<void> {
 			const configurationService = accessor.get(IConfigurationService);
-			const currentSetting = configurationService.getValue<unknown>(SideBySideEditor.SIDE_BY_SIDE_LAYOUT_SETTING);
+			const currentSetting = configurationService.getValue<unknown>(SideBySideEditorPane.SIDE_BY_SIDE_LAYOUT_SETTING);
 
 			let newSetting: 'vertical' | 'horizontal';
 			if (currentSetting !== 'horizontal') {
@@ -1472,7 +1473,7 @@ function registerSplitEditorInGroupCommands(): void {
 				newSetting = 'vertical';
 			}
 
-			return configurationService.updateValue(SideBySideEditor.SIDE_BY_SIDE_LAYOUT_SETTING, newSetting);
+			return configurationService.updateValue(SideBySideEditorPane.SIDE_BY_SIDE_LAYOUT_SETTING, newSetting);
 		}
 	});
 }
@@ -1494,7 +1495,7 @@ function registerFocusSideEditorsCommands(): void {
 			const commandService = accessor.get(ICommandService);
 
 			const activeEditorPane = editorService.activeEditorPane;
-			if (activeEditorPane instanceof SideBySideEditor) {
+			if (activeEditorPane instanceof SideBySideEditorPane) {
 				activeEditorPane.getSecondaryEditorPane()?.focus();
 			} else if (activeEditorPane instanceof TextDiffEditor) {
 				await commandService.executeCommand(DIFF_FOCUS_SECONDARY_SIDE);
@@ -1517,7 +1518,7 @@ function registerFocusSideEditorsCommands(): void {
 			const commandService = accessor.get(ICommandService);
 
 			const activeEditorPane = editorService.activeEditorPane;
-			if (activeEditorPane instanceof SideBySideEditor) {
+			if (activeEditorPane instanceof SideBySideEditorPane) {
 				activeEditorPane.getPrimaryEditorPane()?.focus();
 			} else if (activeEditorPane instanceof TextDiffEditor) {
 				await commandService.executeCommand(DIFF_FOCUS_PRIMARY_SIDE);
@@ -1540,7 +1541,7 @@ function registerFocusSideEditorsCommands(): void {
 			const commandService = accessor.get(ICommandService);
 
 			const activeEditorPane = editorService.activeEditorPane;
-			if (activeEditorPane instanceof SideBySideEditor) {
+			if (activeEditorPane instanceof SideBySideEditorPane) {
 				if (activeEditorPane.getPrimaryEditorPane()?.hasFocus()) {
 					activeEditorPane.getSecondaryEditorPane()?.focus();
 				} else {

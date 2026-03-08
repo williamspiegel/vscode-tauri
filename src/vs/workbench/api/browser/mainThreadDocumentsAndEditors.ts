@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Event } from '../../../base/common/event.js';
+import { Schemas } from '../../../base/common/network.js';
 import { combinedDisposable, DisposableStore, DisposableMap } from '../../../base/common/lifecycle.js';
 import { ICodeEditor, isCodeEditor, isDiffEditor, IActiveCodeEditor, getCodeEditor } from '../../../editor/browser/editorBrowser.js';
 import { ICodeEditorService } from '../../../editor/browser/services/codeEditorService.js';
@@ -21,7 +22,7 @@ import { AbstractTextEditor } from '../../browser/parts/editor/textEditor.js';
 import { EditorResourceAccessor, IEditorPane, SideBySideEditor } from '../../common/editor.js';
 import { EditorGroupColumn, editorGroupToColumn } from '../../services/editor/common/editorGroupColumn.js';
 import { IEditorService } from '../../services/editor/common/editorService.js';
-import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
+import { IEditorGroup, IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 import { ITextFileService } from '../../services/textfile/common/textfiles.js';
 import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
 import { IWorkingCopyFileService } from '../../services/workingCopy/common/workingCopyFileService.js';

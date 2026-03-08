@@ -113,7 +113,7 @@ suite('ExtHostDocumentsAndEditors', () => {
 					id: 'editor-1',
 					documentUri: resource,
 					selections: [],
-					options: { tabSize: 4, indentSize: 4, insertSpaces: true, cursorStyle: 1, lineNumbers: 1 },
+					options: { tabSize: 4, indentSize: 4, originalIndentSize: 'tabSize', insertSpaces: true, cursorStyle: 1, lineNumbers: 1 },
 					visibleRanges: [],
 					editorPosition: 1
 				}],
@@ -150,7 +150,7 @@ suite('ExtHostDocumentsAndEditors', () => {
 				id: 'editor-1',
 				documentUri: resource,
 				selections: [],
-				options: { tabSize: 4, indentSize: 4, insertSpaces: true, cursorStyle: 1, lineNumbers: 1 },
+				options: { tabSize: 4, indentSize: 4, originalIndentSize: 'tabSize', insertSpaces: true, cursorStyle: 1, lineNumbers: 1 },
 				visibleRanges: [],
 				editorPosition: 1
 			}],

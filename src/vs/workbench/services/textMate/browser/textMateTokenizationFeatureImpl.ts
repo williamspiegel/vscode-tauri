@@ -380,7 +380,8 @@ export class TextMateTokenizationFeature extends Disposable implements ITextMate
 				const vscodeOniguruma = loadedModule ?? (globalThis as { onig?: typeof import('vscode-oniguruma') }).onig;
 				if (!vscodeOniguruma?.loadWASM) {
 					const loadedKeys = loadedModule ? Object.keys(loadedModule as object) : [];
-					const loadedDefaultKeys = (loadedModule as { default?: object } | undefined)?.default ? Object.keys((loadedModule as { default: object }).default) : [];
+					const loadedDefaultModule = (loadedModule as unknown as { default?: object } | undefined)?.default;
+					const loadedDefaultKeys = loadedDefaultModule ? Object.keys(loadedDefaultModule) : [];
 					const globalOnig = (globalThis as { onig?: object }).onig;
 					const globalOnigKeys = globalOnig ? Object.keys(globalOnig) : [];
 					throw new Error(`vscode-oniguruma did not provide loadWASM (loadedType=${typeof loadedModule}, loadedKeys=${loadedKeys.join(',')}, loadedDefaultKeys=${loadedDefaultKeys.join(',')}, globalOnigType=${typeof globalOnig}, globalOnigKeys=${globalOnigKeys.join(',')})`);

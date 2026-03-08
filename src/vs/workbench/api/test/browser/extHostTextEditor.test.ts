@@ -77,10 +77,13 @@ suite('ExtHostTextEditor', () => {
 									endLineNumber: 1,
 									endColumn: 1
 								},
+								rangeOffset: 0,
 								rangeLength: 0,
 								text: 'This is a placeholder snippet'
 							}],
 							eol: '\n',
+							isRedoing: false,
+							isUndoing: false,
 							versionId: 2
 						});
 						testDoc._acceptIsDirty(true);

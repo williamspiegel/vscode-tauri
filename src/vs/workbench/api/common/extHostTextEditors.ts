@@ -115,7 +115,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 
 			const activeEditor = this._extHostDocumentsAndEditors.activeEditor(true);
 			const activeEditorResource = this._getEditorResource(activeEditor);
-			if (activeEditorResource && this._matchesRequestedResource(activeEditorResource, document.uri)) {
+			if (activeEditor && activeEditorResource && this._matchesRequestedResource(activeEditorResource, document.uri)) {
 				return activeEditor.value;
 			}
 		}

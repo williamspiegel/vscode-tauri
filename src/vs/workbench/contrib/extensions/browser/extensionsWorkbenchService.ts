@@ -2997,7 +2997,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 				Extension,
 				ext => this.getExtensionState(ext),
 				ext => this.getRuntimeState(ext),
-				server,
+				server ?? undefined,
 				localExtension,
 				undefined,
 				undefined

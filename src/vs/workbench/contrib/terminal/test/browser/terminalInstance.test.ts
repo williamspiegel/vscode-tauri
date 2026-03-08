@@ -59,15 +59,39 @@ const terminalShellTypeContextKey = {
 	get: () => undefined
 };
 
-type TerminalInstanceTestAccess = TerminalInstance & {
-	_terminalConfigurationService: {
+function asTerminalInstanceTestAccess(instance: TerminalInstance): {
+	terminalConfigurationService: {
 		_config: {
 			commandsToSkipShell: string[];
 		};
 	};
-	['_writeProcessData'](data: string, cb?: () => void): void;
-	_isVisible: boolean;
-};
+	writeProcessData(data: string, cb?: () => void): void;
+	isVisible: boolean;
+} {
+	const rawInstance = instance as unknown as {
+		_terminalConfigurationService: {
+			_config: {
+				commandsToSkipShell: string[];
+			};
+		};
+		_isVisible: boolean;
+	} & Record<'_writeProcessData', (data: string, cb?: () => void) => void>;
+
+	return {
+		get terminalConfigurationService() {
+			return rawInstance._terminalConfigurationService;
+		},
+		writeProcessData(data: string, cb?: () => void) {
+			rawInstance._writeProcessData(data, cb);
+		},
+		get isVisible() {
+			return rawInstance._isVisible;
+		},
+		set isVisible(value: boolean) {
+			rawInstance._isVisible = value;
+		}
+	};
+}
 
 class TestTerminalChildProcess extends Disposable implements ITerminalChildProcess {
 	id: number = 0;
@@ -228,11 +252,11 @@ suite('Workbench - TerminalInstance', () => {
 			instantiationService.stub(ITerminalInstanceService, store.add(new TestTerminalInstanceService()));
 			instantiationService.stub(ITerminalService, { setNextCommandId: async () => { } } as Partial<ITerminalService>);
 			const instance = store.add(instantiationService.createInstance(TerminalInstance, terminalShellTypeContextKey, {}));
-			const instanceAccessor = instance as TerminalInstanceTestAccess;
+			const instanceAccessor = asTerminalInstanceTestAccess(instance);
 			await instance.xtermReadyPromise;
-			instanceAccessor._terminalConfigurationService._config.commandsToSkipShell = [];
+			instanceAccessor.terminalConfigurationService._config.commandsToSkipShell = [];
 
-			instanceAccessor._writeProcessData('hello from hidden terminal');
+			instanceAccessor.writeProcessData('hello from hidden terminal');
 
 			const container = document.createElement('div');
 			container.style.width = '800px';
@@ -276,10 +300,10 @@ suite('Workbench - TerminalInstance', () => {
 			instantiationService.stub(ITerminalInstanceService, store.add(new TestTerminalInstanceService()));
 			instantiationService.stub(ITerminalService, { setNextCommandId: async () => { } } as Partial<ITerminalService>);
 			const instance = store.add(instantiationService.createInstance(TerminalInstance, terminalShellTypeContextKey, {}));
-			const instanceAccessor = instance as TerminalInstanceTestAccess;
+			const instanceAccessor = asTerminalInstanceTestAccess(instance);
 			await instance.xtermReadyPromise;
 
-			instanceAccessor._isVisible = true;
+			instanceAccessor.isVisible = true;
 
 			const container = document.createElement('div');
 			container.style.width = '800px';

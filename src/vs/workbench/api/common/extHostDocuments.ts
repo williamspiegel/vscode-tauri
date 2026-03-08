@@ -12,7 +12,6 @@ import { ExtHostDocumentData, setWordDefinitionFor } from './extHostDocumentData
 import { ExtHostDocumentsAndEditors } from './extHostDocumentsAndEditors.js';
 import * as TypeConverters from './extHostTypeConverters.js';
 import type * as vscode from 'vscode';
-import { assertReturnsDefined } from '../../../base/common/types.js';
 import { deepFreeze } from '../../../base/common/objects.js';
 import { TextDocumentChangeReason } from './extHostTypes.js';
 import { ISerializedModelContentChangedEvent } from '../../../editor/common/textModelEvents.js';
@@ -193,8 +192,18 @@ export class ExtHostDocuments implements ExtHostDocumentsShape {
 	}
 
 	private _getDocumentData(uri: URI): ExtHostDocumentData | undefined {
-		return this._documentsAndEditors.getDocument(uri)
-			?? this._documentsAndEditors.allDocuments().find(document => isEqual(document.uri, uri));
+		const existing = this._documentsAndEditors.getDocument(uri);
+		if (existing) {
+			return existing;
+		}
+
+		for (const document of this._documentsAndEditors.allDocuments()) {
+			if (isEqual(document.document.uri, uri)) {
+				return document;
+			}
+		}
+
+		return undefined;
 	}
 
 	private async _forceDocumentSync(uri: URI): Promise<ExtHostDocumentData | undefined> {

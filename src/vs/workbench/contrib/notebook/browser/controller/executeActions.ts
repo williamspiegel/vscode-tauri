@@ -31,6 +31,7 @@ import { INotebookExecutionStateService } from '../../common/notebookExecutionSt
 import { INotebookKernelService } from '../../common/notebookKernelService.js';
 import { INotebookService } from '../../common/notebookService.js';
 import { ICellRange } from '../../common/notebookRange.js';
+import type { NotebookCellTextModel } from '../../common/model/notebookCellTextModel.js';
 import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { INotebookEditorService } from '../services/notebookEditorService.js';
@@ -140,7 +141,7 @@ async function handleAutoRevealBestEffort(cell: ICellViewModel, notebookEditor: 
 
 async function revealDetachedCellBestEffort(notebookEditorService: INotebookEditorService, notebookUri: URI, cellHandle: number): Promise<void> {
 	for (let attempt = 0; attempt < 20; attempt++) {
-		const candidateEditors = notebookEditorService.listNotebookEditors().filter(editor =>
+		const candidateEditors = notebookEditorService.listNotebookEditors().filter((editor): editor is IActiveNotebookEditor =>
 			editor.hasModel() && isEqual(editor.textModel.uri, notebookUri)
 		);
 		const notebookEditor = candidateEditors.find(editor => editor.isVisible) ?? candidateEditors[0];
@@ -170,6 +171,14 @@ function isDetachedNotebookExecutionContext(context: INotebookCommandContext | I
 
 function isDetachedNotebookActionContext(context: INotebookActionContext | DetachedNotebookActionContext): context is DetachedNotebookActionContext {
 	return 'detachedNotebookModel' in context;
+}
+
+function isNotebookActionContext(context?: unknown): context is INotebookActionContext {
+	return !!context && !!(context as INotebookActionContext).notebookEditor;
+}
+
+function asNotebookCellTextModels(cells: readonly INotebookTextModel['cells'][number][]): Iterable<NotebookCellTextModel> {
+	return cells as Iterable<NotebookCellTextModel>;
 }
 
 function getDetachedNotebookModel(accessor: ServicesAccessor, context: UriComponents | URI | undefined): INotebookTextModel | undefined {
@@ -362,7 +371,7 @@ registerAction2(class ExecuteNotebookAction extends NotebookAction {
 	}
 
 	override async run(accessor: ServicesAccessor, context?: INotebookActionContext | UriComponents): Promise<void> {
-		const detachedContext = this.isNotebookActionContext(context)
+		const detachedContext = isNotebookActionContext(context)
 			? undefined
 			: getDetachedNotebookActionContext(accessor, context);
 		if (detachedContext) {
@@ -376,13 +385,13 @@ registerAction2(class ExecuteNotebookAction extends NotebookAction {
 		return getContextFromUri(accessor, context) ?? getContextFromActiveEditor(accessor.get(IEditorService), accessor.get(INotebookEditorService));
 	}
 
-	async runWithContext(accessor: ServicesAccessor, context: INotebookActionContext | DetachedNotebookActionContext): Promise<void> {
+	override async runWithContext(accessor: ServicesAccessor, context: INotebookActionContext | DetachedNotebookActionContext): Promise<void> {
 		if (isDetachedNotebookActionContext(context)) {
 			const executionService = accessor.get(INotebookExecutionService);
 			const contextKeyService = accessor.get(IContextKeyService);
 			const notebookEditorService = accessor.get(INotebookEditorService);
 			const targetDetachedCellHandle = context.detachedNotebookModel.cells[context.detachedNotebookModel.cells.length - 1]?.handle;
-			await executionService.executeNotebookCells(context.detachedNotebookModel, context.detachedNotebookModel.cells, contextKeyService);
+			await executionService.executeNotebookCells(context.detachedNotebookModel, asNotebookCellTextModels(context.detachedNotebookModel.cells), contextKeyService);
 			if (typeof targetDetachedCellHandle === 'number') {
 				await revealDetachedCellBestEffort(notebookEditorService, context.detachedNotebookModel.uri, targetDetachedCellHandle);
 			}
@@ -405,10 +414,6 @@ registerAction2(class ExecuteNotebookAction extends NotebookAction {
 		}
 
 		return context.notebookEditor.executeNotebookCells();
-	}
-
-	private isNotebookActionContext(context?: unknown): context is INotebookActionContext {
-		return !!context && !!(context as INotebookActionContext).notebookEditor;
 	}
 });
 
@@ -452,7 +457,7 @@ registerAction2(class ExecuteCell extends NotebookMultiCellAction {
 			const editorGroupsService = accessor.get(IEditorGroupsService);
 			const editorService = accessor.get(IEditorService);
 			const targetDetachedCellHandle = context.detachedNotebookCells[context.detachedNotebookCells.length - 1]?.handle;
-			const candidateEditors = notebookEditorService.listNotebookEditors().filter(editor =>
+			const candidateEditors = notebookEditorService.listNotebookEditors().filter((editor): editor is IActiveNotebookEditor =>
 				editor.hasModel() && isEqual(editor.textModel.uri, context.detachedNotebookModel.uri)
 			);
 			const notebookEditor = candidateEditors.find(editor => editor.isVisible) ?? candidateEditors[0];
@@ -493,7 +498,7 @@ registerAction2(class ExecuteCell extends NotebookMultiCellAction {
 				}
 				await timeout(50);
 			}
-			await executionService.executeNotebookCells(context.detachedNotebookModel, context.detachedNotebookCells, contextKeyService);
+			await executionService.executeNotebookCells(context.detachedNotebookModel, asNotebookCellTextModels(context.detachedNotebookCells), contextKeyService);
 			if (typeof targetDetachedCellHandle === 'number') {
 				await revealDetachedCellBestEffort(notebookEditorService, context.detachedNotebookModel.uri, targetDetachedCellHandle);
 			}

@@ -609,7 +609,7 @@ export class InteractiveEditor extends EditorPane implements IEditorPaneWithScro
 
 		const latestCell = notebookWidget.getCellByHandle(cvm.handle) ?? cvm;
 		const index = notebookWidget.getCellIndex(latestCell);
-		if (index < 0) {
+		if (typeof index !== 'number' || index < 0) {
 			return;
 		}
 

@@ -113,7 +113,7 @@ class Snapper {
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IWorkbenchThemeService private readonly themeService: IWorkbenchThemeService,
 		@ITextMateTokenizationService private readonly textMateService: ITextMateTokenizationService,
-		@IFileService private readonly fileService: IFileService,
+		@IFileService _fileService: IFileService,
 		@ITreeSitterLibraryService private readonly treeSitterLibraryService: ITreeSitterLibraryService,
 	) {
 	}

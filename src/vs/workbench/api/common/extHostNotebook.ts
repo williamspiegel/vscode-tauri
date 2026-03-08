@@ -306,7 +306,7 @@ export class ExtHostNotebookController implements ExtHostNotebookShape {
 		}
 	}
 
-	private _inferActiveNotebookEditorFromDelta(delta: INotebookDocumentsAndEditorsDelta['value']): ExtHostNotebookEditor | undefined {
+	private _inferActiveNotebookEditorFromDelta(delta: INotebookDocumentsAndEditorsDelta): ExtHostNotebookEditor | undefined {
 		const addedEditors = delta.addedEditors ?? [];
 		if (addedEditors.length === 1) {
 			const inferredEditor = this._editors.get(addedEditors[0].id);

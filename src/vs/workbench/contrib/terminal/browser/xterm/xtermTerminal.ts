@@ -69,10 +69,10 @@ export function withTauriOffscreenCanvasDisabled<T>(callback: () => T): T {
 	try {
 		// xterm's DOM renderer prefers OffscreenCanvas-based char measurement when available.
 		// In Tauri's WebView this can exist but still produce unusable metrics, leaving rows blank.
-		(globalThis as typeof globalThis & { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = undefined;
+		(globalThis as unknown as { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = undefined;
 		return callback();
 	} finally {
-		(globalThis as typeof globalThis & { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = originalOffscreenCanvas;
+		(globalThis as unknown as { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas = originalOffscreenCanvas;
 	}
 }
 
@@ -85,6 +85,7 @@ export function withTauriIntersectionObserverDisabled<T>(targetWindow: Window & 
 	class TauriIntersectionObserverStub implements IntersectionObserver {
 		readonly root = null;
 		readonly rootMargin = '0px';
+		readonly scrollMargin = '0px';
 		readonly thresholds = [0];
 
 		constructor(

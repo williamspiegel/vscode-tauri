@@ -29,7 +29,7 @@ import { BaseTerminalBackend } from '../browser/baseTerminalBackend.js';
 import { INativeHostService } from '../../../../platform/native/common/native.js';
 import { Client as MessagePortClient } from '../../../../base/parts/ipc/common/ipc.mp.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
-import { getDelayedChannel, ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
+import { ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { mark, PerformanceMark } from '../../../../base/common/performance.js';
 import { ILifecycleService, LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
 import { DeferredPromise } from '../../../../base/common/async.js';

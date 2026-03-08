@@ -38,13 +38,14 @@ import { ILanguageConfigurationService } from '../../../../editor/common/languag
 import { TestLanguageConfigurationService } from '../../../../editor/test/common/modes/testLanguageConfigurationService.js';
 import { IUndoRedoService } from '../../../../platform/undoRedo/common/undoRedo.js';
 import { IQuickDiffModelService } from '../../../contrib/scm/browser/quickDiffModel.js';
-import { IEditorPane } from '../../../common/editor.js';
+import { IVisibleEditorPane } from '../../../common/editor.js';
 import { ITextEditorDiffInformation } from '../../../../platform/editor/common/editor.js';
 import { ITreeSitterLibraryService } from '../../../../editor/common/services/treeSitter/treeSitterLibraryService.js';
 import { TestTreeSitterLibraryService } from '../../../../editor/test/common/services/testTreeSitterLibraryService.js';
 import { createTextModel } from '../../../../editor/test/common/testTextModel.js';
 import { URI } from '../../../../base/common/uri.js';
 import { CellUri } from '../../../contrib/notebook/common/notebookCommon.js';
+import { INotebookService } from '../../../contrib/notebook/common/notebookService.js';
 
 suite('MainThreadDocumentsAndEditors', () => {
 
@@ -114,7 +115,8 @@ suite('MainThreadDocumentsAndEditors', () => {
 				override createQuickDiffModelReference() {
 					return undefined;
 				}
-			}
+			},
+			new class extends mock<INotebookService>() { }
 		);
 	}
 
@@ -250,11 +252,11 @@ suite('MainThreadDocumentsAndEditors', () => {
 		const model = modelService.createModel('test', null);
 		const editor = createTestCodeEditor(model, {
 			hasTextFocus: false,
-			hasWidgetFocus: true,
 			serviceCollection: new ServiceCollection(
 				[ICodeEditorService, codeEditorService]
 			)
 		});
+		(editor as unknown as { hasWidgetFocus(): boolean }).hasWidgetFocus = () => true;
 
 		workbenchEditorService.activeTextEditorControl = editor;
 		workbenchEditorService.activeEditor = undefined;
@@ -396,7 +398,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 			input: {},
 			group: { count: 1, contains: () => true },
 			getControl: () => ({})
-		} as unknown as IEditorPane;
+		} as unknown as IVisibleEditorPane;
 		workbenchEditorService.activeEditor = nestedPane.input as never;
 		workbenchEditorService.activeEditorPane = nestedPane;
 		workbenchEditorService.activeTextEditorControl = editor;
@@ -420,7 +422,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 	test('ignores stale editor panes whose group no longer reports the input as active', () => {
 		const model = modelService.createModel('test', null);
 		const editor = myCreateTestCodeEditor(model);
-		const stalePane = { input: {}, group: { activeEditor: undefined, contains: () => false }, getControl: () => editor } as unknown as IEditorPane;
+		const stalePane = { input: {}, group: { activeEditor: undefined, contains: () => false }, getControl: () => editor } as unknown as IVisibleEditorPane;
 		workbenchEditorService.visibleEditorPanes = [stalePane];
 		workbenchEditorService.activeEditor = undefined;
 		workbenchEditorService.activeEditorPane = stalePane;
@@ -443,7 +445,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 		const model = modelService.createModel('test', null);
 		const editor = myCreateTestCodeEditor(model);
 		const pendingInput = {};
-		const laggingPane = { input: pendingInput, group: { count: 0, contains: () => false }, getControl: () => editor } as unknown as IEditorPane;
+		const laggingPane = { input: pendingInput, group: { count: 0, contains: () => false }, getControl: () => editor } as unknown as IVisibleEditorPane;
 		workbenchEditorService.activeEditor = pendingInput as never;
 		workbenchEditorService.activeEditorPane = laggingPane;
 		workbenchEditorService.activeTextEditorControl = editor;
@@ -472,7 +474,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 			input: notebookInput,
 			group: { count: 1, contains: (candidate: unknown) => candidate === notebookInput },
 			getControl: () => undefined
-		} as unknown as IEditorPane;
+		} as unknown as IVisibleEditorPane;
 
 		workbenchEditorService.activeEditor = notebookInput as never;
 		workbenchEditorService.activeEditorPane = notebookPane;
@@ -563,7 +565,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 
 		const visiblePane = {
 			getControl: () => editor
-		} as unknown as IEditorPane;
+		} as unknown as IVisibleEditorPane;
 		workbenchEditorService.visibleEditorPanes = [visiblePane];
 		codeEditorService.addCodeEditor(editor);
 
@@ -606,7 +608,7 @@ suite('MainThreadDocumentsAndEditors', () => {
 			input: {},
 			group: { count: 1, contains: () => true },
 			getControl: () => editor
-		} as unknown as IEditorPane;
+		} as unknown as IVisibleEditorPane;
 
 		workbenchEditorService.activeEditor = visiblePane.input as never;
 		workbenchEditorService.activeEditorPane = visiblePane;

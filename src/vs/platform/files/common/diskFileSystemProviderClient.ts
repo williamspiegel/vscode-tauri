@@ -24,7 +24,7 @@ function decodeBase64ToBytes(value: string): Uint8Array | undefined {
 	}
 
 	try {
-		return decodeBase64(value);
+		return decodeBase64(value).buffer;
 	} catch {
 		return undefined;
 	}

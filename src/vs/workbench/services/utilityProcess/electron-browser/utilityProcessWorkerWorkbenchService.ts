@@ -8,7 +8,7 @@ import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../..
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { Client as MessagePortClient } from '../../../../base/parts/ipc/common/ipc.mp.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
-import { IPCClient, ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
+import { IChannel, IChannelClient, ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
 import { IOnDidTerminateUtilityrocessWorkerProcess, ipcUtilityProcessWorkerChannelName, IUtilityProcessWorkerProcess, IUtilityProcessWorkerService } from '../../../../platform/utilityProcess/common/utilityProcessWorkerService.js';
@@ -22,7 +22,7 @@ export interface IUtilityProcessWorker extends IDisposable {
 	/**
 	 * A IPC client to communicate to the worker process.
 	 */
-	client: IPCClient<string>;
+	client: IChannelClient;
 
 	/**
 	 * A promise that resolves to an object once the
@@ -86,13 +86,12 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 
 	private readonly restoredBarrier = new Barrier();
 	private readonly disableMessagePortTransport = process.env['VSCODE_ELECTROBUN_DISABLE_MESSAGEPORT'] === 'true';
-	private readonly noopChannel = {
+	private readonly noopChannel: IChannel = {
 		listen: () => Event.None,
-		call: async () => undefined
+		call: async <T>() => undefined as T
 	};
-	private readonly noopClient: IPCClient<string> = {
-		getChannel: () => this.noopChannel,
-		registerChannel: () => undefined
+	private readonly noopClient: IChannelClient = {
+		getChannel: <T extends IChannel>() => this.noopChannel as T
 	};
 
 	constructor(
@@ -111,9 +110,8 @@ export class UtilityProcessWorkerWorkbenchService extends Disposable implements 
 			if (isFileWatcherWorker) {
 				this.logService.trace(`Renderer->UtilityProcess#createWorker: MessagePort transport disabled (${reason}, module: ${process.moduleId}), using watcher IPC fallback channel.`);
 				const watcherChannel = this.mainProcessService.getChannel('watcher');
-				const watcherFallbackClient: IPCClient<string> = {
-					getChannel: channelName => channelName === 'watcher' ? watcherChannel : this.noopChannel,
-					registerChannel: () => undefined
+				const watcherFallbackClient: IChannelClient = {
+					getChannel: <T extends IChannel>(channelName: string) => (channelName === 'watcher' ? watcherChannel : this.noopChannel) as T
 				};
 				return {
 					client: watcherFallbackClient,

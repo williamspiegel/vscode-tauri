@@ -10,7 +10,6 @@ import { ExtHostInteractiveShape, IMainContext } from './extHost.protocol.js';
 import { ExtHostCommands } from './extHostCommands.js';
 import { ExtHostDocumentsAndEditors } from './extHostDocumentsAndEditors.js';
 import { ExtHostNotebookController } from './extHostNotebook.js';
-import { NotebookEditor } from 'vscode';
 
 export class ExtHostInteractive implements ExtHostInteractiveShape {
 	constructor(
@@ -20,12 +19,12 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 		private _commands: ExtHostCommands,
 		_logService: ILogService
 	) {
-		this._commands.registerCommand(false, 'interactive.open', async (
+		const interactiveOpenCommand = (async (
 			showOptions?: number | { viewColumn?: number; preserveFocus?: boolean },
 			resource?: URI,
 			controllerId?: string,
 			title?: string
-		): Promise<{ notebookUri: URI; inputUri: URI; notebookEditor?: NotebookEditor }> => {
+		) => {
 			const result = await this._commands.executeCommand<{ notebookUri: UriComponents; inputUri: UriComponents; notebookEditorId?: string }>(
 				'_interactive.open',
 				showOptions,
@@ -78,7 +77,9 @@ export class ExtHostInteractive implements ExtHostInteractiveShape {
 
 			_logService.debug('[ExtHostInteractive] notebook editor not found, uris for the interactive document', result.notebookUri, result.inputUri);
 			return { notebookUri, inputUri };
-		});
+		}) as unknown as <T>(...args: unknown[]) => T | Thenable<T>;
+
+		this._commands.registerCommand(false, 'interactive.open', interactiveOpenCommand);
 	}
 
 	private async _resolveNotebookEditor(editorId: string | undefined, notebookUri: URI, maxAttempts = 200): Promise<ReturnType<ExtHostNotebookController['getEditorById']> | undefined> {

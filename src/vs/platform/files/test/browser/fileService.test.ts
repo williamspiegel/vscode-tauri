@@ -23,6 +23,10 @@ suite('File Service', () => {
 
 	const disposables = new DisposableStore();
 
+	function asChannelCallResult<T>(value: unknown): T {
+		return value as T;
+	}
+
 	teardown(() => {
 		disposables.clear();
 	});
@@ -422,9 +426,9 @@ suite('File Service', () => {
 
 	test('disk file system provider client accepts empty base64 readFile payloads', async () => {
 		const client = disposables.add(new DiskFileSystemProviderClient({
-			call(command) {
+			call<T>(command: string) {
 				assert.strictEqual(command, 'readFile');
-				return Promise.resolve({ base64: '' });
+				return Promise.resolve(asChannelCallResult<T>({ base64: '' }));
 			},
 			listen() {
 				return Event.None;
@@ -437,9 +441,9 @@ suite('File Service', () => {
 
 	test('disk file system provider client accepts empty object buffer readFile payloads', async () => {
 		const client = disposables.add(new DiskFileSystemProviderClient({
-			call(command) {
+			call<T>(command: string) {
 				assert.strictEqual(command, 'readFile');
-				return Promise.resolve({ buffer: {} });
+				return Promise.resolve(asChannelCallResult<T>({ buffer: {} }));
 			},
 			listen() {
 				return Event.None;
