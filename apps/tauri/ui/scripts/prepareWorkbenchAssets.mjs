@@ -13,6 +13,11 @@ const requiredWorkbenchBootstrap = path.join(
   'code/electron-browser/workbench/workbench.js'
 );
 const sourceMinRoot = path.join(repoRoot, 'out-vscode-min', 'vs');
+const fallbackNodeModulePackages = [
+  'vscode-textmate',
+  'vscode-oniguruma',
+  '@vscode/tree-sitter-wasm'
+];
 const minWorkbenchFiles = [
   'code/electron-browser/workbench/workbench.js',
   'code/electron-browser/workbench/workbench.html',
@@ -25,6 +30,7 @@ const targetOutRoot = path.join(distRoot, 'out');
 const targetVsRoot = path.join(targetOutRoot, 'vs');
 const targetMinRoot = path.join(distRoot, 'out-vscode-min', 'vs');
 const targetDevMinRoot = path.join(uiRoot, 'out-vscode-min', 'vs');
+const targetNodeModulesRoot = path.join(distRoot, 'node_modules');
 
 function stripSourceMappingUrlDirectives(contents) {
   return contents
@@ -71,6 +77,21 @@ async function copyMinAssetsTo(targetMinVsRoot) {
     await assertFile(sourceFile, `Min workbench asset (${relativePath})`);
     await fs.mkdir(path.dirname(targetFile), { recursive: true });
     await copyMinAsset(sourceFile, targetFile);
+  }
+}
+
+async function copyFallbackNodeModules() {
+  await fs.rm(targetNodeModulesRoot, { recursive: true, force: true });
+  await fs.mkdir(targetNodeModulesRoot, { recursive: true });
+  for (const packageName of fallbackNodeModulePackages) {
+    const sourcePackageRoot = path.join(repoRoot, 'node_modules', packageName);
+    const targetPackageRoot = path.join(targetNodeModulesRoot, packageName);
+    await assertDir(sourcePackageRoot, `Fallback node module (${packageName})`);
+    await fs.cp(sourcePackageRoot, targetPackageRoot, {
+      recursive: true,
+      dereference: true,
+      filter: source => !source.endsWith('.map')
+    });
   }
 }
 
@@ -131,6 +152,7 @@ await fs.cp(sourceVsRoot, targetVsRoot, {
   filter: source => !source.endsWith('.map')
 });
 await rewriteCopiedJavaScriptAssets(targetVsRoot);
+await copyFallbackNodeModules();
 
 try {
   await assertDir(sourceMinRoot, 'VS Code out-vscode-min/vs directory');

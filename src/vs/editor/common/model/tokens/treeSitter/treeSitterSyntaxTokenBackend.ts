@@ -64,12 +64,6 @@ export class TreeSitterSyntaxTokenBackend extends AbstractSyntaxTokenBackend {
 				parser.delete();
 			}));
 			parser.setLanguage(treeSitterLang);
-
-			const queries = this._treeSitterLibraryService.getInjectionQueries(currentLanguage, reader);
-			if (queries === undefined) {
-				return undefined;
-			}
-
 			return reader.store.add(this._instantiationService.createInstance(TreeSitterTree, currentLanguage, undefined, parser, parserClass, /*queries, */this._textModel));
 		});
 

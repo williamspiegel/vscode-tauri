@@ -57,6 +57,8 @@ interface INewTestRunner {
 	run(): Promise<void>;
 }
 
+const tauriStandaloneSignalFile = process.env['VSCODE_TAURI_EXTENSION_TESTS_SIGNAL_FILE'];
+
 export const IHostUtils = createDecorator<IHostUtils>('IHostUtils');
 
 export interface IHostUtils {
@@ -734,18 +736,21 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 		if (shouldTrace) {
 			console.error('[tauri.integration.extHostTests] execute requested');
 		}
+		await this._writeTauriStandaloneSignal({ event: 'execute-requested' });
 		await this._eagerExtensionsActivated.wait();
 		try {
 			const result = await this._doHandleExtensionTests();
 			if (shouldTrace) {
 				console.error(`[tauri.integration.extHostTests] execute resolved code=${result}`);
 			}
+			await this._writeTauriStandaloneSignal({ event: 'execute-resolved', code: result });
 			return result;
 		} catch (error) {
 			console.error(error); // ensure any error message makes it onto the console
 			if (shouldTrace) {
 				console.error('[tauri.integration.extHostTests] execute failed', error);
 			}
+			await this._writeTauriStandaloneSignal({ event: 'execute-failed', error: error instanceof Error ? (error.stack ?? error.message) : String(error) });
 			throw error;
 		}
 	}
@@ -782,6 +787,7 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 					if (shouldTrace) {
 						console.error('[tauri.integration.extHostTests] callback error', error);
 					}
+					void this._writeTauriStandaloneSignal({ event: 'callback-error', error: error.stack ?? error.message });
 					if (isCI) {
 						this._logService.error(`Test runner called back with error`, error);
 					}
@@ -790,6 +796,7 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 					if (shouldTrace) {
 						console.error(`[tauri.integration.extHostTests] callback failures=${failures ?? 0}`);
 					}
+					void this._writeTauriStandaloneSignal({ event: 'callback-result', failures: failures ?? 0 });
 					if (isCI) {
 						if (failures) {
 							this._logService.info(`Test runner called back with ${failures} failures.`);
@@ -812,6 +819,7 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 						if (shouldTrace) {
 							console.error('[tauri.integration.extHostTests] promise resolved');
 						}
+						void this._writeTauriStandaloneSignal({ event: 'promise-resolved' });
 						if (isCI) {
 							this._logService.info(`Test runner finished successfully.`);
 						}
@@ -821,6 +829,7 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 						if (shouldTrace) {
 							console.error('[tauri.integration.extHostTests] promise rejected', err);
 						}
+						void this._writeTauriStandaloneSignal({ event: 'promise-rejected', error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
 						if (isCI) {
 							this._logService.error(`Test runner finished with error`, err);
 						}
@@ -828,6 +837,23 @@ export abstract class AbstractExtHostExtensionService extends Disposable impleme
 					});
 			}
 		});
+	}
+
+	private async _writeTauriStandaloneSignal(payload: Record<string, string | number | undefined>): Promise<void> {
+		if (!tauriStandaloneSignalFile) {
+			return;
+		}
+
+		try {
+			const [{ appendFile, mkdir }, nodePath] = await Promise.all([
+				import('node:fs/promises'),
+				import('node:path')
+			]);
+			await mkdir(nodePath.dirname(tauriStandaloneSignalFile), { recursive: true });
+			await appendFile(tauriStandaloneSignalFile, `${JSON.stringify(payload)}\n`, 'utf8');
+		} catch (error) {
+			console.error('[tauri.integration.extHostTests] failed to write signal file', error);
+		}
 	}
 
 	private _startExtensionHost(): Promise<void> {

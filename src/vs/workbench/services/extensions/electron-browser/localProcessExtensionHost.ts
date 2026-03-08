@@ -196,6 +196,12 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 			VSCODE_HANDLES_UNCAUGHT_ERRORS: true
 		});
 
+		for (const key of ['VSCODE_TAURI_INTEGRATION', 'VSCODE_TAURI_EXTENSION_TESTS_SIGNAL_FILE']) {
+			if (typeof process.env[key] === 'string') {
+				env[key] = process.env[key];
+			}
+		}
+
 		if (this._environmentService.debugExtensionHost.env) {
 			objects.mixin(env, this._environmentService.debugExtensionHost.env);
 		}

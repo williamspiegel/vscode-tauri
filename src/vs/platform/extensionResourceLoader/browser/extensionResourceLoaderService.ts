@@ -32,6 +32,20 @@ class ExtensionResourceLoaderService extends AbstractExtensionResourceLoaderServ
 	}
 
 	async readExtensionResource(uri: URI): Promise<string> {
+		if (uri.scheme === Schemas.file || uri.scheme === Schemas.vscodeFileResource) {
+			const fileUri = FileAccess.uriToFileUri(uri);
+			if (this._fileService.hasProvider(fileUri)) {
+				const result = await this._fileService.readFile(fileUri);
+				return result.value.toString();
+			}
+		}
+
+		const runtime = (globalThis as { vscode?: { process?: { env?: Record<string, string | undefined> } } }).vscode?.process?.env?.VSCODE_DESKTOP_RUNTIME;
+		if (runtime === 'electrobun' && (uri.scheme === Schemas.file || uri.scheme === Schemas.vscodeFileResource)) {
+			const result = await this._fileService.readFile(FileAccess.uriToFileUri(uri));
+			return result.value.toString();
+		}
+
 		uri = FileAccess.uriToBrowserUri(uri);
 
 		if (uri.scheme !== Schemas.http && uri.scheme !== Schemas.https && uri.scheme !== Schemas.data) {

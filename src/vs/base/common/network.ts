@@ -283,6 +283,7 @@ type IGlobalWithDesktopRuntime = typeof globalThis & {
 	location?: {
 		origin?: string;
 	};
+	_VSCODE_FILE_ROOT?: string;
 };
 
 class FileAccessImpl {
@@ -358,9 +359,64 @@ class FileAccessImpl {
 			return undefined;
 		}
 
+		let originUrl: URL | undefined;
+		try {
+			originUrl = new URL(origin);
+		} catch {
+			originUrl = undefined;
+		}
+
+		if (!originUrl || (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:')) {
+			return this.toElectrobunPackagedUri(fileUri, origin) ?? fileUri;
+		}
+
 		const filePath = fileUri.path.startsWith('/') ? fileUri.path : `/${fileUri.path}`;
 		try {
 			return URI.parse(new URL(`/@fs${filePath}`, origin).toString(), true);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private toElectrobunPackagedUri(fileUri: URI, origin: string): URI | undefined {
+		const globalWithDesktopRuntime = globalThis as IGlobalWithDesktopRuntime;
+		const fileRoot = globalWithDesktopRuntime._VSCODE_FILE_ROOT;
+		if (typeof fileRoot !== 'string' || fileRoot.length === 0) {
+			return undefined;
+		}
+
+		let fileRootPath: string | undefined;
+		try {
+			fileRootPath = URI.parse(fileRoot, true).path;
+		} catch {
+			fileRootPath = undefined;
+		}
+
+		if (!fileRootPath) {
+			return undefined;
+		}
+
+		const normalizedFileRoot = fileRootPath.endsWith('/out/')
+			? fileRootPath.slice(0, -'/out/'.length)
+			: fileRootPath.endsWith('/out')
+				? fileRootPath.slice(0, -'/out'.length)
+				: undefined;
+		if (!normalizedFileRoot) {
+			return undefined;
+		}
+
+		const filePath = fileUri.path.startsWith('/') ? fileUri.path : `/${fileUri.path}`;
+		if (!filePath.startsWith(`${normalizedFileRoot}/`)) {
+			return undefined;
+		}
+
+		const relativePath = filePath.slice(normalizedFileRoot.length);
+		if (!relativePath.startsWith('/node_modules/') && !relativePath.startsWith('/out/') && !relativePath.startsWith('/out-vscode-min/')) {
+			return undefined;
+		}
+
+		try {
+			return URI.parse(new URL(relativePath, origin).toString(), true);
 		} catch {
 			return undefined;
 		}

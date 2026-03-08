@@ -14,6 +14,10 @@ const options: import('mocha').MochaOptions = {
 	timeout: 60000
 };
 
+if (process.env.VSCODE_TAURI_TEST_GREP) {
+	options.grep = process.env.VSCODE_TAURI_TEST_GREP;
+}
+
 if (process.env.BUILD_ARTIFACTSTAGINGDIRECTORY) {
 	options.reporter = 'mocha-multi-reporters';
 	options.reporterOptions = {
@@ -29,4 +33,7 @@ if (process.env.BUILD_ARTIFACTSTAGINGDIRECTORY) {
 
 testRunner.configure(options);
 
-export = testRunner;
+export function run(_extensionTestsPath: string, callback: (error: Error | undefined, failures?: number) => void): void {
+	(testRunner as typeof testRunner & { run(testsRoot: string, clb: (error: Error | undefined, failures: number | undefined) => void): void })
+		.run(__dirname, callback);
+}

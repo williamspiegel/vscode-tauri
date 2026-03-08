@@ -41,7 +41,6 @@ import { EnablementState, IWorkbenchExtensionEnablementService, IWorkbenchExtens
 import { IWebWorkerExtensionHostDataProvider, IWebWorkerExtensionHostInitData, WebWorkerExtensionHost } from '../browser/webWorkerExtensionHost.js';
 import { AbstractExtensionService, ExtensionHostCrashTracker, IExtensionHostFactory, LocalExtensions, RemoteExtensions, ResolvedExtensions, ResolverExtensions, checkEnabledAndProposedAPI, extensionIsEnabled, isResolverExtension } from '../common/abstractExtensionService.js';
 import { ExtensionDescriptionRegistrySnapshot } from '../common/extensionDescriptionRegistry.js';
-import { parseExtensionDevOptions } from '../common/extensionDevOptions.js';
 import { ExtensionHostKind, ExtensionRunningPreference, IExtensionHostKindPicker, extensionHostKindToString, extensionRunningPreferenceToString } from '../common/extensionHostKind.js';
 import { IExtensionHostManager } from '../common/extensionHostManagers.js';
 import { ExtensionHostExitCode } from '../common/extensionHostProtocol.js';
@@ -442,6 +441,18 @@ export class NativeExtensionService extends AbstractExtensionService implements 
 	}
 
 	protected async _onExtensionHostExit(code: number): Promise<void> {
+		const isExtensionTestRun = !!this._environmentService.extensionTestsLocationURI;
+		if (isExtensionTestRun && !this._environmentService.debugExtensionHost.break) {
+			// Extension tests should terminate the host process with the runner's exit code.
+			// Avoid awaiting extension host shutdown first because the Tauri runtime can get
+			// stuck in that cleanup path after the test runner has already resolved.
+			if (isCI) {
+				this._logService.info(`Asking native host service to exit with code ${code}.`);
+			}
+			await this._nativeHostService.exit(code);
+			return;
+		}
+
 		// Dispose everything associated with the extension host
 		await this._doStopExtensionHosts();
 
@@ -449,16 +460,8 @@ export class NativeExtensionService extends AbstractExtensionService implements 
 		const connection = this._remoteAgentService.getConnection();
 		connection?.dispose();
 
-		if (parseExtensionDevOptions(this._environmentService).isExtensionDevTestFromCli) {
-			// When CLI testing make sure to exit with proper exit code
-			if (isCI) {
-				this._logService.info(`Asking native host service to exit with code ${code}.`);
-			}
-			this._nativeHostService.exit(code);
-		} else {
-			// Expected development extension termination: When the extension host goes down we also shutdown the window
-			this._nativeHostService.closeWindow();
-		}
+		// Expected development extension termination: When the extension host goes down we also shutdown the window
+		await this._nativeHostService.closeWindow();
 	}
 
 	private async _handleNoResolverFound(remoteAuthority: string): Promise<boolean> {

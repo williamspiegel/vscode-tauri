@@ -185,3 +185,19 @@ echo "### HTML tests"
 	cd "$ROOT/extensions/html-language-features/server"
 	"$ROOT/scripts/node-electron.sh" test/index.js
 )
+
+echo
+echo "### Git base tests"
+node "$ROOT/scripts/run-tauri-standalone-extension-tests.mjs" \
+	--label git-base \
+	--compile-tsconfig "$ROOT/extensions/git-base/tsconfig.json" \
+	--test-cli-label git-base \
+	--
+
+echo
+echo "### Colorize tests"
+node "$ROOT/scripts/run-tauri-standalone-extension-tests.mjs" \
+	--label vscode-colorize-tests \
+	--compile-tsconfig "$ROOT/extensions/vscode-colorize-tests/tsconfig.json" \
+	--test-cli-label vscode-colorize-tests \
+	--

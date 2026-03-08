@@ -97,15 +97,58 @@ class AMDModuleImporter {
 		this._initialize();
 
 		if (this._state === AMDModuleImporterState.InitializedExternal) {
-			return new Promise<T>(resolve => {
+			if (this._shouldUseInternalPatchedLoader(scriptSrc)) {
+				return this._loadWithCapturedDefine<T>(scriptSrc);
+			}
+			const result = await new Promise<T>(resolve => {
 				const tmpModuleId = generateUuid();
 				globalThis.define(tmpModuleId, [scriptSrc], function (moduleResult: T) {
 					resolve(moduleResult);
 				});
 			});
+			if (result !== undefined || !this._shouldRetryWithInternalLoader(scriptSrc)) {
+				return result;
+			}
+			return this._loadWithCapturedDefine<T>(scriptSrc);
 		}
 
 		const defineCall = await (this._isWebWorker ? this._workerLoadScript(scriptSrc) : this._isRenderer ? this._rendererLoadScript(scriptSrc) : this._nodeJSLoadScript(scriptSrc));
+		return this._resolveDefineCall<T>(defineCall, scriptSrc);
+	}
+
+	private _shouldRetryWithInternalLoader(scriptSrc: string): boolean {
+		return scriptSrc.includes('/node_modules/');
+	}
+
+	private _shouldUseInternalPatchedLoader(scriptSrc: string): boolean {
+		return scriptSrc.includes('/node_modules/@vscode/tree-sitter-wasm/wasm/tree-sitter.js');
+	}
+
+	private async _loadWithCapturedDefine<T>(scriptSrc: string): Promise<T> {
+		const previousDefine = globalThis.define;
+		globalThis.define = (id: any, dependencies: any, callback: any) => {
+			if (typeof id !== 'string') {
+				callback = dependencies;
+				dependencies = id;
+				id = null;
+			}
+			if (typeof dependencies !== 'object' || !Array.isArray(dependencies)) {
+				callback = dependencies;
+				dependencies = null;
+			}
+			this._defineCalls.push(new DefineCall(id, dependencies, callback));
+		};
+		globalThis.define.amd = true;
+
+		try {
+			const defineCall = await (this._isWebWorker ? this._workerLoadScript(scriptSrc) : this._isRenderer ? this._rendererLoadScript(scriptSrc) : this._nodeJSLoadScript(scriptSrc));
+			return this._resolveDefineCall<T>(defineCall, scriptSrc);
+		} finally {
+			globalThis.define = previousDefine;
+		}
+	}
+
+	private _resolveDefineCall<T>(defineCall: DefineCall | undefined, scriptSrc: string): T {
 		if (!defineCall) {
 			console.warn(`Did not receive a define call from script ${scriptSrc}`);
 			return <T>undefined;
@@ -137,6 +180,9 @@ class AMDModuleImporter {
 	}
 
 	private _rendererLoadScript(scriptSrc: string): Promise<DefineCall | undefined> {
+		if (this._shouldUseInternalPatchedLoader(scriptSrc)) {
+			return this._rendererLoadPatchedScript(scriptSrc);
+		}
 		return new Promise<DefineCall | undefined>((resolve, reject) => {
 			const scriptElement = document.createElement('script');
 			scriptElement.setAttribute('async', 'async');
@@ -165,6 +211,21 @@ class AMDModuleImporter {
 			scriptElement.setAttribute('src', scriptSrc);
 			window.document.getElementsByTagName('head')[0].appendChild(scriptElement);
 		});
+	}
+
+	private async _rendererLoadPatchedScript(scriptSrc: string): Promise<DefineCall | undefined> {
+		const response = await fetch(scriptSrc);
+		if (!response.ok) {
+			throw new Error(`Failed to load AMD script ${scriptSrc}: ${response.status} ${response.statusText}`);
+		}
+
+		const source = await response.text();
+		const patchedSource = source.replace(
+			'var ENVIRONMENT_IS_NODE = typeof process == "object" && typeof process.versions == "object" && typeof process.versions.node == "string";',
+			'var ENVIRONMENT_IS_NODE = typeof process == "object" && typeof process.versions == "object" && typeof process.versions.node == "string" && typeof window != "object";'
+		);
+		new Function(`${patchedSource}\n//# sourceURL=${scriptSrc}`)();
+		return this._defineCalls.pop();
 	}
 
 	private async _workerLoadScript(scriptSrc: string): Promise<DefineCall | undefined> {

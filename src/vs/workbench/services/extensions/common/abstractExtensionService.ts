@@ -56,6 +56,7 @@ import { IExtensionHostExitInfo, IRemoteAgentService } from '../../remote/common
 
 const hasOwnProperty = Object.hasOwnProperty;
 const NO_OP_VOID_PROMISE = Promise.resolve<void>(undefined);
+const tauriStandaloneSignalFile = process.env['VSCODE_TAURI_EXTENSION_TESTS_SIGNAL_FILE'];
 
 export abstract class AbstractExtensionService extends Disposable implements IExtensionService {
 
@@ -580,15 +581,22 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 
 	private async _handleExtensionTests(): Promise<void> {
 		const shouldTrace = process.env['VSCODE_TAURI_INTEGRATION'] === '1';
+		await this._writeTauriStandaloneSignal({ event: 'main-handle-start' });
 		if (!this._environmentService.isExtensionDevelopment || !this._environmentService.extensionTestsLocationURI) {
 			if (shouldTrace) {
 				this._logService.info('[tauri.integration.extensionTests] skipped isExtensionDevelopment=', this._environmentService.isExtensionDevelopment, 'hasTestsPath=', !!this._environmentService.extensionTestsLocationURI);
 			}
+			await this._writeTauriStandaloneSignal({
+				event: 'main-handle-skipped',
+				isExtensionDevelopment: Number(this._environmentService.isExtensionDevelopment),
+				hasTestsPath: Number(!!this._environmentService.extensionTestsLocationURI)
+			});
 			return;
 		}
 		if (shouldTrace) {
 			this._logService.info('[tauri.integration.extensionTests] locating host for', this._environmentService.extensionTestsLocationURI.toString());
 		}
+		await this._writeTauriStandaloneSignal({ event: 'main-host-locating' });
 
 		const extensionHostManager = this.findTestExtensionHost(this._environmentService.extensionTestsLocationURI);
 		if (!extensionHostManager) {
@@ -596,6 +604,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 			if (shouldTrace) {
 				this._logService.error('[tauri.integration.extensionTests] no host found', msg);
 			}
+			await this._writeTauriStandaloneSignal({ event: 'main-no-host', error: msg });
 			console.error(msg);
 			this._notificationService.error(msg);
 			return;
@@ -603,6 +612,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 		if (shouldTrace) {
 			this._logService.info('[tauri.integration.extensionTests] host found, executing tests');
 		}
+		await this._writeTauriStandaloneSignal({ event: 'main-host-found' });
 
 
 		let exitCode: number;
@@ -611,6 +621,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 			if (shouldTrace) {
 				this._logService.info('[tauri.integration.extensionTests] execute resolved', exitCode);
 			}
+			await this._writeTauriStandaloneSignal({ event: 'main-execute-resolved', code: exitCode });
 			if (isCI) {
 				this._logService.info(`Extension host test runner exit code: ${exitCode}`);
 			}
@@ -618,6 +629,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 			if (shouldTrace) {
 				this._logService.error('[tauri.integration.extensionTests] execute failed', err);
 			}
+			await this._writeTauriStandaloneSignal({ event: 'main-execute-failed', error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
 			if (isCI) {
 				this._logService.error(`Extension host test runner error`, err);
 			}
@@ -625,7 +637,24 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 			exitCode = 1 /* ERROR */;
 		}
 
-		this._onExtensionHostExit(exitCode);
+		await this._onExtensionHostExit(exitCode);
+	}
+
+	private async _writeTauriStandaloneSignal(payload: Record<string, string | number | undefined>): Promise<void> {
+		if (!tauriStandaloneSignalFile) {
+			return;
+		}
+
+		try {
+			const [{ appendFile, mkdir }, nodePath] = await Promise.all([
+				import('node:fs/promises'),
+				import('node:path')
+			]);
+			await mkdir(nodePath.dirname(tauriStandaloneSignalFile), { recursive: true });
+			await appendFile(tauriStandaloneSignalFile, `${JSON.stringify(payload)}\n`, 'utf8');
+		} catch (error) {
+			console.error('[tauri.integration.extensionTests] failed to write signal file', error);
+		}
 	}
 
 	private findTestExtensionHost(testLocation: URI): IExtensionHostManager | null {

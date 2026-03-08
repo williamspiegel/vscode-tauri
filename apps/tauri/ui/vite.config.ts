@@ -9,7 +9,8 @@ const uiNodeModulesRoot = path.join(uiRoot, 'node_modules');
 const repoNodeModulesRoot = path.join(repoRoot, 'node_modules');
 const fallbackNodeModulePackages = new Set([
   'vscode-textmate',
-  'vscode-oniguruma'
+  'vscode-oniguruma',
+  '@vscode/tree-sitter-wasm'
 ]);
 
 const logger = createLogger();
