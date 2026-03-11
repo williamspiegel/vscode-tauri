@@ -1398,7 +1398,10 @@ impl CapabilityRouter {
                 | "acknowledgeDataEvent"
                 | "setUnicodeVersion"
                 | "orphanQuestionReply"
-                | "updateProperty" => Ok(Some(Value::Null)),
+                | "updateProperty"
+                | "updateTitle"
+                | "updateIcon"
+                | "setNextCommandId" => Ok(Some(Value::Null)),
                 "refreshProperty" => {
                     let id = parse_u64_arg(
                         nth_arg(args, 0),
@@ -6473,6 +6476,27 @@ mod tests {
             .await
             .expect("getTerminalLayoutInfo should succeed");
         assert_eq!(loaded_layout["workspaceId"], json!("workspace-a"));
+
+        router
+            .dispatch_channel("localPty", "updateTitle", &json!([1, "zsh", 0]))
+            .await
+            .expect("updateTitle should succeed");
+        router
+            .dispatch_channel(
+                "localPty",
+                "updateIcon",
+                &json!([1, false, { "id": "terminal" }, null]),
+            )
+            .await
+            .expect("updateIcon should succeed");
+        router
+            .dispatch_channel(
+                "localPty",
+                "setNextCommandId",
+                &json!([1, "echo hi", "cmd-1"]),
+            )
+            .await
+            .expect("setNextCommandId should succeed");
     }
 
     #[tokio::test]

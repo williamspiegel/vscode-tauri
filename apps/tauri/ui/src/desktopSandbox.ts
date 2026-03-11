@@ -1066,6 +1066,15 @@ async function createLocalPtyHostLoopbackPort(
     async updateProperty(): Promise<void> {
       return;
     },
+    async updateTitle(): Promise<void> {
+      return;
+    },
+    async updateIcon(): Promise<void> {
+      return;
+    },
+    async setNextCommandId(): Promise<void> {
+      return;
+    },
     async getTerminalLayoutInfo(): Promise<null> {
       return null;
     },

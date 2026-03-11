@@ -804,6 +804,27 @@ suite('Tauri Desktop Sandbox', () => {
 		messageEvent.ports[0].close();
 	});
 
+	test('local pty host exposes terminal metadata update methods expected by the pty channel', async () => {
+		createWindow('', {
+			moduleOverrides: createRendererIpcModuleOverrides()
+		});
+		const mock = createHost();
+		await sandboxModule.installDesktopSandbox(mock.host);
+		const vscode = global.window.vscode;
+
+		const messageEventPromise = waitForMessageEvent('nonce-pty-metadata');
+		vscode.ipcMessagePort.acquire('vscode:createPtyHostMessageChannelResult', 'nonce-pty-metadata');
+		const messageEvent = await messageEventPromise;
+		const registration = global.__tauriChannelServerState.registered.find(entry => entry.name === 'ptyHostWindow');
+		assert.ok(registration, 'ptyHostWindow channel should be registered');
+
+		await assert.doesNotReject(() => registration.channel.updateTitle(17, 'zsh', 0));
+		await assert.doesNotReject(() => registration.channel.updateIcon(17, false, { id: 'terminal' }, undefined));
+		await assert.doesNotReject(() => registration.channel.setNextCommandId(17, 'echo hi', 'cmd-1'));
+
+		messageEvent.ports[0].close();
+	});
+
 	test('ipcMessagePort emits a close event when the extension host bridge fails', async () => {
 		createWindow('');
 		/** @type {(error: Error) => void} */
