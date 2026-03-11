@@ -23,6 +23,7 @@ const fallbackNodeModulePackages = [
   '@xterm/addon-serialize',
   '@xterm/addon-unicode11',
   '@xterm/addon-webgl',
+  'katex',
   'vscode-textmate',
   'vscode-oniguruma',
   '@vscode/tree-sitter-wasm'
@@ -39,7 +40,7 @@ const targetOutRoot = path.join(distRoot, 'out');
 const targetVsRoot = path.join(targetOutRoot, 'vs');
 const targetMinRoot = path.join(distRoot, 'out-vscode-min', 'vs');
 const targetDevMinRoot = path.join(uiRoot, 'out-vscode-min', 'vs');
-const targetNodeModulesRoot = path.join(distRoot, 'node_modules');
+const targetNodeModulesRoot = path.join(distRoot, 'tauri-node-modules');
 
 function stripSourceMappingUrlDirectives(contents) {
   return contents
@@ -102,6 +103,27 @@ async function copyFallbackNodeModules() {
       filter: source => !source.endsWith('.map')
     });
   }
+
+  await generateOnigurumaWasmModule();
+}
+
+async function generateOnigurumaWasmModule() {
+  const wasmPath = path.join(targetNodeModulesRoot, 'vscode-oniguruma', 'release', 'onig.wasm');
+  const modulePath = path.join(targetNodeModulesRoot, 'vscode-oniguruma', 'release', 'onig.wasm.js');
+  await assertFile(wasmPath, 'vscode-oniguruma wasm asset');
+  const wasm = await fs.readFile(wasmPath);
+  const base64 = wasm.toString('base64');
+  const moduleSource = [
+    `const base64 = ${JSON.stringify(base64)};`,
+    'const binary = atob(base64);',
+    'const bytes = new Uint8Array(binary.length);',
+    'for (let i = 0; i < binary.length; i++) {',
+    '\tbytes[i] = binary.charCodeAt(i);',
+    '}',
+    'export default bytes.buffer;',
+    ''
+  ].join('\n');
+  await fs.writeFile(modulePath, moduleSource, 'utf8');
 }
 
 async function assertFile(filePath, label) {

@@ -345,7 +345,11 @@ export interface ILogMessage {
 	readonly message: string;
 }
 
-export function reviveFileChanges(changes: IFileChange[]): IFileChange[] {
+export function reviveFileChanges(changes: readonly IFileChange[] | null | undefined): IFileChange[] {
+	if (!Array.isArray(changes)) {
+		return [];
+	}
+
 	return changes.map(change => ({
 		type: change.type,
 		resource: URI.revive(change.resource),

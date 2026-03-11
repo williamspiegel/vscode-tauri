@@ -10,7 +10,7 @@ import { IQuickPick, IQuickPickItem, IQuickInputService } from '../../../platfor
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { TestServiceAccessor, workbenchInstantiationService, createEditorPart } from './workbenchTestServices.js';
 import { DisposableStore, toDisposable, IDisposable } from '../../../base/common/lifecycle.js';
-import { timeout } from '../../../base/common/async.js';
+import { createCancelablePromise, timeout } from '../../../base/common/async.js';
 import { PickerQuickAccessProvider, FastAndSlowPicks } from '../../../platform/quickinput/browser/pickerQuickAccess.js';
 import { URI } from '../../../base/common/uri.js';
 import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
@@ -336,6 +336,22 @@ suite('QuickAccess', () => {
 	const slowProviderDescriptor = { ctor: SlowTestQuickPickProvider, prefix: 'slow', helpEntries: [] };
 	const fastAndSlowProviderDescriptor = { ctor: FastAndSlowTestQuickPickProvider, prefix: 'bothFastAndSlow', helpEntries: [] };
 
+	class CancelableTestQuickPickProvider extends PickerQuickAccessProvider<IQuickPickItem> {
+
+		constructor() {
+			super('cancel');
+		}
+
+		protected _getPicks(filter: string, disposables: DisposableStore, _token: CancellationToken): Promise<readonly IQuickPickItem[]> {
+			return createCancelablePromise(async token => {
+				await timeout(25, token);
+				return [{ label: filter || 'Cancelable Pick' }];
+			});
+		}
+	}
+
+	const cancelableProviderDescriptor = { ctor: CancelableTestQuickPickProvider, prefix: 'cancel', helpEntries: [] };
+
 	test('quick pick access - show()', async () => {
 		const registry = (Registry.as<IQuickAccessRegistry>(Extensions.Quickaccess));
 		const restore = (registry as QuickAccessRegistry).clear();
@@ -384,6 +400,31 @@ suite('QuickAccess', () => {
 
 		disposables.dispose();
 
+		restore();
+	});
+
+	test('quick pick access - ignores canceled picker updates', async () => {
+		const registry = (Registry.as<IQuickAccessRegistry>(Extensions.Quickaccess));
+		const restore = (registry as QuickAccessRegistry).clear();
+		const disposables = new DisposableStore();
+
+		disposables.add(registry.registerQuickAccessProvider(cancelableProviderDescriptor));
+
+		accessor.quickInputService.quickAccess.show('cancel');
+
+		const picker = accessor.quickInputService.currentQuickInput as IQuickPick<IQuickPickItem, { useSeparators: true }>;
+		assert.ok(picker);
+
+		picker.value = 'cancel a';
+		picker.value = 'cancel ab';
+		picker.value = 'cancel abc';
+
+		await timeout(40);
+		assert.strictEqual(picker.items.length, 1);
+		assert.strictEqual(picker.items[0].type, 'item');
+		assert.strictEqual((picker.items[0] as IQuickPickItem).label, 'abc');
+
+		disposables.dispose();
 		restore();
 	});
 

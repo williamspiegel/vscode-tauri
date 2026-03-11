@@ -38,6 +38,51 @@ function transformOutgoingURI(uri: URI, transformer: IURITransformer | null): UR
 	return transformer ? transformer.transformOutgoingURI(uri) : uri;
 }
 
+function coerceArray<T>(value: readonly T[] | null | undefined, label: string, logService: ILogService): readonly T[] {
+	if (Array.isArray(value)) {
+		return value;
+	}
+
+	if (value !== undefined && value !== null) {
+		logService.warn(`[McpManagementChannelClient] Expected array for '${label}', received ${typeof value}`);
+	}
+
+	return [];
+}
+
+function compactArrayEntries<T>(value: readonly (T | null | undefined)[], label: string, logService: ILogService): readonly T[] {
+	const result: T[] = [];
+
+	for (const entry of value) {
+		if (entry !== null && entry !== undefined) {
+			result.push(entry);
+			continue;
+		}
+
+		logService.warn(`[McpManagementChannelClient] Ignoring null entry in '${label}'`);
+	}
+
+	return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null;
+}
+
+function coerceRecord<T extends object>(value: T | null | undefined, label: string, logService: ILogService): T | undefined {
+	if (isRecord(value)) {
+		return value;
+	}
+
+	if (value !== undefined && value !== null) {
+		logService.warn(`[McpManagementChannelClient] Expected object for '${label}', received ${typeof value}`);
+	} else {
+		logService.warn(`[McpManagementChannelClient] Ignoring null payload for '${label}'`);
+	}
+
+	return undefined;
+}
+
 export class McpManagementChannel<TContext = RemoteAgentConnectionContext | string> implements IServerChannel<TContext> {
 	readonly onInstallMcpServer: Event<InstallMcpServerEvent>;
 	readonly onDidInstallMcpServers: Event<readonly InstallMcpServerResult[]>;
@@ -143,11 +188,29 @@ export class McpManagementChannelClient extends AbstractMcpManagementService imp
 		@ILogService logService: ILogService
 	) {
 		super(allowedMcpServersService, logService);
-		this._register(this.channel.listen<InstallMcpServerEvent>('onInstallMcpServer')(e => this._onInstallMcpServer.fire(({ ...e, mcpResource: transformIncomingURI(e.mcpResource, null) }))));
-		this._register(this.channel.listen<readonly InstallMcpServerResult[]>('onDidInstallMcpServers')(results => this._onDidInstallMcpServers.fire(results.map(e => ({ ...e, local: e.local ? transformIncomingServer(e.local, null) : e.local, mcpResource: transformIncomingURI(e.mcpResource, null) })))));
-		this._register(this.channel.listen<readonly InstallMcpServerResult[]>('onDidUpdateMcpServers')(results => this._onDidUpdateMcpServers.fire(results.map(e => ({ ...e, local: e.local ? transformIncomingServer(e.local, null) : e.local, mcpResource: transformIncomingURI(e.mcpResource, null) })))));
-		this._register(this.channel.listen<UninstallMcpServerEvent>('onUninstallMcpServer')(e => this._onUninstallMcpServer.fire(({ ...e, mcpResource: transformIncomingURI(e.mcpResource, null) }))));
-		this._register(this.channel.listen<DidUninstallMcpServerEvent>('onDidUninstallMcpServer')(e => this._onDidUninstallMcpServer.fire(({ ...e, mcpResource: transformIncomingURI(e.mcpResource, null) }))));
+		this._register(this.channel.listen<InstallMcpServerEvent | null>('onInstallMcpServer')(e => {
+			const event = coerceRecord(e, 'onInstallMcpServer', this.logService);
+			if (!event) {
+				return;
+			}
+			this._onInstallMcpServer.fire({ ...event, mcpResource: transformIncomingURI(event.mcpResource, null)! });
+		}));
+		this._register(this.channel.listen<readonly (InstallMcpServerResult | null | undefined)[] | null>('onDidInstallMcpServers')(results => this._onDidInstallMcpServers.fire(compactArrayEntries(coerceArray(results, 'onDidInstallMcpServers', this.logService), 'onDidInstallMcpServers', this.logService).map(e => ({ ...e, local: e.local ? transformIncomingServer(e.local, null) : e.local, mcpResource: transformIncomingURI(e.mcpResource, null) })))));
+		this._register(this.channel.listen<readonly (InstallMcpServerResult | null | undefined)[] | null>('onDidUpdateMcpServers')(results => this._onDidUpdateMcpServers.fire(compactArrayEntries(coerceArray(results, 'onDidUpdateMcpServers', this.logService), 'onDidUpdateMcpServers', this.logService).map(e => ({ ...e, local: e.local ? transformIncomingServer(e.local, null) : e.local, mcpResource: transformIncomingURI(e.mcpResource, null) })))));
+		this._register(this.channel.listen<UninstallMcpServerEvent | null>('onUninstallMcpServer')(e => {
+			const event = coerceRecord(e, 'onUninstallMcpServer', this.logService);
+			if (!event) {
+				return;
+			}
+			this._onUninstallMcpServer.fire({ ...event, mcpResource: transformIncomingURI(event.mcpResource, null)! });
+		}));
+		this._register(this.channel.listen<DidUninstallMcpServerEvent | null>('onDidUninstallMcpServer')(e => {
+			const event = coerceRecord(e, 'onDidUninstallMcpServer', this.logService);
+			if (!event) {
+				return;
+			}
+			this._onDidUninstallMcpServer.fire({ ...event, mcpResource: transformIncomingURI(event.mcpResource, null)! });
+		}));
 	}
 
 	install(server: IInstallableMcpServer, options?: InstallOptions): Promise<ILocalMcpServer> {
@@ -163,8 +226,8 @@ export class McpManagementChannelClient extends AbstractMcpManagementService imp
 	}
 
 	getInstalled(mcpResource?: URI): Promise<ILocalMcpServer[]> {
-		return Promise.resolve(this.channel.call<ILocalMcpServer[]>('getInstalled', [mcpResource]))
-			.then(servers => servers.map(server => transformIncomingServer(server, null)));
+		return Promise.resolve(this.channel.call<ILocalMcpServer[] | null>('getInstalled', [mcpResource]))
+			.then(servers => compactArrayEntries(coerceArray(servers, 'getInstalled', this.logService), 'getInstalled', this.logService).map(server => transformIncomingServer(server, null)));
 	}
 
 	updateMetadata(local: ILocalMcpServer, gallery: IGalleryMcpServer, mcpResource?: URI): Promise<ILocalMcpServer> {

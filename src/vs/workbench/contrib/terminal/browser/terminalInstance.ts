@@ -112,17 +112,22 @@ const enum Constants {
 let xtermConstructor: Promise<typeof XTermTerminal> | undefined;
 
 async function loadXtermConstructor(): Promise<typeof XTermTerminal> {
+	if (isTauriDesktopRuntime) {
+		try {
+			const esmPath = resolveAmdNodeModulePath('@xterm/xterm', 'lib/xterm.mjs');
+			const esmModule = await import(/* @vite-ignore */ esmPath) as typeof import('@xterm/xterm');
+			if (esmModule?.Terminal) {
+				return esmModule.Terminal;
+			}
+		} catch {
+			// Fall through to the AMD path below. The packaged Tauri app is more reliable with the
+			// ESM entrypoint, but keeping the AMD fallback preserves compatibility with older layouts.
+		}
+	}
+
 	const amdModule = await importAMDNodeModule<typeof import('@xterm/xterm')>('@xterm/xterm', 'lib/xterm.js');
 	if (amdModule?.Terminal) {
 		return amdModule.Terminal;
-	}
-
-	if (isTauriDesktopRuntime) {
-		const esmPath = resolveAmdNodeModulePath('@xterm/xterm', 'lib/xterm.mjs');
-		const esmModule = await import(/* @vite-ignore */ esmPath) as typeof import('@xterm/xterm');
-		if (esmModule?.Terminal) {
-			return esmModule.Terminal;
-		}
 	}
 
 	throw new TypeError('Failed to load @xterm/xterm Terminal constructor');

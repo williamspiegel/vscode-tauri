@@ -416,7 +416,10 @@ class FileAccessImpl {
 		}
 
 		try {
-			return URI.parse(new URL(relativePath, origin).toString(), true);
+			const packagedRelativePath = relativePath.startsWith('/node_modules/')
+				? `/tauri-node-modules/${relativePath.slice('/node_modules/'.length)}`
+				: relativePath;
+			return URI.parse(new URL(packagedRelativePath, origin).toString(), true);
 		} catch {
 			return undefined;
 		}

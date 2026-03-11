@@ -11,6 +11,10 @@ import { IAnyWorkspaceIdentifier } from '../../workspace/common/workspace.js';
 import { IURITransformer, transformIncomingURIs, transformOutgoingURIs } from '../../../base/common/uriIpc.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 
+function coerceProfilesArray<T>(value: readonly T[] | null | undefined): readonly T[] {
+	return Array.isArray(value) ? value : [];
+}
+
 export class RemoteUserDataProfilesServiceChannel implements IServerChannel {
 
 	constructor(
@@ -75,10 +79,12 @@ export class UserDataProfilesService extends Disposable implements IUserDataProf
 		super();
 		this._profiles = profiles.map(profile => reviveProfile(profile, this.profilesHome.scheme));
 		this._register(this.channel.listen<DidChangeProfilesEvent>('onDidChangeProfiles')(e => {
-			const added = e.added.map(profile => reviveProfile(profile, this.profilesHome.scheme));
-			const removed = e.removed.map(profile => reviveProfile(profile, this.profilesHome.scheme));
-			const updated = e.updated.map(profile => reviveProfile(profile, this.profilesHome.scheme));
-			this._profiles = e.all.map(profile => reviveProfile(profile, this.profilesHome.scheme));
+			const added = coerceProfilesArray(e.added).map(profile => reviveProfile(profile, this.profilesHome.scheme));
+			const removed = coerceProfilesArray(e.removed).map(profile => reviveProfile(profile, this.profilesHome.scheme));
+			const updated = coerceProfilesArray(e.updated).map(profile => reviveProfile(profile, this.profilesHome.scheme));
+			if (Array.isArray(e.all)) {
+				this._profiles = e.all.map(profile => reviveProfile(profile, this.profilesHome.scheme));
+			}
 			this._onDidChangeProfiles.fire({ added, removed, updated, all: this.profiles });
 		}));
 		this.onDidResetWorkspaces = this.channel.listen<void>('onDidResetWorkspaces');

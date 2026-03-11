@@ -642,6 +642,12 @@ function determineLocalWebWorkerExtHostEnablement(environmentService: IWorkbench
 		return LocalWebWorkerExtHostEnablement.Eager;
 	} else {
 		const config = configurationService.getValue<WebWorkerExtHostConfigValue>(webWorkerExtHostConfig);
+		if (isTauriDesktopRuntime()) {
+			if (config === true) {
+				return LocalWebWorkerExtHostEnablement.Eager;
+			}
+			return LocalWebWorkerExtHostEnablement.Disabled;
+		}
 		if (config === true) {
 			return LocalWebWorkerExtHostEnablement.Eager;
 		} else if (config === 'auto') {
@@ -656,6 +662,17 @@ const enum LocalWebWorkerExtHostEnablement {
 	Disabled = 0,
 	Eager = 1,
 	Lazy = 2
+}
+
+function isTauriDesktopRuntime(): boolean {
+	const runtime = (globalThis as typeof globalThis & {
+		vscode?: {
+			process?: {
+				env?: Record<string, string | undefined>;
+			};
+		};
+	}).vscode?.process?.env?.VSCODE_DESKTOP_RUNTIME;
+	return runtime === 'electrobun';
 }
 
 export class NativeExtensionHostKindPicker implements IExtensionHostKindPicker {

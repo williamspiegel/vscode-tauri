@@ -117,11 +117,12 @@ class AMDModuleImporter {
 	}
 
 	private _shouldRetryWithInternalLoader(scriptSrc: string): boolean {
-		return scriptSrc.includes('/node_modules/');
+		return scriptSrc.includes('/node_modules/') || scriptSrc.includes('/tauri-node-modules/');
 	}
 
 	private _shouldUseInternalPatchedLoader(scriptSrc: string): boolean {
-		return scriptSrc.includes('/node_modules/@vscode/tree-sitter-wasm/wasm/tree-sitter.js');
+		return scriptSrc.includes('/node_modules/@vscode/tree-sitter-wasm/wasm/tree-sitter.js')
+			|| scriptSrc.includes('/tauri-node-modules/@vscode/tree-sitter-wasm/wasm/tree-sitter.js');
 	}
 
 	private async _loadWithCapturedDefine<T>(scriptSrc: string): Promise<T> {
@@ -256,6 +257,51 @@ class AMDModuleImporter {
 }
 
 const cache = new Map<string, Promise<any>>();
+const tauriFallbackNodeModules = new Set([
+	'@xterm/xterm',
+	'@xterm/addon-clipboard',
+	'@xterm/addon-image',
+	'@xterm/addon-ligatures',
+	'@xterm/addon-progress',
+	'@xterm/addon-search',
+	'@xterm/addon-serialize',
+	'@xterm/addon-unicode11',
+	'@xterm/addon-webgl',
+	'katex',
+	'vscode-textmate',
+	'vscode-oniguruma',
+	'@vscode/tree-sitter-wasm'
+]);
+
+function resolveTauriFallbackNodeModulePath(nodeModuleName: string, pathInsideNodeModule: string): string | undefined {
+	if (globalThis.location?.protocol !== 'tauri:' || !tauriFallbackNodeModules.has(nodeModuleName)) {
+		return undefined;
+	}
+
+	const origin = globalThis.location.origin;
+	if (typeof origin !== 'string' || origin.length === 0) {
+		return undefined;
+	}
+
+	const nodeModulePath = pathInsideNodeModule ? `${nodeModuleName}/${pathInsideNodeModule}` : nodeModuleName;
+	try {
+		return new URL(`/tauri-node-modules/${nodeModulePath}`, origin).toString();
+	} catch {
+		return undefined;
+	}
+}
+
+function shouldUseXtermEsm(nodeModuleName: string, pathInsideNodeModule: string): boolean {
+	return nodeModuleName === '@xterm/xterm' && pathInsideNodeModule === 'lib/xterm.js';
+}
+
+function getSpecialNodeModuleLoader(nodeModuleName: string, pathInsideNodeModule: string): ((scriptSrc: string) => Promise<unknown>) | undefined {
+	if (nodeModuleName === 'vscode-oniguruma' && pathInsideNodeModule === 'release/onig.wasm.js') {
+		return async (scriptSrc: string) => import(/* @vite-ignore */ scriptSrc);
+	}
+
+	return undefined;
+}
 
 /**
  * Utility for importing an AMD node module. This util supports AMD and ESM contexts and should be used while the ESM adoption
@@ -273,16 +319,37 @@ export async function importAMDNodeModule<T>(nodeModuleName: string, pathInsideN
 	if (cache.has(nodeModulePath)) {
 		return cache.get(nodeModulePath)!;
 	}
+
+	if (shouldUseXtermEsm(nodeModuleName, pathInsideNodeModule)) {
+		const esmPath = resolveTauriFallbackNodeModulePath(nodeModuleName, 'lib/xterm.mjs') ?? resolveAmdNodeModulePath(nodeModuleName, 'lib/xterm.mjs');
+		const esmResult = import(/* @vite-ignore */ esmPath) as Promise<T>;
+		cache.set(nodeModulePath, esmResult);
+		return esmResult;
+	}
+
+	const specialLoader = getSpecialNodeModuleLoader(nodeModuleName, pathInsideNodeModule);
+	if (specialLoader) {
+		const specialPath = resolveTauriFallbackNodeModulePath(nodeModuleName, pathInsideNodeModule) ?? resolveAmdNodeModulePath(nodeModuleName, pathInsideNodeModule);
+		const specialResult = specialLoader(specialPath) as Promise<T>;
+		cache.set(nodeModulePath, specialResult);
+		return specialResult;
+	}
+
 	let scriptSrc: string;
 	if (/^\w[\w\d+.-]*:\/\//.test(nodeModulePath)) {
 		// looks like a URL
 		// bit of a special case for: src/vs/workbench/services/languageDetection/browser/languageDetectionWebWorker.ts
 		scriptSrc = nodeModulePath;
 	} else {
-		const useASAR = (canASAR && isBuilt && !platform.isWeb);
-		const actualNodeModulesPath = (useASAR ? nodeModulesAsarPath : nodeModulesPath);
-		const resourcePath: AppResourcePath = `${actualNodeModulesPath}/${nodeModulePath}`;
-		scriptSrc = FileAccess.asBrowserUri(resourcePath).toString(true);
+		const tauriFallbackPath = resolveTauriFallbackNodeModulePath(nodeModuleName, pathInsideNodeModule);
+		if (tauriFallbackPath) {
+			scriptSrc = tauriFallbackPath;
+		} else {
+			const useASAR = (canASAR && isBuilt && !platform.isWeb);
+			const actualNodeModulesPath = (useASAR ? nodeModulesAsarPath : nodeModulesPath);
+			const resourcePath: AppResourcePath = `${actualNodeModulesPath}/${nodeModulePath}`;
+			scriptSrc = FileAccess.asBrowserUri(resourcePath).toString(true);
+		}
 	}
 	const result = AMDModuleImporter.INSTANCE.load<T>(scriptSrc).catch(error => {
 		console.error(`[amdX] Failed to load '${nodeModulePath}' from '${scriptSrc}'`, error);
@@ -293,6 +360,11 @@ export async function importAMDNodeModule<T>(nodeModuleName: string, pathInsideN
 }
 
 export function resolveAmdNodeModulePath(nodeModuleName: string, pathInsideNodeModule: string): string {
+	const tauriFallbackPath = resolveTauriFallbackNodeModulePath(nodeModuleName, pathInsideNodeModule);
+	if (tauriFallbackPath) {
+		return tauriFallbackPath;
+	}
+
 	const product = globalThis._VSCODE_PRODUCT_JSON as unknown as IProductConfiguration;
 	const isBuilt = Boolean((product ?? globalThis.vscode?.context?.configuration()?.product)?.commit);
 	const useASAR = (canASAR && isBuilt && !platform.isWeb);

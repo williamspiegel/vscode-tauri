@@ -14,6 +14,10 @@ import { DidChangeProfilesEvent, IUserDataProfile, IUserDataProfilesService, rev
 
 type BroadcastedProfileChanges = UriDto<Omit<DidChangeProfilesEvent, 'all'>>;
 
+function coerceProfilesArray<T>(value: readonly T[] | null | undefined): readonly T[] {
+	return Array.isArray(value) ? value : [];
+}
+
 export class BrowserUserDataProfilesService extends UserDataProfilesService implements IUserDataProfilesService {
 
 	private readonly changesBroadcastChannel: BroadcastDataChannel<BroadcastedProfileChanges>;
@@ -29,9 +33,9 @@ export class BrowserUserDataProfilesService extends UserDataProfilesService impl
 		this._register(this.changesBroadcastChannel.onDidReceiveData(changes => {
 			try {
 				this._profilesObject = undefined;
-				const added = changes.added.map(p => reviveProfile(p, this.profilesHome.scheme));
-				const removed = changes.removed.map(p => reviveProfile(p, this.profilesHome.scheme));
-				const updated = changes.updated.map(p => reviveProfile(p, this.profilesHome.scheme));
+				const added = coerceProfilesArray(changes.added).map(p => reviveProfile(p, this.profilesHome.scheme));
+				const removed = coerceProfilesArray(changes.removed).map(p => reviveProfile(p, this.profilesHome.scheme));
+				const updated = coerceProfilesArray(changes.updated).map(p => reviveProfile(p, this.profilesHome.scheme));
 
 				this.updateTransientProfiles(
 					added.filter(a => a.isTransient),

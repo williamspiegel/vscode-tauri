@@ -1188,9 +1188,6 @@ function installGlobalStartupErrorHandlers(): void {
 			event.preventDefault();
 			return;
 		}
-		if (!startupPhaseActive) {
-			return;
-		}
 		const detailParts: string[] = [];
 		if (event.error instanceof Error) {
 			if (event.error.message) {
@@ -1222,15 +1219,7 @@ function installGlobalStartupErrorHandlers(): void {
 			detail.includes("valid JavaScript MIME type"),
 		);
 		if (includesMimeFailure) {
-			const recentResources = performance
-				.getEntriesByType("resource")
-				.filter(
-					(entry): entry is PerformanceResourceTiming =>
-						entry instanceof PerformanceResourceTiming,
-				)
-				.sort((left, right) => right.startTime - left.startTime)
-				.slice(0, 5)
-				.map((entry) => entry.name);
+			const recentResources = collectRecentResourceDetails();
 			if (recentResources.length > 0) {
 				detailParts.push(
 					`recentResources=${recentResources.join(" | ")}`,
@@ -1239,6 +1228,10 @@ function installGlobalStartupErrorHandlers(): void {
 		}
 		const [message = "Unknown window error", ...detailLines] = detailParts;
 		const detail = detailLines.length > 0 ? detailLines.join("\n") : undefined;
+		if (!startupPhaseActive) {
+			void reportRendererFailureToHost("ui.runtime.windowError", message, detail);
+			return;
+		}
 		const statusDetail = detail ? `\n${detail}` : "";
 		setStatus(`Startup failed:\n${message}${statusDetail}`, "error", true);
 		void reportStartupFailureToHost(message, detail).finally(() =>
@@ -1252,25 +1245,18 @@ function installGlobalStartupErrorHandlers(): void {
 			event.preventDefault();
 			return;
 		}
-		if (!startupPhaseActive) {
-			return;
-		}
 		const reason = event.reason;
 		const message =
 			reason instanceof Error
 				? (reason.stack ?? reason.message)
 				: String(reason ?? "Unknown rejection");
 		const detailParts = [message];
+		const structuredReason = describeUnknownError(reason);
+		if (structuredReason) {
+			detailParts.push(`reasonObject=${structuredReason}`);
+		}
 		if (message.includes("valid JavaScript MIME type")) {
-			const recentResources = performance
-				.getEntriesByType("resource")
-				.filter(
-					(entry): entry is PerformanceResourceTiming =>
-						entry instanceof PerformanceResourceTiming,
-				)
-				.sort((left, right) => right.startTime - left.startTime)
-				.slice(0, 5)
-				.map((entry) => entry.name);
+			const recentResources = collectRecentResourceDetails();
 			if (recentResources.length > 0) {
 				detailParts.push(
 					`recentResources=${recentResources.join(" | ")}`,
@@ -1279,6 +1265,14 @@ function installGlobalStartupErrorHandlers(): void {
 		}
 		const [, ...detailLines] = detailParts;
 		const detail = detailLines.length > 0 ? detailLines.join("\n") : undefined;
+		if (!startupPhaseActive) {
+			void reportRendererFailureToHost(
+				"ui.runtime.unhandledRejection",
+				message,
+				detail,
+			);
+			return;
+		}
 		const statusDetail = detail ? `\n${detail}` : "";
 		setStatus(`Startup failed:\n${message}${statusDetail}`, "error", true);
 		void reportStartupFailureToHost(message, detail).finally(() =>
@@ -1310,6 +1304,68 @@ function formatErrorDetails(error: unknown): string {
 	} catch {
 		return String(error);
 	}
+}
+
+function describeUnknownError(value: unknown): string | undefined {
+	if (value === null || value === undefined) {
+		return undefined;
+	}
+
+	if (value instanceof Error || typeof value === "string") {
+		return undefined;
+	}
+
+	if (typeof value !== "object") {
+		return undefined;
+	}
+
+	const record = value as Record<string, unknown>;
+	const summary: Record<string, unknown> = {};
+	for (const key of [
+		"name",
+		"message",
+		"stack",
+		"code",
+		"url",
+		"filename",
+		"src",
+		"href",
+		"moduleName",
+		"specifier",
+		"type",
+		"reason",
+	]) {
+		const candidate = record[key];
+		if (
+			typeof candidate === "string" ||
+			typeof candidate === "number" ||
+			typeof candidate === "boolean"
+		) {
+			summary[key] = candidate;
+		}
+	}
+
+	if (Object.keys(summary).length === 0) {
+		return undefined;
+	}
+
+	try {
+		return JSON.stringify(summary);
+	} catch {
+		return String(summary);
+	}
+}
+
+function collectRecentResourceDetails(limit = 8): string[] {
+	return performance
+		.getEntriesByType("resource")
+		.filter(
+			(entry): entry is PerformanceResourceTiming =>
+				entry instanceof PerformanceResourceTiming,
+		)
+		.sort((left, right) => right.startTime - left.startTime)
+		.slice(0, limit)
+		.map((entry) => `${entry.initiatorType || "unknown"} ${entry.name}`);
 }
 
 function formatAutomationArg(value: unknown): string {
@@ -1515,6 +1571,14 @@ async function reportStartupFailureToHost(
 	message: string,
 	detail?: string,
 ): Promise<void> {
+	return reportRendererFailureToHost("ui.startup", message, detail);
+}
+
+async function reportRendererFailureToHost(
+	source: string,
+	message: string,
+	detail?: string,
+): Promise<void> {
 	if (!startupHost) {
 		return;
 	}
@@ -1522,7 +1586,7 @@ async function reportStartupFailureToHost(
 	try {
 		await startupHost.invokeMethod("host.log", {
 			level: "error",
-			source: "ui.startup",
+			source,
 			message,
 			detail,
 		});

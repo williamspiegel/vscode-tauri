@@ -17,6 +17,7 @@ const fallbackNodeModulePackages = new Set([
   '@xterm/addon-serialize',
   '@xterm/addon-unicode11',
   '@xterm/addon-webgl',
+  'katex',
   'vscode-textmate',
   'vscode-oniguruma',
   '@vscode/tree-sitter-wasm'
@@ -73,11 +74,16 @@ function resolveFallbackNodeModulePath(url: string | undefined): string | undefi
   }
 
   const pathname = url.split('?', 1)[0].split('#', 1)[0];
-  if (!pathname.startsWith('/node_modules/')) {
+  const prefix = pathname.startsWith('/tauri-node-modules/')
+    ? '/tauri-node-modules/'
+    : pathname.startsWith('/node_modules/')
+      ? '/node_modules/'
+      : undefined;
+  if (!prefix) {
     return undefined;
   }
 
-  const relativePath = pathname.slice('/node_modules/'.length);
+  const relativePath = pathname.slice(prefix.length);
   if (!relativePath || relativePath.includes('\0')) {
     return undefined;
   }
@@ -114,11 +120,16 @@ function isFallbackNodeModuleRequest(url: string | undefined): boolean {
   }
 
   const pathname = url.split('?', 1)[0].split('#', 1)[0];
-  if (!pathname.startsWith('/node_modules/')) {
+  const prefix = pathname.startsWith('/tauri-node-modules/')
+    ? '/tauri-node-modules/'
+    : pathname.startsWith('/node_modules/')
+      ? '/node_modules/'
+      : undefined;
+  if (!prefix) {
     return false;
   }
 
-  const relativePath = pathname.slice('/node_modules/'.length);
+  const relativePath = pathname.slice(prefix.length);
   if (!relativePath || relativePath.includes('\0')) {
     return false;
   }

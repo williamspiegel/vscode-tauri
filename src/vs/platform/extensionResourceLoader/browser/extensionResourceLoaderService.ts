@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../base/common/uri.js';
+import { VSBuffer } from '../../../base/common/buffer.js';
 import { InstantiationType, registerSingleton } from '../../instantiation/common/extensions.js';
 import { IFileService } from '../../files/common/files.js';
 import { FileAccess, Schemas } from '../../../base/common/network.js';
@@ -32,25 +33,29 @@ class ExtensionResourceLoaderService extends AbstractExtensionResourceLoaderServ
 	}
 
 	async readExtensionResource(uri: URI): Promise<string> {
+		return (await this.readExtensionResourceBinary(uri)).toString();
+	}
+
+	async readExtensionResourceBinary(uri: URI): Promise<VSBuffer> {
 		if (uri.scheme === Schemas.file || uri.scheme === Schemas.vscodeFileResource) {
 			const fileUri = FileAccess.uriToFileUri(uri);
 			if (this._fileService.hasProvider(fileUri)) {
 				const result = await this._fileService.readFile(fileUri);
-				return result.value.toString();
+				return result.value;
 			}
 		}
 
 		const runtime = (globalThis as { vscode?: { process?: { env?: Record<string, string | undefined> } } }).vscode?.process?.env?.VSCODE_DESKTOP_RUNTIME;
 		if (runtime === 'electrobun' && (uri.scheme === Schemas.file || uri.scheme === Schemas.vscodeFileResource)) {
 			const result = await this._fileService.readFile(FileAccess.uriToFileUri(uri));
-			return result.value.toString();
+			return result.value;
 		}
 
 		uri = FileAccess.uriToBrowserUri(uri);
 
 		if (uri.scheme !== Schemas.http && uri.scheme !== Schemas.https && uri.scheme !== Schemas.data) {
 			const result = await this._fileService.readFile(uri);
-			return result.value.toString();
+			return result.value;
 		}
 
 		const requestInit: RequestInit = {};
@@ -64,7 +69,7 @@ class ExtensionResourceLoaderService extends AbstractExtensionResourceLoaderServ
 			this._logService.info(`Request to '${uri.toString(true)}' failed with status code ${response.status}`);
 			throw new Error(response.statusText);
 		}
-		return response.text();
+		return VSBuffer.wrap(new Uint8Array(await response.arrayBuffer()));
 	}
 }
 

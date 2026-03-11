@@ -406,6 +406,12 @@ export class TextMateTokenizationFeature extends Disposable implements ITextMate
 			// We therefore use the non-streaming compiler :(.
 			return await response.arrayBuffer();
 		} else {
+			if (typeof process !== 'undefined' && process.env?.VSCODE_DESKTOP_RUNTIME === 'electrobun') {
+				const wasmModule = await importAMDNodeModule<{ default?: ArrayBuffer }>('vscode-oniguruma', 'release/onig.wasm.js');
+				if (wasmModule?.default instanceof ArrayBuffer) {
+					return wasmModule.default;
+				}
+			}
 			const response = await fetch(canASAR && this._environmentService.isBuilt
 				? FileAccess.asBrowserUri(`${nodeModulesAsarUnpackedPath}/vscode-oniguruma/release/onig.wasm`).toString(true)
 				: FileAccess.asBrowserUri(`${nodeModulesPath}/vscode-oniguruma/release/onig.wasm`).toString(true));

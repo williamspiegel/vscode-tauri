@@ -5,6 +5,7 @@
 
 import { timeout } from '../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../base/common/cancellation.js';
+import { isCancellationError, onUnexpectedError } from '../../../base/common/errors.js';
 import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../base/common/lifecycle.js';
 import { IKeyMods, IQuickPickDidAcceptEvent, IQuickPickSeparator, IQuickPick, IQuickPickItem, IQuickInputButton } from '../common/quickInput.js';
 import { IQuickAccessProvider, IQuickAccessProviderRunOptions } from '../common/quickAccess.js';
@@ -322,8 +323,15 @@ export abstract class PickerQuickAccessProvider<T extends IPickerQuickAccessItem
 				}
 			}
 		};
-		disposables.add(picker.onDidChangeValue(() => updatePickerItems()));
-		updatePickerItems();
+		const triggerUpdatePickerItems = () => {
+			void updatePickerItems().catch(error => {
+				if (!isCancellationError(error)) {
+					onUnexpectedError(error);
+				}
+			});
+		};
+		disposables.add(picker.onDidChangeValue(() => triggerUpdatePickerItems()));
+		triggerUpdatePickerItems();
 
 		// Accept the pick on accept and hide picker
 		disposables.add(picker.onDidAccept(event => {
@@ -366,7 +374,7 @@ export abstract class PickerQuickAccessProvider<T extends IPickerQuickAccessItem
 						picker.hide();
 						break;
 					case TriggerAction.REFRESH_PICKER:
-						updatePickerItems();
+						triggerUpdatePickerItems();
 						break;
 					case TriggerAction.REMOVE_ITEM: {
 						const index = picker.items.indexOf(item);

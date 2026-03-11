@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../base/common/uri.js';
+import { VSBuffer } from '../../../base/common/buffer.js';
 import { InstantiationType, registerSingleton } from '../../instantiation/common/extensions.js';
 import { IFileService } from '../../files/common/files.js';
 import { IProductService } from '../../product/common/productService.js';
@@ -32,13 +33,17 @@ export class ExtensionResourceLoaderService extends AbstractExtensionResourceLoa
 	}
 
 	async readExtensionResource(uri: URI): Promise<string> {
+		return (await this.readExtensionResourceBinary(uri)).toString();
+	}
+
+	async readExtensionResourceBinary(uri: URI): Promise<VSBuffer> {
 		if (await this.isExtensionGalleryResource(uri)) {
 			const headers = await this.getExtensionGalleryRequestHeaders();
 			const requestContext = await this._requestService.request({ url: uri.toString(), headers }, CancellationToken.None);
-			return (await asTextOrError(requestContext)) || '';
+			return VSBuffer.fromString((await asTextOrError(requestContext)) || '');
 		}
 		const result = await this._fileService.readFile(uri);
-		return result.value.toString();
+		return result.value;
 	}
 
 }

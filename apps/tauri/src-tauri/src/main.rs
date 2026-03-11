@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -142,6 +143,14 @@ struct ExtensionHostBridgeEnvEntry {
 }
 
 impl AppState {
+    fn host_log_file_path(&self) -> Option<PathBuf> {
+        let config = self.window_config().ok()?;
+        let logs_path = config.get("logsPath")?.as_str()?;
+        let logs_dir = PathBuf::from(logs_path);
+        let _ = fs::create_dir_all(&logs_dir);
+        Some(logs_dir.join("tauri-host.log"))
+    }
+
     fn handle_ipc_send(&self, method: &str, args: &Value) -> Result<Value, String> {
         match method {
             IPC_CONTEXT_MENU_CHANNEL => {
@@ -2018,6 +2027,30 @@ async fn host_invoke(
             println!("{prefix} message={message}\n{detail}");
         }
 
+        if let Some(log_file_path) = state.host_log_file_path() {
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_file_path)
+            {
+                let timestamp = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or_default();
+                let _ = if detail.is_empty() {
+                    writeln!(
+                        file,
+                        "[{timestamp}] level={level} source={source} message={message}"
+                    )
+                } else {
+                    writeln!(
+                        file,
+                        "[{timestamp}] level={level} source={source} message={message}\n{detail}"
+                    )
+                };
+            }
+        }
+
         return Ok(ok_response(request.id, json!({ "logged": true })));
     }
 
@@ -3266,16 +3299,18 @@ fn read_nls_messages(repo_root: &Path) -> Result<Vec<String>, String> {
     let candidate_paths = [
         repo_root.join("out/nls.messages.json"),
         repo_root.join("out-vscode-min/nls.messages.json"),
+        repo_root.join("out-build/nls.messages.json"),
     ];
+    let mut errors: Vec<String> = Vec::new();
 
     for path in candidate_paths {
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                eprintln!(
+                errors.push(format!(
                     "warning: missing NLS messages at {}: {error}",
                     path.display()
-                );
+                ));
                 continue;
             }
         };
@@ -3283,12 +3318,16 @@ fn read_nls_messages(repo_root: &Path) -> Result<Vec<String>, String> {
         match serde_json::from_slice::<Vec<String>>(&bytes) {
             Ok(messages) => return Ok(messages),
             Err(error) => {
-                eprintln!(
+                errors.push(format!(
                     "warning: failed to parse NLS messages at {}: {error}",
                     path.display()
-                );
+                ));
             }
         }
+    }
+
+    for error in errors {
+        eprintln!("{error}");
     }
 
     // Keep startup alive when neither NLS table is available.
@@ -3635,6 +3674,28 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn read_nls_messages_uses_out_build_without_erroring_on_missing_out() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "vscode-tauri-nls-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_root.join("out-build")).expect("temp out-build should be created");
+        fs::write(
+            temp_root.join("out-build/nls.messages.json"),
+            serde_json::to_vec(&vec!["hello", "world"]).expect("nls json should serialize"),
+        )
+        .expect("nls messages should be written");
+
+        let messages = read_nls_messages(&temp_root).expect("nls messages should load");
+        assert_eq!(messages, vec!["hello".to_string(), "world".to_string()]);
+
+        fs::remove_dir_all(&temp_root).expect("temp root should be removed");
     }
 }
 

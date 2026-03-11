@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { isWeb } from '../../../base/common/platform.js';
+import { VSBuffer } from '../../../base/common/buffer.js';
 import { format2 } from '../../../base/common/strings.js';
 import { URI } from '../../../base/common/uri.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
@@ -35,6 +36,11 @@ export interface IExtensionResourceLoaderService {
 	 * Read a certain resource within an extension.
 	 */
 	readExtensionResource(uri: URI): Promise<string>;
+
+	/**
+	 * Read a certain resource within an extension as bytes.
+	 */
+	readExtensionResourceBinary(uri: URI): Promise<VSBuffer>;
 
 	/**
 	 * Returns whether the gallery provides extension resources.
@@ -126,6 +132,7 @@ export abstract class AbstractExtensionResourceLoaderService extends Disposable 
 	}
 
 	public abstract readExtensionResource(uri: URI): Promise<string>;
+	public abstract readExtensionResourceBinary(uri: URI): Promise<VSBuffer>;
 
 	async isExtensionGalleryResource(uri: URI): Promise<boolean> {
 		await this._initPromise;

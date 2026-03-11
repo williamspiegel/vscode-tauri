@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
+import { encodeBase64 } from '../../../../base/common/buffer.js';
 import * as nls from '../../../../nls.js';
 import * as paths from '../../../../base/common/path.js';
 import * as resources from '../../../../base/common/resources.js';
@@ -205,8 +206,8 @@ export class FileIconThemeLoader {
 		if (!data.location) {
 			return Promise.resolve(data.styleSheetContent);
 		}
-		return this.loadIconThemeDocument(data.location).then(iconThemeDocument => {
-			const result = this.processIconThemeDocument(data.id, data.location!, iconThemeDocument);
+		return this.loadIconThemeDocument(data.location).then(async iconThemeDocument => {
+			const result = await this.processIconThemeDocument(data.id, data.location!, iconThemeDocument);
 			data.styleSheetContent = result.content;
 			data.hasFileIcons = result.hasFileIcons;
 			data.hasFolderIcons = result.hasFolderIcons;
@@ -229,7 +230,7 @@ export class FileIconThemeLoader {
 		});
 	}
 
-	private processIconThemeDocument(id: string, iconThemeDocumentLocation: URI, iconThemeDocument: IconThemeDocument): { content: string; hasFileIcons: boolean; hasFolderIcons: boolean; hidesExplorerArrows: boolean } {
+	private async processIconThemeDocument(id: string, iconThemeDocumentLocation: URI, iconThemeDocument: IconThemeDocument): Promise<{ content: string; hasFileIcons: boolean; hasFolderIcons: boolean; hidesExplorerArrows: boolean }> {
 
 		const result = { content: '', hasFileIcons: false, hasFolderIcons: false, hidesExplorerArrows: !!iconThemeDocument.hidesExplorerArrows };
 
@@ -398,16 +399,18 @@ export class FileIconThemeLoader {
 		const fontSizes = new Map<string, string>();
 		if (Array.isArray(fonts)) {
 			const defaultFontSize = this.tryNormalizeFontSize(fonts[0].size) || '150%';
-			fonts.forEach(font => {
+			for (const font of fonts) {
 				const fontSrcs = new css.Builder();
-				fontSrcs.push(...font.src.map(l => css.inline`${css.asCSSUrl(resolvePath(l.path))} format(${css.stringValue(l.format)})`));
+				for (const src of font.src) {
+					fontSrcs.push(css.inline`${await this.asThemeAssetCSSUrl(resolvePath(src.path))} format(${css.stringValue(src.format)})`);
+				}
 				cssRules.push(css.inline`@font-face { src: ${fontSrcs.join(', ')}; font-family: ${css.stringValue(font.id)}; font-weight: ${css.identValue(font.weight)}; font-style: ${css.identValue(font.style)}; font-display: block; }`);
 
 				const fontSize = this.tryNormalizeFontSize(font.size);
 				if (fontSize !== undefined && fontSize !== defaultFontSize) {
 					fontSizes.set(font.id, fontSize);
 				}
-			});
+			}
 			cssRules.push(css.inline`.show-file-icons .file-icon::before, .show-file-icons .folder-icon::before, .show-file-icons .rootfolder-icon::before { font-family: ${css.stringValue(fonts[0].id)}; font-size: ${css.sizeValue(defaultFontSize)}; }`);
 		}
 
@@ -419,7 +422,7 @@ export class FileIconThemeLoader {
 			const definition = iconThemeDocument.iconDefinitions[defId];
 			if (definition) {
 				if (definition.iconPath) {
-					cssRules.push(css.inline`${selectors.join(', ')} { content: ${emQuad}; background-image: ${css.asCSSUrl(resolvePath(definition.iconPath))}; }`);
+					cssRules.push(css.inline`${selectors.join(', ')} { content: ${emQuad}; background-image: ${await this.asThemeAssetCSSUrl(resolvePath(definition.iconPath))}; }`);
 				} else if (definition.fontCharacter || definition.fontColor) {
 					const body = new css.Builder();
 					if (definition.fontColor && definition.fontColor.match(fontColorRegex)) {
@@ -449,8 +452,8 @@ export class FileIconThemeLoader {
 					const icon = this.languageService.getIcon(languageId);
 					if (icon) {
 						const selector = css.inline`.show-file-icons .${classSelectorPart(languageId)}-lang-file-icon.file-icon::before`;
-						cssRules.push(css.inline`${selector} { content: ${emQuad}; background-image: ${css.asCSSUrl(icon.dark)}; }`);
-						cssRules.push(css.inline`.vs ${selector} { content: ${emQuad}; background-image: ${css.asCSSUrl(icon.light)}; }`);
+						cssRules.push(css.inline`${selector} { content: ${emQuad}; background-image: ${await this.asThemeAssetCSSUrl(icon.dark)}; }`);
+						cssRules.push(css.inline`.vs ${selector} { content: ${emQuad}; background-image: ${await this.asThemeAssetCSSUrl(icon.light)}; }`);
 					}
 				}
 			}
@@ -480,6 +483,40 @@ export class FileIconThemeLoader {
 		}
 
 		return size;
+	}
+
+	private async asThemeAssetCSSUrl(uri: URI): Promise<css.CssFragment> {
+		if (!this.shouldInlineThemeAsset(uri)) {
+			return css.asCSSUrl(uri);
+		}
+
+		try {
+			const data = await this.fileService.readExtensionResourceBinary(uri);
+			return css.inline`url(${css.stringValue(`data:${this.getThemeAssetMimeType(uri)};base64,${encodeBase64(data)}`)})`;
+		} catch {
+			return css.asCSSUrl(uri);
+		}
+	}
+
+	private shouldInlineThemeAsset(uri: URI): boolean {
+		const runtime = (globalThis as { vscode?: { process?: { env?: Record<string, string | undefined> } } }).vscode?.process?.env?.VSCODE_DESKTOP_RUNTIME;
+		return runtime === 'electrobun' && (uri.scheme === 'file' || uri.scheme === 'vscode-file');
+	}
+
+	private getThemeAssetMimeType(uri: URI): string {
+		switch (paths.extname(uri.path).toLowerCase()) {
+			case '.svg': return 'image/svg+xml';
+			case '.png': return 'image/png';
+			case '.jpg':
+			case '.jpeg': return 'image/jpeg';
+			case '.gif': return 'image/gif';
+			case '.webp': return 'image/webp';
+			case '.woff': return 'font/woff';
+			case '.woff2': return 'font/woff2';
+			case '.ttf': return 'font/ttf';
+			case '.otf': return 'font/otf';
+			default: return 'application/octet-stream';
+		}
 	}
 }
 

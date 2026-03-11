@@ -195,6 +195,11 @@ suite('Watcher Events Normalizer', () => {
 		disposables.clear();
 	});
 
+	test('reviveFileChanges tolerates null arrays from IPC', () => {
+		assert.deepStrictEqual(reviveFileChanges(null), []);
+		assert.deepStrictEqual(reviveFileChanges(undefined), []);
+	});
+
 	test('simple add/update/delete', done => {
 		const watch = disposables.add(new TestFileWatcher());
 
