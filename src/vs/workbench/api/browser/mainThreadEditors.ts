@@ -133,7 +133,13 @@ export class MainThreadTextEditors implements MainThreadTextEditorsShape {
 	private _getTextEditorPositionData(): ITextEditorPositionData {
 		const result: ITextEditorPositionData = Object.create(null);
 		for (const editorPane of this._editorService.visibleEditorPanes) {
-			const id = this._editorLocator.findTextEditorIdFor(editorPane);
+			let id = this._editorLocator.findTextEditorIdFor(editorPane);
+			if (!id) {
+				const codeEditor = getCodeEditor(editorPane.getControl());
+				if (codeEditor) {
+					id = this._editorLocator.ensureTextEditorForCodeEditor(codeEditor);
+				}
+			}
 			if (id) {
 				result[id] = editorGroupToColumn(this._editorGroupService, editorPane.group);
 			}

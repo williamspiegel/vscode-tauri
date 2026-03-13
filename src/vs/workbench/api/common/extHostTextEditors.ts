@@ -275,7 +275,7 @@ export class ExtHostEditors extends Disposable implements ExtHostEditorsShape {
 		for (const id in data) {
 			const textEditor = this._extHostDocumentsAndEditors.getEditor(id);
 			if (!textEditor) {
-				throw new Error('Unknown text editor');
+				continue;
 			}
 			const viewColumn = TypeConverters.ViewColumn.to(data[id]);
 			if (textEditor.value.viewColumn !== viewColumn) {

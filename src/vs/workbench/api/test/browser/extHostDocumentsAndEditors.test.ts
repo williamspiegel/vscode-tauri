@@ -7,6 +7,7 @@ import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
 import { ExtHostDocuments } from '../../common/extHostDocuments.js';
 import { ExtHostDocumentsAndEditors } from '../../common/extHostDocumentsAndEditors.js';
+import { ExtHostEditors } from '../../common/extHostTextEditors.js';
 import { SingleProxyRPCProtocol, TestRPCProtocol } from '../common/testRPCProtocol.js';
 import { NullLogService } from '../../../../platform/log/common/log.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
@@ -165,6 +166,18 @@ suite('ExtHostDocumentsAndEditors', () => {
 
 		assert.strictEqual(editors.activeEditor(), undefined);
 		assert.strictEqual(editors.activeEditor(true), undefined);
+	});
+
+	test('ignores position updates for editors that are not yet mirrored in the ext host', () => {
+		const extHostEditors = new ExtHostEditors(SingleProxyRPCProtocol(null), editors);
+
+		assert.doesNotThrow(() => {
+			extHostEditors.$acceptEditorPositionData({
+				'editor-missing': 1
+			});
+		});
+
+		extHostEditors.dispose();
 	});
 
 });
